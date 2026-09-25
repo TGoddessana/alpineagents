@@ -46,6 +46,11 @@ dev = [
 mcp = [
     "mcp>=2.2",
 ]
+docs = [
+    "mkdocs<2",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alpineagents"]

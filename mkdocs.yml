@@ -1,0 +1,66 @@
+site_name: alpineagents
+site_description: Python agent framework where the agent loop is a function you write
+site_url: https://tgoddessana.github.io/alpineagents/
+repo_url: https://github.com/TGoddessana/alpineagents
+repo_name: TGoddessana/alpineagents
+edit_uri: ""
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      check_paths: true
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            filters: ["!^_"]
+            members_order: source
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+nav:
+  - Home: index.md
+  - API reference:
+      - Agent: api/agent.md
+      - State: api/state.md
+      - Loops and blocks: api/loops.md
+      - Tools and MCP: api/tools.md
+      - Models: api/models.md
+      - Reporter, Human, Terminal: api/io.md
+      - Data types: api/types.md
+      - Errors: api/errors.md
+      - Testing: api/testing.md

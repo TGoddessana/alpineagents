@@ -1,7 +1,7 @@
 # alpineagents
 
 [![CI](https://github.com/TGoddessana/alpineagents/actions/workflows/ci.yml/badge.svg)](https://github.com/TGoddessana/alpineagents/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/TGoddessana/alpineagents/blob/main/LICENSE)
 
 A Python agent framework where the agent loop is a function you write.
 
@@ -50,43 +50,49 @@ agent = Agent(model="claude-sonnet-5", tools=[web_search])
 print(agent.run("Find out whether a Python package called alpineagents already exists"))
 ```
 
-Add pieces one at a time, only as needed. Here with a tool object, a hand-written loop, a compaction block and a look
-at the result:
+A small coding agent. Each tool is a plain function, and the loop is written out so you can change it:
 
 ```python
 from pathlib import Path
 from alpineagents import Agent, State, loop, tool
 from alpineagents.blocks import compact_if_full
 
-class FileSystem:
-    def __init__(self, root: str = "."):
-        self.root = Path(root)
+@tool
+def list_files(folder: str = ".") -> list[str]:
+    """List the files in a folder"""
+    return sorted(p.name for p in Path(folder).iterdir())
 
-    @tool
-    def read_file(self, path: str) -> str:
-        """Read a file's contents"""
-        file = self.root / path
-        if not file.exists():
-            return f"No such file: {path}"
-        return file.read_text()
+@tool
+def read_file(path: str) -> str:
+    """Read a file"""
+    file = Path(path)
+    return file.read_text() if file.exists() else f"No such file: {path}"
 
-@loop(until=State.is_answered, limit=50)
+@tool
+def write_file(path: str, content: str) -> None:
+    """Create a file, or replace its content"""
+    Path(path).write_text(content)
+
+@tool
+def delete_file(path: str) -> None:
+    """Delete a file"""
+    Path(path).unlink(missing_ok=True)
+
+@loop(until=State.is_answered, limit=30)
 def coding(agent: Agent, state: State):
-    compact_if_full(agent, state)
+    compact_if_full(agent, state)  # summarize the conversation when the context is over 60% full
     agent.think(state)
     if state.wants_tools():
         agent.use_tools(state)
 
 agent = Agent(
     model="claude-sonnet-5",
-    system="You are a coding assistant",
-    tools=[FileSystem(), web_search],
+    system="You are a coding assistant. Read a file before you change it.",
+    tools=[list_files, read_file, write_file, delete_file],
     loop=coding,
 )
 
-state = State("Find the bug in this repo")
-answer = agent.run(state)
-print(state.stopped_by, state.usage.cost)
+print(agent.run("Add a test for the add() function in calc.py"))
 ```
 
 ## Core concepts
@@ -208,4 +214,4 @@ Run this repository's tests like this:
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/TGoddessana/alpineagents/blob/main/LICENSE).
