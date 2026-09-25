@@ -73,16 +73,21 @@ def wait_sync(future: Future[Any]) -> Any:
 
 
 class MCP:
-    """An MCP server: ``MCP(command, name=...)`` (stdio), ``MCP(url=..., name=...)`` (Streamable HTTP), or
-    ``MCP(server=..., name=...)`` (anything ``mcp.Client`` accepts, such as an in-process ``MCPServer``).
+    """An MCP server, put in ``Agent(tools=[...])`` like any other tool. Needs ``pip install "alpineagents[mcp]"``.
 
-    - ``name`` is required: tools show up as ``{name}__{tool}``. Letters, digits, ``-`` and single ``_``.
-    - ``env``: extra environment variables for a command (added to the MCP SDK's safe default environment).
-    - ``headers``: HTTP headers for a URL (e.g. ``{"Authorization": "Bearer ..."}``).
-    - ``timeout``: seconds to wait for connecting and for each call (``None``: no limit).
+    The model sees the server's tools as ``{name}__{tool}``, e.g. ``github__create_issue``. To give the Agent
+    only one tool, pass ``gh.search_code``, or ``gh["search-code"]`` for a name that is not a Python identifier.
 
-    Mistakes are reported here: no server or more than one, a missing or invalid ``name``, ``env`` without a
-    command, ``headers`` without a URL.
+    ``agent.run`` connects the servers and disconnects them when it ends. ``with agent:`` (or
+    ``async with agent:``) keeps them connected across runs. Agents and concurrent runs that share one ``MCP``
+    object share one connection.
+
+    Example:
+        ```python
+        github = MCP("npx -y @modelcontextprotocol/server-github", name="github", env={"GITHUB_TOKEN": token})
+        linear = MCP(url="https://mcp.linear.app/mcp", name="linear", headers={"Authorization": f"Bearer {key}"})
+        agent = Agent(model="claude-sonnet-5", tools=[github, linear.list_issues])
+        ```
     """
 
     def __init__(
@@ -97,6 +102,23 @@ class MCP:
         cwd: str | None = None,
         timeout: float | None = None,
     ) -> None:
+        """Takes exactly one of ``command``, ``url`` or ``server``. Nothing connects until the Agent uses it.
+
+        Args:
+            command: The command that starts a stdio server.
+            name: Required. Letters, digits, ``-`` and single ``_``. Prefixes the tool names.
+            url: The URL of a Streamable HTTP server.
+            server: Anything ``mcp.Client`` accepts, such as an in-process server in tests.
+            env: Extra environment variables for ``command``, added to the MCP SDK's safe default environment.
+            headers: HTTP headers for ``url``, e.g. ``{"Authorization": "Bearer ..."}``.
+            cwd: The working directory for ``command``.
+            timeout: Seconds to wait for connecting and for each call. ``None`` waits without a limit.
+
+        Raises:
+            TypeError: No server or more than one is given, ``env`` without ``command``, or ``headers`` without
+                ``url``.
+            ValueError: ``name`` is missing or not allowed, or ``command`` is empty.
+        """
         given = [label for label, value in (("command", command), ("url", url), ("server", server)) if value]
         if len(given) != 1:
             raise TypeError(
@@ -130,13 +152,21 @@ class MCP:
             raise TypeError(fix_message("headers= is for a server reached by url=", "Remove headers="))
 
         self.name = name
+        """The server name that prefixes its tool names."""
         self.command = command
+        """The command that starts a stdio server, or ``None``."""
         self.url = url
+        """The URL of a Streamable HTTP server, or ``None``."""
         self.server = server
+        """The object given as ``server=``, or ``None``."""
         self.env = dict(env) if env is not None else None
+        """Extra environment variables for ``command``, or ``None``."""
         self.headers = dict(headers) if headers is not None else None
+        """HTTP headers for ``url``, or ``None``."""
         self.cwd = cwd
+        """The working directory for ``command``, or ``None``."""
         self.timeout = timeout
+        """Seconds to wait for connecting and for each call, or ``None`` for no limit."""
         if command is not None:
             argv = shlex.split(command)
             if not argv:

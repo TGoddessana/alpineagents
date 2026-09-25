@@ -231,27 +231,25 @@ def _describe_validation_error(err: dict[str, Any]) -> str:
 
 
 class Tool:
-    """A tool made by ``@tool``. It can also be called directly like the original function (``__call__``).
+    """A tool made by ``@tool``. Calling it runs the original function as is, without validation.
 
-    Attributes (do not change after creation):
-
-    - ``name``: defaults to the function name
-    - ``description``: defaults to the docstring's first paragraph (empty string if none)
-    - ``parallel``: default ``True``. If ``False``, runs one at a time after the turn's other calls finish
-    - ``input_schema``: the JSON Schema shown to the model (``{"type": "object", "properties": ..., "required": ...}``).
-      ``State``-typed parameters and a method's ``self`` are left out. Descriptions from the docstring ``Args:``
-      section become each property's ``description``. Parameters with defaults are left out of ``required``.
-    - ``is_async``: ``True`` if the original function is ``async def``
-    - ``fn``: the original function
-    - ``needs_self``: ``True`` for a method defined in a class (first parameter is ``self`` with no type hint)
-    - ``bound_to``: the bound object (``None`` if unbound)
+    A ``@tool`` method in a class becomes a bound tool when accessed on an object (``fs.read_file``).
+    The attributes do not change after creation.
     """
 
     name: str
+    """The name the model calls. Defaults to the function name."""
     description: str
+    """What the model reads. Defaults to the docstring's first paragraph, or an empty string."""
     parallel: bool
+    """``True`` runs the tool together with the turn's other calls. ``False`` runs it alone after they finish."""
     input_schema: dict[str, Any]
+    """The JSON Schema object shown to the model. ``State`` parameters and ``self`` are left out, ``Args:``
+    descriptions become property descriptions, and parameters with defaults are optional."""
     is_async: bool
+    """``True`` if the original function is ``async def``."""
+    # Internal: the original function, whether it is a method in a class (first parameter is ``self`` with no
+    # type hint), and the bound object (None if unbound).
     fn: Callable[..., Any]
     needs_self: bool
     bound_to: Any
@@ -264,25 +262,28 @@ class Tool:
         description: str | None = None,
         parallel: bool = True,
     ) -> None:
-        """Checks the function and builds the schema. A bad tool errors right here (mistake-proofing errors).
+        """Usually created with ``@tool``. A bad tool raises here, before any model call.
 
-        - The name (``name`` or the function name) must match ``[A-Za-z0-9_-]{1,64}``. Otherwise ``TypeError``.
-        - If the first parameter is named ``self`` with no type hint, it is a method (``needs_self=True``, left
-          out of the schema).
-        - Every other parameter must have a type hint. Otherwise ``TypeError``:
-          "Tool {name}: parameter {p} has no type hint" / Fix: add a type hint.
-          To receive State, use ``state: State``.
-        - An unsupported type (checked recursively) raises ``TypeError`` with ``SUPPORTED_TYPES_TEXT``.
-        - ``*args``, ``**kwargs`` and positional-only parameters raise ``TypeError``.
-        - Hints are resolved with ``typing.get_type_hints(fn)`` (string hints and
-          ``from __future__ import annotations`` supported). If that fails because the module has no ``State``
-          (``TYPE_CHECKING``-only import), it resolves again with the framework's State.
-        - Parameters typed ``State`` (``alpineagents.state.State``, subclasses included) are hidden from the model
-          and injected at run time.
-        - The Pydantic model for argument validation is built once here (``pydantic.create_model``,
-          ``extra="forbid"``). Field names are internal names and parameter names are aliases (so they do not
-          clash with BaseModel attribute names).
+        Args:
+            fn: The function or method. Every parameter needs a type hint.
+            name: The tool name. Must match ``[A-Za-z0-9_-]{1,64}``. Defaults to the function name.
+            description: Defaults to the docstring's first paragraph.
+            parallel: ``False`` runs the tool alone after the turn's other calls finish.
+
+        Raises:
+            TypeError: The name is invalid, a parameter has no type hint or an unsupported type, or the function
+                takes ``*args``, ``**kwargs`` or positional-only parameters.
         """
+        # - If the first parameter is named ``self`` with no type hint, it is a method (``needs_self=True``, left
+        #   out of the schema).
+        # - Unsupported types are checked recursively; the error lists SUPPORTED_TYPES_TEXT.
+        # - Hints are resolved with ``typing.get_type_hints(fn)`` (string hints and
+        #   ``from __future__ import annotations`` supported). If that fails because the module has no ``State``
+        #   (``TYPE_CHECKING``-only import), it resolves again with the framework's State.
+        # - Parameters typed ``State`` (subclasses included) are hidden from the model and injected at run time.
+        # - The Pydantic model for argument validation is built once here (``pydantic.create_model``,
+        #   ``extra="forbid"``). Field names are internal names and parameter names are aliases (so they do not
+        #   clash with BaseModel attribute names).
         self.fn = fn
         self.name = _check_tool_name(fn.__name__ if name is None else name, explicit=name is not None)
         self.parallel = parallel
@@ -396,7 +397,7 @@ class Tool:
 
     @property
     def spec(self) -> ToolSpec:
-        """``ToolSpec(name, description, input_schema)``."""
+        """The tool as the model sees it: ``ToolSpec(name, description, input_schema)``."""
         return ToolSpec(self.name, self.description, self.input_schema)
 
     def prepare(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -489,9 +490,39 @@ def tool(
     description: str | None = None,
     parallel: bool = True,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
-    """``@tool`` or ``@tool(name=..., description=..., parallel=...)``. The options are closed to these three.
+    """Turns a function or method into a tool the model can call.
 
-    ``TypeError`` if ``fn`` is already a Tool (applied twice). ``TypeError`` if it is not a function.
+    Type hints become the input schema and the docstring becomes the description. The ``Args:`` section of the
+    docstring describes each parameter. A parameter typed ``State`` is hidden from the model and receives the
+    current State. The return value is sent to the model: a ``str`` as is, ``None`` as ``(done)``, anything else
+    as JSON.
+
+    Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...)``).
+
+    Example:
+        ```python
+        @tool
+        def read_file(path: str) -> str:
+            \"\"\"Read a file's contents
+
+            Args:
+                path: Path relative to the repository root
+            \"\"\"
+            return Path(path).read_text()
+        ```
+
+    Args:
+        fn: The function or method. Every parameter needs a type hint.
+        name: The tool name. Must match ``[A-Za-z0-9_-]{1,64}``. Defaults to the function name.
+        description: Defaults to the docstring's first paragraph.
+        parallel: ``False`` runs the tool alone after the turn's other calls finish.
+
+    Returns:
+        A ``Tool``, or a decorator that makes one when options are given.
+
+    Raises:
+        TypeError: ``@tool`` is applied twice or to something that is not a function, or the function cannot be a
+            tool (see ``Tool``).
     """
     if fn is not None:
         if isinstance(fn, Tool):

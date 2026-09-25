@@ -1,6 +1,6 @@
 """State: manages this run's history and the context the model sees.
 
-The contract is in ARCHITECTURE.md "State internal contract". In short:
+Internal rules (the user-facing contract is in the public docstrings):
 
 - It is mutable, but only through State's methods. Every method changes data inside the reentrant lock
   ``self.lock``, and Reporter notifications (``on_context_change``, ``on_tool_end`` for a deny) are sent after
@@ -215,18 +215,33 @@ def _error_text(error: BaseException) -> str:
 
 
 class State:
-    """This run's history and context.
+    """One run's record: everything that happened (``history``) and what the model sees next (``context``).
 
-    ``State(task)`` starts with:
+    Pass a State to ``agent.run`` to keep it after the run, or to continue it after ``Ctrl+C``. Every method is
+    thread-safe, so tools may call them from worker threads.
 
-    - ``history`` = ``[HistoryEntry("user", task, turn=0)]``
-    - ``context`` = ``(Message.user(task),)``
-    - ``turn`` = 0, ``usage`` = ``Usage()``, ``pending_calls`` = ``()``, ``stopped_by`` = ``None``
-    - ``parent`` = ``None``, ``root`` = itself, ``depth`` = 0 (subagents are an extension. See ``_child``)
+    Example:
+        ```python
+        state = State("Find the bug in this repo")
+        agent.run(state)
+        print(state.answer, state.stopped_by, state.usage.cost)
+        ```
     """
 
+    # A new State starts with history [HistoryEntry("user", task, turn=0)], context (Message.user(task),),
+    # turn 0, Usage(), no pending calls, stopped_by None, parent None, root itself, depth 0
+    # (subagents are an extension, see _child).
+
     def __init__(self, task: str) -> None:
-        """``TypeError`` if ``task`` is not a string, ``ValueError`` if it is empty or whitespace (with a fix)."""
+        """Start a run with one user message.
+
+        Args:
+            task: What the agent should do. The first user message the model sees.
+
+        Raises:
+            TypeError: ``task`` is not a string.
+            ValueError: ``task`` is empty or whitespace only.
+        """
         if not isinstance(task, str):
             raise TypeError(
                 fix_message(
@@ -278,10 +293,12 @@ class State:
     # ------------------------------------------------------------ yes/no questions
 
     def is_answered(self) -> bool:
-        """True if the last message in the context is an assistant message without tool calls (ToolCall).
+        """Whether the model's last reply is a final answer.
 
-        Adding anything after it (a notice, a user message) makes it false. False if there are pending calls.
-        Used as ``until=State.is_answered``, so ``self`` is its only argument.
+        True when the last message in the context is a model reply without tool calls. A message added after it
+        (a notice, a user message) makes it false, and so do pending calls.
+
+        Use it as a stop condition: ``@loop(until=State.is_answered, limit=50)``.
         """
         with self._lock:
             if self._pending or self._deferred or not self._context:
@@ -290,12 +307,12 @@ class State:
             return last.role == "assistant" and not last.tool_calls
 
     def wants_tools(self) -> bool:
-        """True if ``pending_calls`` is not empty."""
+        """Whether the model requested tool calls that have not run yet (``pending_calls`` is not empty)."""
         with self._lock:
             return bool(self._pending)
 
     def is_finished(self) -> bool:
-        """True if ``finish()`` was called."""
+        """Whether ``finish()`` was called. A finished State stops its loop before the next turn."""
         with self._lock:
             return self._finished
 
@@ -303,14 +320,17 @@ class State:
 
     @property
     def task(self) -> str:
+        """The task this State was created with."""
         return self._task
 
     @property
     def answer(self) -> Any:
-        """The value given to ``finish(answer)`` (if not ``None``), otherwise the text of the most recent model
-        reply without tool calls (``Reply.text``), or ``None`` if there is none yet. A ``think`` rollback
-        (``_rollback``) restores the value from before that ``think``.
+        """The run's answer.
+
+        The value given to ``finish(answer)`` if there is one, otherwise the text of the latest model reply
+        without tool calls, otherwise ``None``. A ``think`` that fails does not change it.
         """
+        # _rollback restores _last_answer from the Checkpoint.
         with self._lock:
             if self._finish_answer is not None:
                 return self._finish_answer
@@ -318,34 +338,41 @@ class State:
 
     @property
     def turn(self) -> int:
-        """Number of ``think`` calls so far. ``_begin_think`` adds 1 and ``_rollback`` reverts it."""
+        """Number of turns so far: each ``think`` adds 1, and a ``think`` that fails does not count."""
+        # _begin_think adds 1 and _rollback reverts it.
         with self._lock:
             return self._turn
 
     @property
     def usage(self) -> Usage:
-        """Total usage of ``think``, ``ask`` and ``compact`` (added with ``_add_usage``)."""
+        """Total tokens, requests and cost of every ``think``, ``ask`` and ``compact`` on this State."""
+        # Added with _add_usage.
         with self._lock:
             return self._usage
 
     @property
     def pending_calls(self) -> tuple[ToolCall, ...]:
-        """Calls the model requested this turn that have no result yet (result, deny or close). In request order."""
+        """Tool calls the model requested this turn that have no result yet, in request order.
+
+        A call leaves this tuple when it gets a result, is denied with ``deny``, or is closed by an exception.
+        """
         with self._lock:
             return tuple(self._pending)
 
     @property
     def context_tokens(self) -> int:
-        """Estimated token count of the context. ``_tokens.context_tokens(self.context, overhead)``.
-
-        ``overhead`` is the value ``_claim`` received (0 if none yet).
-        """
+        """Estimated token count of the context, including the system prompt and tool definitions."""
+        # _tokens.context_tokens(context, overhead). overhead is the value _claim received (0 if none yet).
         with self._lock:
             return _tokens.context_tokens(tuple(self._context), self._overhead)
 
     @property
     def context_used(self) -> float:
-        """``context_tokens / context_window``. 0.0 before ``_claim`` (window size unknown). Can exceed 1.0."""
+        """Fraction of the model's context window in use: ``context_tokens / context_window``.
+
+        0.0 before the first run or ``think`` (the window size is unknown until then). Can go above 1.0.
+        """
+        # The window size is stored by _claim or Agent.run's _note_window.
         with self._lock:
             window = self._context_window
             if not window or window <= 0:
@@ -354,13 +381,14 @@ class State:
 
     @property
     def stopped_by(self) -> str | None:
-        """Why the last loop stopped: ``"finish"``, ``"limit"``, or the until function's ``__name__``."""
+        """Why the last loop stopped: ``"finish"``, ``"limit"``, or the name of the ``until`` function that returned
+        true (e.g. ``"is_answered"``). ``None`` while running, or if the run ended with an exception."""
         with self._lock:
             return self._stopped_by
 
     @property
     def stopped_limit(self) -> int | None:
-        """The ``limit`` the loop reached when ``stopped_by == "limit"``, otherwise ``None``."""
+        """The ``limit`` the loop reached if ``stopped_by == "limit"``, otherwise ``None``."""
         with self._lock:
             return self._stopped_limit_value if self._stopped_by == "limit" else None
 
@@ -378,56 +406,77 @@ class State:
 
     @property
     def history(self) -> tuple[HistoryEntry, ...]:
-        """Everything that happened. Append-only. Returns a copy (tuple)."""
+        """Everything that happened in this run, oldest first: messages, replies, tool results, errors and context
+        changes. Entries are only ever added, so shrinking the context never removes anything from here.
+
+        Returns a copy.
+        """
         with self._lock:
             return tuple(self._history)
 
     @property
     def context(self) -> tuple[Message, ...]:
-        """The context the model sees at the next ``think``. Returns a copy (tuple).
+        """The messages the model will see at the next ``think``. Returns a copy.
 
-        While there are pending calls, this turn's results and deferred notices are not in it yet
-        (they go in together when the last call closes). Messages added while ``think`` waits on the model
-        are not in it either until the model reply is recorded.
+        Results of this turn's tool calls go in together once the last call has a result. Messages added in the
+        meantime, or while ``think`` waits on the model, go in after them.
         """
         with self._lock:
             return tuple(self._context)
 
     @property
     def data(self) -> dict[str, Any]:
-        """User data. Not visible to the model.
+        """A dict for your own data. The model never sees it.
 
-        A dict subclass whose single reads and writes (``d[k]``, ``d[k] = v``, ``get``, ``setdefault``, ``pop``,
-        etc.) are guarded by ``self.lock``. The user does multi-step updates inside ``with state.lock:``.
+        Single reads and writes (``d[k]``, ``d[k] = v``, ``get``, ``setdefault``, ``pop``) are thread-safe. For
+        an update that takes several steps, or to loop over it, hold ``state.lock``.
+
+        Example:
+            ```python
+            with state.lock:
+                state.data["calls"] = state.data.get("calls", 0) + 1
+            ```
         """
+        # A _LockedDict guarded by self._lock. See its docstring for why __iter__/__len__ stay as dict's.
         return self._data
 
     @property
     def lock(self) -> threading.RLock:
-        """The reentrant lock every State method uses (``threading.RLock``)."""
+        """The reentrant lock (``threading.RLock``) every State method uses. Hold it to make several changes as one."""
         return self._lock
 
     # ------------------------------------------------------------ adding messages
 
     def add_user_message(self, text: str) -> None:
-        """Add a human message. ``"user"`` in history, ``Message.user(text)`` in the context.
+        """Add a message from the human, for example the next request in a chat loop.
 
-        If there are pending calls, it is deferred instead of going into the context right away, and goes in
-        right after the result message when this turn's last call closes (history records it right away).
-        It is also deferred while ``think`` waits on the model and goes in after the model reply (so a message
-        the model never saw does not land before its reply). ``is_answered()`` becomes false.
-        ``ValueError`` if ``text`` is empty or whitespace (providers reject empty messages).
+        While tool calls are pending, or while ``think`` waits on the model, the message is held and goes into
+        the context right after the results or the reply. ``is_answered()`` is false until the model answers it.
+
+        Args:
+            text: The message.
+
+        Raises:
+            ValueError: ``text`` is empty or whitespace only.
         """
+        # History records it right away; the context gets it via _add_to_context, which defers it while
+        # _pending or _thinking so a message the model never saw does not land before its reply.
         _check_text("add_user_message", "text", text, 'state.add_user_message("Next step: run the tests")')
         with self._lock:
             self._append("user", text)
             self._add_to_context(Message.user(text))
 
     def add_notice(self, text: str) -> None:
-        """A notice from the loop (or a tool) to the model. Adds ``"[notice] "`` if it does not start with it.
+        """Tell the model something from your loop or a tool, for example ``"The tests failed"``.
 
-        ``"notice"`` in history, a user message in the context. If there are pending calls, it is deferred like
-        ``add_user_message`` and goes in after all of this turn's results are recorded.
+        The model sees it as a user message starting with ``"[notice] "`` (added if missing). It is held while
+        calls are pending, like ``add_user_message``.
+
+        Args:
+            text: The notice.
+
+        Raises:
+            ValueError: ``text`` is empty or whitespace only.
         """
         _check_text("add_notice", "text", text, 'state.add_notice("The tests failed")')
         if not text.startswith(NOTICE_PREFIX):
@@ -439,10 +488,13 @@ class State:
     # ------------------------------------------------------------ stopping, denying
 
     def finish(self, answer: Any = None) -> None:
-        """End this whole run. If ``answer`` is not ``None``, it becomes ``state.answer``.
+        """End the run. The loop stops before its next turn with ``stopped_by == "finish"``.
 
-        Can be called while there are pending calls (``submit`` inside a tool). Calling it twice is not an
-        error; if ``answer`` is given, the last value wins.
+        Tools may call it (a ``submit`` tool, for example), even while other calls are pending. Calling it again
+        is allowed; the last ``answer`` given wins.
+
+        Args:
+            answer: If not ``None``, becomes ``state.answer``. Any value, not only a string.
         """
         with self._lock:
             self._finished = True
@@ -450,16 +502,27 @@ class State:
                 self._finish_answer = answer
 
     def deny(self, call: ToolCall, reason: str) -> None:
-        """Do not run one pending call; record the reason as its result.
+        """Refuse a pending tool call. The model gets ``reason`` as that call's error result.
 
-        - ``ValueError`` if ``call`` is not in ``pending_calls`` (compared by id) (fix: only calls in
-          ``state.pending_calls`` can be denied).
-        - ``"denied"`` in history (content=reason, call=call). It goes into the context as
-          ``ToolResultBlock(call.id, reason, name=call.name, is_error=True)`` (same buffer rules as
-          ``_record_tool_result``).
-        - After the lock is released, calls ``on_tool_end(self, call, reason, ToolOutcome("denied"))`` on the
-          connected Reporter, if any.
+        Args:
+            call: One of ``state.pending_calls``.
+            reason: What the model is told, for example ``"The user denied it"``.
+
+        Raises:
+            ValueError: ``call`` is not pending, or ``reason`` is empty or whitespace only.
+
+        Example:
+            ```python
+            for call in state.pending_calls:
+                if call.name == "delete_file":
+                    state.deny(call, "Deleting files is not allowed")
+            agent.use_tools(state)
+            ```
         """
+        # Compared by id. History gets "denied" (content=reason, call=call); the context gets
+        # ToolResultBlock(call.id, reason, name=call.name, is_error=True) under the same buffer rules as
+        # _record_tool_result. After the lock is released, the Reporter gets
+        # on_tool_end(self, call, reason, ToolOutcome("denied")).
         _check_text("deny", "reason", reason, 'state.deny(call, "The user denied it")')
         with self._lock:
             index = self._pending_index(call)
@@ -483,23 +546,34 @@ class State:
     # ------------------------------------------------------------ shrinking the context
 
     def start_from(self, summary: str) -> None:
-        """Replace the context with two messages: the original task and the summary. History is unchanged.
+        """Replace the context with two messages: the original task and ``summary``. History is kept.
 
-        Same as ``_replace_context(summary, "start_from")``. ``ValueError`` if there are pending calls.
+        Args:
+            summary: What the model should know about the work so far.
+
+        Raises:
+            TypeError: ``summary`` is not a string.
+            ValueError: Tool calls are pending, or ``summary`` is empty or whitespace only.
         """
+        # Same as _replace_context(summary, "start_from").
         self._replace_context(summary, "start_from")
 
     def clear_tool_results(self, keep_last: int = 5) -> None:
-        """Replace the content of every tool result in the context except the last ``keep_last`` with
-        ``"(cleared: kept in history)"``.
+        """Shrink the context by blanking old tool results. History keeps the full results.
 
-        - ``ValueError`` if there are pending calls (``_ensure_no_pending("clear_tool_results")``).
-        - Only ``ToolResultBlock`` changes (``dataclasses.replace(block, content=CLEARED)``). Already cleared
-          results count too. Other blocks (thinking blocks, etc.) are left as they are.
-        - If anything changed, every message in the context is replaced by a new Message with ``tokens`` set to
-          ``None`` (the reference point is no longer valid), ``ContextChange("clear_tool_results", before,
-          after)`` is recorded in history and the Reporter is notified. If nothing changed, it does nothing.
+        Every tool result except the last ``keep_last`` is replaced with ``"(cleared: kept in history)"``.
+        Results that are already cleared still count toward ``keep_last``.
+
+        Args:
+            keep_last: How many of the most recent tool results to keep.
+
+        Raises:
+            ValueError: Tool calls are pending, or ``keep_last`` is not an integer >= 0.
         """
+        # Only ToolResultBlock changes (dataclasses.replace(block, content=CLEARED)); thinking blocks etc. stay.
+        # If anything changed, every context message is rebuilt with tokens=None (the anchor is no longer
+        # valid), ContextChange("clear_tool_results", before, after) goes to history and the Reporter is told.
+        # If nothing changed, it does nothing.
         if isinstance(keep_last, bool) or not isinstance(keep_last, int) or keep_last < 0:
             raise ValueError(
                 fix_message(

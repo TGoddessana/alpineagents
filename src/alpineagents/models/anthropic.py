@@ -1,4 +1,4 @@
-"""Anthropic Messages API adapter (ARCHITECTURE.md "Model adapter contract").
+"""Anthropic Messages API adapter (rules in the ``Model`` docstring).
 
 SDK: ``anthropic`` (the exact API is taken from the installed version's source). The SDK is imported on the first
 request.
@@ -95,12 +95,53 @@ class _Emit:
 
 
 class Anthropic(Model):
-    """Adapter for the Anthropic format. ``provider = "anthropic"``.
+    """A Model for the Anthropic Messages API. Uses ``ANTHROPIC_API_KEY`` unless ``api_key=`` is given.
 
-    Default ``supports = {"thinking", "cache", "vision"}``. Can be changed with ``supports=``.
+    Building it uses no network and needs no API key; the SDK client is created on the first request.
+
+    Args:
+        name: Model name, e.g. ``"claude-sonnet-5"``. A leading ``"anthropic/"`` is removed.
+        max_tokens: Maximum output tokens per reply.
+        temperature: Sampling temperature. Cannot be combined with ``thinking``.
+        timeout: Request timeout in seconds. ``None`` uses the SDK default.
+        retries: How many times the SDK retries a failed request.
+        price: Token prices for ``usage.cost``.
+        thinking: ``False`` turns extended thinking off, ``True`` turns on adaptive thinking, and an int turns it on
+            with that token budget (at least 1024 and below ``max_tokens``). ``0`` does not turn it off.
+        cache: Prompt caching. ``None`` turns it on when ``supports`` has ``"cache"``.
+        context_window: Context window size in tokens.
+        api_key: API key. ``None`` reads ``ANTHROPIC_API_KEY``.
+        base_url: API base URL, for a proxy or a compatible gateway.
+        supports: Features the model supports. Defaults to ``{"thinking", "cache", "vision"}``.
+
+    Raises:
+        ValueError: A setting the model does not support, ``thinking`` together with ``temperature``, or a
+            ``thinking`` budget out of range.
+
+    Example:
+        ```python
+        agent = Agent(model=Anthropic("claude-sonnet-5", thinking=True))
+        ```
     """
 
     provider = "anthropic"
+    """Always ``"anthropic"``."""
+    name: str
+    """Model name sent to the API."""
+    max_tokens: int | None
+    """Maximum output tokens per reply."""
+    temperature: float | None
+    """Sampling temperature, or ``None`` to leave it to the provider."""
+    timeout: float | None
+    """Request timeout in seconds, or ``None`` for the SDK default."""
+    retries: int
+    """How many times the SDK retries a failed request."""
+    price: Price | None
+    """Token prices used for ``usage.cost``."""
+    supports: frozenset[str]
+    """Features this model supports."""
+    cache: bool
+    """Whether prompt caching is on."""
 
     def __init__(
         self,
@@ -118,20 +159,12 @@ class Anthropic(Model):
         base_url: str | None = None,
         supports: Iterable[str] | None = None,
     ) -> None:
-        """Only stores settings. Must be constructible without network or credentials (the client is created on
-        the first ``respond``).
-
-        - Strips a ``"anthropic/"`` prefix from ``name``.
-        - ``thinking``: ``False`` turns it off, ``True`` means adaptive (``{"type": "adaptive"}``), an int means
-          ``{"type": "enabled", "budget_tokens": n}``. When on, ``_check_supported("thinking", "thinking=...")``.
-          ``ValueError`` if ``temperature`` is also given (thinking mode does not accept temperature).
-          For an int, ``ValueError`` at construction if ``n < 1024`` (the SDK minimum) or ``n >= max_tokens``
-          (catch mistakes early). ``thinking=0`` does not turn it off; use ``thinking=False`` for that.
-        - ``cache``: ``None`` (default) turns it on when supports has ``"cache"``. Passing ``True`` explicitly
-          calls ``_check_supported("cache", "cache=True")``. ``False`` turns it off. The result is
-          ``self.cache: bool``.
-        - ``retries`` goes to SDK ``max_retries``, ``timeout`` to SDK ``timeout``.
-        """
+        # Only stores settings: no network, no credentials. The client is created on the first respond.
+        # thinking: True -> {"type": "adaptive"}, int n -> {"type": "enabled", "budget_tokens": n}. When on,
+        # _check_supported("thinking", ...). The budget checks (n >= 1024, n < max_tokens) catch at construction
+        # what the API would reject later.
+        # cache: None follows supports; an explicit True runs _check_supported("cache", "cache=True").
+        # retries -> SDK max_retries, timeout -> SDK timeout.
         if name.startswith("anthropic/"):
             name = name[len("anthropic/") :]
         self.name = name
@@ -198,57 +231,23 @@ class Anthropic(Model):
 
     @property
     def context_window(self) -> int:
+        """Context window size in tokens, as passed to ``context_window=``."""
         return self._context_window
 
     def respond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Makes one request with ``client.messages.stream(...)``.
+        """Sends one request as a stream and returns the reply.
 
-        Sending (``_to_anthropic_messages``, ``_tool_defs_and_choice``):
+        Text chunks go to ``on_text`` as they arrive. Thinking and other Anthropic-only blocks are kept as
+        ``RawBlock``s and sent back unchanged on later requests. If the reply was cut off at ``max_tokens`` in the
+        middle of a tool call, that call is marked invalid so the tool is not run with partial arguments.
 
-        - ``system`` → ``system=`` (omitted if None)
-        - Consecutive messages with the same role are merged (``Model._merge_same_role``). Inside a user message,
-          ``tool_result`` blocks come before text.
-        - ``TextBlock`` → ``{"type": "text", "text"}`` (empty or whitespace-only text is dropped).
-          If a message's content ends up empty (e.g. an assistant reply that ended without tools), one
-          placeholder text (``"(empty reply)"``) is added -- Anthropic rejects empty/whitespace-only content in
-          any message but the last.
-        - ``ToolCall`` → ``{"type": "tool_use", "id", "name", "input": args}``
-        - ``ToolResultBlock`` → ``{"type": "tool_result", "tool_use_id", "content", "is_error"}``
-        - ``RawBlock(provider="anthropic")`` → ``data`` as is. RawBlocks of other providers are dropped.
-        - ``tools`` → ``[{"name", "description", "input_schema"}]``. If ``tool_choice="none"``,
-          ``tool_choice={"type": "none"}``. If there are no tool definitions but the messages contain
-          tool_use/tool_result, a placeholder definition with a ``{"type": "object"}`` schema is added for each
-          tool name that appears, with ``tool_choice=none``.
-        - If ``cache`` is on, a top-level ``cache_control={"type": "ephemeral"}`` marks the last cacheable block
-          (automatic caching supported by the SDK).
-
-        Receiving:
-
-        - ``on_text(chunk)`` for each text delta in the stream (not called if ``on_text`` is None)
-        - Blocks of the final message: ``text`` → ``TextBlock``, ``tool_use`` → ``ToolCall(name, dict(input), id)``,
-          every other block (thinking, redacted_thinking, server_tool_use ...) →
-          ``RawBlock("anthropic", block.model_dump(mode="json", exclude_none=True))`` (a shape that can be sent
-          back as is)
-        - ``stop_reason == "max_tokens"`` means the reply was cut off, so if the last block is tool_use its
-          arguments may be incomplete: that block's ``args`` become ``{INVALID_ARGS_KEY: TRUNCATED_ARGS_MESSAGE}``
-          so ``Tool.prepare`` treats it as an input error instead of calling the tool (earlier, complete blocks
-          are left alone).
-        - ``Usage(input_tokens=usage.input_tokens, output_tokens, cache_read_tokens=cache_read_input_tokens or 0,
-          cache_write_tokens=cache_creation_input_tokens or 0, requests=1)`` with ``cost=self._cost(...)``
-        - ``context_tokens`` = input + cache read + cache write + output; ``stop_reason`` as is
-
-        Errors (``_wrap_error``): ``anthropic.RateLimitError`` → ``RateLimitError``;
-        ``AuthenticationError``/``PermissionDeniedError``/no API key → ``AuthError``;
-        ``RequestTooLargeError``, or a ``BadRequestError`` with a context overflow message ("prompt is too long",
-        etc.) → ``ContextTooLongError``; any other ``anthropic.AnthropicError`` → ``ProviderError``.
-        The message is a short summary + the original message; ``from e`` keeps the original.
-
-        Without credentials (e.g. ``ANTHROPIC_API_KEY`` not set), the SDK raises a bare ``TypeError`` at request
-        time rather than an ``AnthropicError`` (header validation runs lazily on each request); that message is
-        recognized and wrapped in ``AuthError``. Any other ``TypeError`` (SDK signature mismatch, etc.) is
-        wrapped in ``ProviderError``.
+        Raises:
+            RateLimitError: The API returned 429 after the SDK's retries.
+            AuthError: The API key is missing or rejected.
+            ContextTooLongError: The request is larger than the context window.
+            ProviderError: Any other API error.
         """
         import anthropic
 
@@ -271,8 +270,8 @@ class Anthropic(Model):
     async def arespond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """The async version of ``respond`` with ``AsyncAnthropic``: the same request, reply and errors. A cancel
-        closes the stream."""
+        """The async version of ``respond``, with the same reply and errors. Cancelling it closes the stream."""
+        # Uses AsyncAnthropic, one client per event loop (see _async_client).
         import anthropic
 
         client = self._async_client()
@@ -293,7 +292,18 @@ class Anthropic(Model):
 
     @staticmethod
     def _wrap_error(e: Exception) -> Exception:
-        """The common error type for an SDK exception (see ``respond``)."""
+        """The common error type for an SDK exception.
+
+        ``anthropic.RateLimitError`` -> ``RateLimitError``; ``AuthenticationError``/``PermissionDeniedError`` or no
+        API key -> ``AuthError``; ``RequestTooLargeError``, or a ``BadRequestError`` whose message looks like a
+        context overflow ("prompt is too long", etc.) -> ``ContextTooLongError``; any other ``AnthropicError`` ->
+        ``ProviderError``. The message is a short summary plus the original; the caller raises ``from e``.
+
+        Without credentials (``ANTHROPIC_API_KEY`` not set) the SDK raises a bare ``TypeError`` at request time
+        (header validation runs lazily), not an ``AnthropicError``. That message is recognized and wrapped in
+        ``AuthError``; any other ``TypeError`` becomes ``ProviderError``. ``respond`` re-raises a ``TypeError``
+        that ``on_text`` raised as is (``_Emit``).
+        """
         import anthropic
 
         if isinstance(e, anthropic.RateLimitError):
@@ -315,6 +325,17 @@ class Anthropic(Model):
     # ------------------------------------------------------------ sending
 
     def _build_request_kwargs(self, request: Request) -> dict[str, Any]:
+        """The ``client.messages.stream(...)`` arguments for ``request``.
+
+        - ``system`` -> ``system=`` (omitted if None)
+        - Messages go through ``_to_anthropic_messages`` (see ``_to_anthropic_content``).
+        - ``tools`` -> ``[{"name", "description", "input_schema"}]``; ``tool_choice="none"`` ->
+          ``{"type": "none"}``. Without tool definitions but with tool_use/tool_result in the messages, one
+          placeholder definition (``{"type": "object"}`` schema) per tool name that appears, with
+          ``tool_choice=none`` (``_tool_defs_and_choice``).
+        - ``cache`` on -> a top-level ``cache_control={"type": "ephemeral"}`` marks the last cacheable block
+          (the SDK's automatic caching).
+        """
         kwargs: dict[str, Any] = {
             "model": self.name,
             "max_tokens": self.max_tokens,
@@ -343,10 +364,21 @@ class Anthropic(Model):
         return kwargs
 
     def _to_anthropic_messages(self, messages: Iterable[Message]) -> list[dict[str, Any]]:
+        """Consecutive messages with the same role are merged first (``Model._merge_same_role``)."""
         merged = self._merge_same_role(messages)
         return [{"role": m.role, "content": self._to_anthropic_content(m)} for m in merged]
 
     def _to_anthropic_content(self, message: Message) -> list[dict[str, Any]]:
+        """Blocks in the Anthropic format.
+
+        - In a user message, ``tool_result`` blocks come before text.
+        - ``TextBlock`` -> ``{"type": "text", "text"}``; empty or whitespace-only text is dropped. If the content
+          ends up empty (e.g. an assistant reply that ended without tools), one placeholder text
+          (``"(empty reply)"``) is added: Anthropic rejects empty content in any message but the last.
+        - ``ToolCall`` -> ``{"type": "tool_use", "id", "name", "input": args}``
+        - ``ToolResultBlock`` -> ``{"type": "tool_result", "tool_use_id", "content", "is_error"}``
+        - ``RawBlock(provider="anthropic")`` -> ``data`` as is; RawBlocks of other providers are dropped.
+        """
         blocks = list(message.content)
         if message.role == "user":
             # Put tool_result before text (a stable sort, so the order within each group is kept).
@@ -409,6 +441,19 @@ class Anthropic(Model):
     # ------------------------------------------------------------ receiving
 
     def _to_reply(self, message: Any) -> Reply:
+        """The final stream message as a ``Reply``.
+
+        - ``text`` -> ``TextBlock``, ``tool_use`` -> ``ToolCall(name, dict(input), id)``, any other block
+          (thinking, redacted_thinking, server_tool_use ...) ->
+          ``RawBlock("anthropic", block.model_dump(mode="json", exclude_none=True))``, a shape that can be sent
+          back as is.
+        - ``stop_reason == "max_tokens"`` with a tool_use last: its ``args`` become
+          ``{INVALID_ARGS_KEY: TRUNCATED_ARGS_MESSAGE}`` so ``Tool.prepare`` treats it as an input error. Earlier
+          complete blocks are left alone.
+        - ``Usage(input_tokens, output_tokens, cache_read_tokens=cache_read_input_tokens or 0,
+          cache_write_tokens=cache_creation_input_tokens or 0, requests=1)`` with ``cost=self._cost(...)``.
+        - ``context_tokens`` = input + cache read + cache write + output; ``stop_reason`` as is.
+        """
         content: list[Any] = []
         for block in message.content:
             if block.type == "text":

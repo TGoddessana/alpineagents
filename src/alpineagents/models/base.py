@@ -1,23 +1,7 @@
 """The Model role: talks to a provider.
 
-A new provider works once it implements the two required members (``respond``, ``context_window``). Everything
-else has a default implementation. Shared settings have class-attribute defaults, so subclasses work even if they
-do not call ``super().__init__``.
-
-Rules shared by all adapters (ARCHITECTURE.md "Model adapter contract"):
-
-- Do not change State. Only return a reply.
-- Do not use the network or require credentials at construction. The SDK client and the SDK import are created on
-  the first request.
-- Wrap only SDK exceptions in the common types (``raise RateLimitError(...) from e``); let any other exception
-  (e.g. one raised by the Reporter in ``on_text``, KeyboardInterrupt) propagate as is.
-- Retries use the SDK's retries (``retries`` → SDK ``max_retries``).
-- Things that happen outside the reply (falling back to another model, etc.) are not printed; report them with
-  ``on_event(ModelEvent(...))``. The Agent does the history and Reporter notifications. Exceptions raised by
-  ``on_event`` are not wrapped either; they propagate as is.
-- Send back ``RawBlock``s of the same ``provider`` as is, and drop the others.
-- ``arespond``/``acompact`` (the async API) work for every adapter by running the sync version on a worker thread.
-  Adapters with an async SDK override ``arespond`` so a cancel also stops the request.
+The rules every adapter follows are in the ``Model`` docstring. Also: exceptions raised by ``on_text`` or
+``on_event`` (a Reporter's, KeyboardInterrupt) propagate unwrapped, and the SDK is imported on the first request.
 """
 
 from __future__ import annotations
@@ -46,72 +30,109 @@ COMPACT_PROMPT = (
 
 
 class Model(ABC):
-    """Base class for provider adapters.
+    """Base class for provider adapters. Subclass it to add a provider.
 
-    Shared settings (same names in every adapter): ``max_tokens``, ``temperature``, ``timeout``, ``retries``, ``price``.
+    Implement ``respond`` and ``context_window``. Everything else has a working default: ``arespond`` and
+    ``acompact`` run the sync versions on a worker thread, ``compact`` sends a summary request through
+    ``respond``, and ``mark_cache`` and ``count_tokens`` need no override.
+
+    Rules for an adapter:
+
+    - Only return a reply. Do not change the State; the Agent records the reply and its usage.
+    - Use no network and no credentials in ``__init__``. Create the SDK client on the first request, so an Agent
+      can be built without an API key.
+    - Let the SDK do retries (``retries`` is passed as its retry count). Wrap only SDK exceptions that finally
+      fail, as ``RateLimitError``, ``AuthError``, ``ContextTooLongError`` or ``ProviderError``
+      (``raise ... from e``). Let every other exception propagate as is.
+    - Print nothing. Report what happens outside the reply (a fallback, a retry) with ``on_event``.
+    - Send back ``RawBlock``s whose ``provider`` matches ``self.provider`` unchanged, and drop the others.
+
+    The settings below have class-level defaults, so a subclass works without calling ``super().__init__``.
     """
 
-    #: Model name (without the provider prefix). E.g. ``"claude-sonnet-5"``
     name: str = ""
-    #: Name used for ``RawBlock.provider``. E.g. ``"anthropic"``
+    """Model name without the provider prefix, e.g. ``"claude-sonnet-5"``."""
     provider: str = ""
-    #: Supported features: ``"thinking"``, ``"cache"``, ``"server_compact"``, ``"vision"``, etc.
+    """Provider id, e.g. ``"anthropic"``. ``RawBlock``s with this provider are sent back to the model."""
     supports: frozenset[str] = frozenset()
+    """Features this adapter supports: ``"thinking"``, ``"cache"``, ``"server_compact"``, ``"vision"``, etc."""
     max_tokens: int | None = None
+    """Maximum output tokens per reply. ``None`` uses the adapter's default."""
     temperature: float | None = None
+    """Sampling temperature. ``None`` leaves it to the provider."""
     timeout: float | None = None
+    """Request timeout in seconds. ``None`` uses the SDK default."""
     retries: int = 2
+    """How many times the SDK retries a failed request."""
     price: Price | None = None
+    """Token prices used for ``usage.cost``. Without it, ``cost`` is ``None``."""
 
     @property
     @abstractmethod
     def context_window(self) -> int:
-        """Required. Context window size (tokens). The basis for ``state.context_used``."""
+        """Required. The context window size in tokens. ``state.context_used`` is measured against it."""
 
     @abstractmethod
     def respond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Required. Calls the API once (streaming) and calls ``on_text(chunk)`` as text arrives.
+        """Required. Sends one request and returns the reply.
 
-        Things that happen outside the reply are reported with ``on_event(ModelEvent(...))`` (no need to call it
-        if there are none). Implementations that wrap another Model pass ``on_text`` and ``on_event`` through.
+        Args:
+            request: The system prompt, messages and tool definitions to send.
+            on_text: Called with each text chunk as it streams in. ``None`` when nobody is listening.
+            on_event: Called with a ``ModelEvent`` for anything that happens outside the reply, such as a
+                fallback to another model. A Model that wraps another Model passes both callbacks through.
 
-        The returned ``Reply``: ``message.role == "assistant"``, blocks in the order received,
-        ``usage.requests == 1``, ``usage.cost`` is ``self._cost(usage)``, ``context_tokens`` is
-        input (including cache) + output tokens.
+        Returns:
+            A ``Reply`` whose ``message`` is an assistant message with blocks in the order received,
+            ``usage.requests == 1``, ``usage.cost`` from ``price`` (or ``None``), and ``context_tokens`` set to
+            all input tokens (cached or not) plus output tokens.
+
+        Raises:
+            ProviderError: The provider request finally failed. Use a subclass such as ``RateLimitError`` when
+                one fits.
         """
+        # Exceptions raised by on_text or on_event propagate unwrapped.
 
     def count_tokens(self, request: Request) -> int:
-        """A utility for callers that want a size estimate of ``request``. The Agent and State never call it:
-        ``state.context_tokens``/``context_used`` (and so ``compact_if_full``) always use ``_tokens``, so
-        overriding this does not change them. Default: the usage of the last reply (``Message.tokens``) plus an
-        estimate for what was added since."""
+        """Estimates the size of ``request`` in tokens.
+
+        A utility for your own code. The framework never calls it, so overriding it does not change
+        ``state.context_used`` or when ``compact_if_full`` fires.
+        """
+        # Default: the token count of the last reply (Message.tokens) plus an estimate for what came after it.
+        # State uses the same rule (_tokens) directly.
         return context_tokens(request.messages, estimate_overhead_tokens(request.system, request.tools))
 
     def compact(
         self, request: Request, instructions: str | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Optional. Returns a reply that summarizes the context (summary text in ``reply.text``). The Agent
-        records the usage.
+        """Optional. Summarizes the context and returns the summary in ``reply.text``.
 
-        The default is a summary request that works with every model: append ``COMPACT_PROMPT`` (+ what to keep)
-        to the end of the context as a user message, keep the tool definitions, and ``respond`` once with
-        ``tool_choice="none"``. Adapters that support server-side compaction override it.
+        The default works with every model: it appends a summary request (``COMPACT_PROMPT`` plus
+        ``instructions``) to the context and calls ``respond`` once with tool calls disabled. Override it for
+        providers with server-side compaction.
+
+        Args:
+            request: The current context.
+            instructions: What the summary must keep.
+            on_event: As in ``respond``.
         """
+        # Tool definitions are kept in the request: some providers require them when the context has tool_use.
         return self.respond(self._summary_request(request, instructions), None, on_event)
 
     async def arespond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Optional. The async version of ``respond``, used by ``athink``/``aask``.
+        """Optional. The async version of ``respond``, used by ``athink`` and ``aask``.
 
-        The default runs ``respond`` on a daemon worker thread. ``on_text``/``on_event`` are relayed to the event
-        loop thread (so Reporter notifications and State records happen there, and their exceptions propagate
-        out of ``respond`` as is). When the caller is cancelled, the thread cannot be stopped: its next callback
-        raises ``CancelledError`` (ending a stream early) and its reply is dropped. Adapters with an async SDK
-        override this.
+        The default runs ``respond`` on a worker thread and delivers ``on_text`` and ``on_event`` on the event
+        loop. Cancelling it drops the reply, but the thread keeps running until its next callback. Override it
+        with the provider's async SDK so a cancel also closes the request.
         """
+        # The Relay runs callbacks on the loop thread and waits for them, so their exceptions still leave respond
+        # as is. After cancel the relay is closed and the worker's next callback raises CancelledError.
         relay = Relay(asyncio.get_running_loop())
         try:
             return await run_in_thread(self.respond, request, relay.wrap(on_text), relay.wrap(on_event))
@@ -121,10 +142,10 @@ class Model(ABC):
     async def acompact(
         self, request: Request, instructions: str | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Optional. The async version of ``compact``, used by ``acompact``.
+        """Optional. The async version of ``compact``, used by ``Agent.acompact``.
 
-        The default sends the same summary request as ``compact`` with ``arespond``. An adapter that overrides
-        only ``compact`` (server-side compaction) gets its ``compact`` run on a worker thread instead.
+        The default sends the same summary request through ``arespond``. If a subclass overrides only
+        ``compact``, that ``compact`` runs on a worker thread instead.
         """
         if type(self).compact is not Model.compact:
             relay = Relay(asyncio.get_running_loop())
@@ -135,11 +156,10 @@ class Model(ABC):
         return await self.arespond(self._summary_request(request, instructions), None, on_event)
 
     def mark_cache(self, request: Request) -> Request:
-        """Optional. Decides where to place prompt cache markers. The default returns the request unchanged.
+        """Optional. Returns the request with prompt cache markers placed. The default returns it unchanged.
 
-        Request has no cache marker field, so adapters that use caching usually mark it inside ``respond`` when
-        converting to the provider format. The Agent always passes the request through this method before
-        ``respond``.
+        The Agent passes every request through this before ``respond``. ``Request`` has no marker field, so
+        adapters that cache usually place markers inside ``respond`` while converting to the provider format.
         """
         return request
 

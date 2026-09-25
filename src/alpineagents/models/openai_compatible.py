@@ -92,13 +92,51 @@ class _Collected:
 
 
 class OpenAICompatible(Model):
-    """Adapter for OpenAI-compatible servers. ``provider = "openai_compatible"``.
+    """A Model for servers that speak the OpenAI Chat Completions API: OpenAI, Ollama, vLLM, OpenRouter and others.
 
-    The default ``supports`` is empty (it varies by server). Declare the features the server supports with
-    ``supports=``.
+    Building it uses no network and needs no API key; the SDK client is created on the first request.
+
+    Args:
+        name: Model name as the server knows it, e.g. ``"llama3:8b"``.
+        base_url: Server URL, e.g. ``"http://localhost:11434/v1"``. ``None`` uses ``OPENAI_BASE_URL`` or
+            api.openai.com.
+        api_key: API key. ``None`` reads ``OPENAI_API_KEY``. With a ``base_url`` and no key anywhere, a
+            placeholder key is sent, which is what local servers expect.
+        max_tokens: Maximum output tokens per reply. ``None`` leaves it to the server. For OpenAI reasoning
+            models (``o1``, ``o3``, ...) it is sent as ``max_completion_tokens``.
+        temperature: Sampling temperature. ``None`` leaves it to the server.
+        timeout: Request timeout in seconds. ``None`` uses the SDK default.
+        retries: How many times the SDK retries a failed request.
+        price: Token prices for ``usage.cost``.
+        context_window: Context window size in tokens.
+        supports: Features the server supports. Empty by default, since it varies by server.
+
+    Example:
+        ```python
+        model = OpenAICompatible("llama3:8b", base_url="http://localhost:11434/v1")
+        ```
     """
 
     provider = "openai_compatible"
+    """Always ``"openai_compatible"``."""
+    name: str
+    """Model name sent to the API."""
+    max_tokens: int | None
+    """Maximum output tokens per reply."""
+    temperature: float | None
+    """Sampling temperature, or ``None`` to leave it to the provider."""
+    timeout: float | None
+    """Request timeout in seconds, or ``None`` for the SDK default."""
+    retries: int
+    """How many times the SDK retries a failed request."""
+    price: Price | None
+    """Token prices used for ``usage.cost``."""
+    supports: frozenset[str]
+    """Features this model supports."""
+    base_url: str | None
+    """Server URL, or ``None`` for the SDK default."""
+    api_key: str | None
+    """The API key passed to ``api_key=``, or ``None`` to read ``OPENAI_API_KEY``."""
 
     def __init__(
         self,
@@ -114,14 +152,9 @@ class OpenAICompatible(Model):
         context_window: int = 128_000,
         supports: Iterable[str] | None = None,
     ) -> None:
-        """Only stores settings. Must be constructible without network or credentials (the client is created on
-        the first ``respond``).
-
-        - If ``base_url`` is None, the SDK default (``OPENAI_BASE_URL`` or api.openai.com).
-        - If ``api_key`` is None, the SDK reads ``OPENAI_API_KEY``. If that is missing too and this is a local
-          server given by ``base_url``, ``"not-needed"`` is passed so the SDK does not fail at construction (a
-          real key in the environment is still used as is -- it is not ignored just because ``base_url`` is set).
-        """
+        # Only stores settings: no network, no credentials. The client is created on the first respond.
+        # api_key None + base_url set + no OPENAI_API_KEY -> "not-needed" is passed so the SDK does not fail at
+        # client creation (_client_kwargs). A real key in the environment is still used.
         self.name = name
         self.base_url = base_url
         self.api_key = api_key
@@ -141,55 +174,23 @@ class OpenAICompatible(Model):
 
     @property
     def context_window(self) -> int:
+        """Context window size in tokens, as passed to ``context_window=``."""
         return self._context_window
 
     def respond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """``client.chat.completions.create(..., stream=True, stream_options={"include_usage": True})``.
+        """Sends one request as a stream and returns the reply.
 
-        Sending:
+        Text chunks go to ``on_text`` as they arrive. Reasoning text some servers send (``reasoning_content``) is
+        kept as a ``RawBlock`` and sent back on later requests. A tool call with arguments that are not a JSON
+        object, or cut off by the output limit, is marked invalid so the tool is not run.
 
-        - ``system`` → first ``{"role": "system", "content": system}``
-        - assistant ``Message`` → ``{"role": "assistant", "content": text or None,
-          "tool_calls": [{"id", "type": "function", "function": {"name", "arguments": json.dumps(args)}}]}``.
-          The ``data`` of ``RawBlock(provider="openai_compatible")`` is merged into that message dict as is
-          (e.g. ``{"reasoning_content": ...}``). RawBlocks of other providers are dropped.
-        - user ``Message``: one ``{"role": "tool", "tool_call_id", "content"}`` per ``ToolResultBlock``, in block
-          order, then the remaining text as a single ``{"role": "user", "content": text}``.
-        - ``tools`` → ``[{"type": "function", "function": {"name", "description", "parameters": input_schema}}]``
-          (omitted if empty). ``tool_choice="none"`` if ``tool_choice="none"`` and there are tools.
-        - ``max_tokens`` and ``temperature`` are sent only when not None. But if the model name matches OpenAI's
-          reasoning (o-series, e.g. ``o3``) pattern, ``max_completion_tokens`` is sent instead of ``max_tokens``
-          (``max_tokens`` is the old name that o-series models reject).
-
-        Receiving:
-
-        - ``on_text(chunk)`` for each ``delta.content``. ``delta.tool_calls`` id/name/arguments are concatenated
-          per ``index``.
-        - Final block order: one ``TextBlock`` for the text (if any), then the ``ToolCall``s (in index order).
-          Empty-string arguments become ``{}``; non-JSON or non-dict arguments become
-          ``{INVALID_ARGS_KEY: raw text}``. A missing call id (servers that give none) becomes
-          ``f"call_{12 uuid hex chars}"``. If the same id (``call_0``) repeated every turn, late results and new
-          calls would easily get mixed up.
-          ``finish_reason == "length"`` means the reply was cut off, so the last tool call (where streaming
-          stopped) may be incomplete even if its arguments happen to be valid JSON: that call's ``args`` become
-          ``{INVALID_ARGS_KEY: TRUNCATED_ARGS_MESSAGE}`` so the tool does not run (earlier, complete calls are
-          left alone).
-        - Reasoning text from the server (``delta.reasoning_content`` etc., an extra field on the SDK model), if
-          any, goes first as ``RawBlock("openai_compatible", {"reasoning_content": concatenated value})``.
-        - Usage: ``prompt_tokens``, ``completion_tokens``, ``prompt_tokens_details.cached_tokens`` and
-          ``.cache_write_tokens`` (0 if missing) →
-          ``Usage(input_tokens=prompt - cached - cache_write, output_tokens=completion,
-          cache_read_tokens=cached, cache_write_tokens=cache_write, requests=1)``,
-          ``cost=self._cost(...)``. Zeros if no usage arrives. ``context_tokens`` = prompt + completion
-          (None if there is no usage). ``stop_reason`` = ``finish_reason``.
-
-        Errors: ``openai.RateLimitError`` → ``RateLimitError``; ``AuthenticationError``/
-        ``PermissionDeniedError``/the ``openai.OpenAIError`` raised when the client is created without
-        credentials → ``AuthError``; a ``BadRequestError`` with ``code == "context_length_exceeded"``
-        or a context overflow message (context length, maximum context, etc.) → ``ContextTooLongError``;
-        any other ``openai.OpenAIError`` → ``ProviderError``. ``from e`` keeps the original.
+        Raises:
+            RateLimitError: The server returned 429 after the SDK's retries.
+            AuthError: The API key is missing or rejected.
+            ContextTooLongError: The request is larger than the context window.
+            ProviderError: Any other API error.
         """
         import openai
 
@@ -222,8 +223,8 @@ class OpenAICompatible(Model):
     async def arespond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """The async version of ``respond`` with ``AsyncOpenAI``: the same request, reply and errors. A cancel
-        closes the stream."""
+        """The async version of ``respond``, with the same reply and errors. Cancelling it closes the stream."""
+        # Uses AsyncOpenAI, one client per event loop (see _async_client).
         import openai
 
         try:
@@ -251,6 +252,20 @@ class OpenAICompatible(Model):
         return self._to_reply(collected)
 
     def _request_kwargs(self, request: Request) -> dict[str, Any]:
+        """``client.chat.completions.create(..., stream=True, stream_options={"include_usage": True})`` arguments.
+
+        - ``system`` -> first ``{"role": "system", "content": system}``
+        - assistant ``Message`` -> ``{"role": "assistant", "content": text or None, "tool_calls": [{"id",
+          "type": "function", "function": {"name", "arguments": json.dumps(args)}}]}``. The ``data`` of
+          ``RawBlock(provider="openai_compatible")`` is merged into that dict as is (e.g.
+          ``{"reasoning_content": ...}``). RawBlocks of other providers are dropped.
+        - user ``Message``: one ``{"role": "tool", "tool_call_id", "content"}`` per ``ToolResultBlock`` in block
+          order, then the remaining text as one ``{"role": "user", "content": text}``.
+        - ``tools`` -> ``[{"type": "function", "function": {"name", "description", "parameters"}}]`` (omitted if
+          empty). ``tool_choice="none"`` only when there are tools.
+        - ``max_tokens`` and ``temperature`` only when not None. For o-series names, ``max_completion_tokens``
+          instead of ``max_tokens`` (the old name those models reject).
+        """
         kwargs: dict[str, Any] = {
             "model": self.name,
             "messages": self._to_openai_messages(request),
@@ -273,7 +288,14 @@ class OpenAICompatible(Model):
 
     @staticmethod
     def _wrap_error(e: Exception) -> Exception:
-        """The common error type for an SDK exception (see ``respond``)."""
+        """The common error type for an SDK exception.
+
+        ``openai.RateLimitError`` -> ``RateLimitError``; ``AuthenticationError``/``PermissionDeniedError`` ->
+        ``AuthError``; a ``BadRequestError`` with ``code == "context_length_exceeded"`` or a context overflow
+        message -> ``ContextTooLongError``; any other ``OpenAIError`` -> ``ProviderError``. The caller raises
+        ``from e``. The ``OpenAIError`` raised when the client is created without any credentials is wrapped in
+        ``AuthError`` by ``respond``/``arespond`` directly.
+        """
         import openai
 
         if isinstance(e, openai.RateLimitError):
@@ -285,6 +307,14 @@ class OpenAICompatible(Model):
         return ProviderError(str(e))
 
     def _to_reply(self, collected: _Collected) -> Reply:
+        """The collected stream as a ``Reply``.
+
+        Usage: ``prompt_tokens``, ``completion_tokens``, ``prompt_tokens_details.cached_tokens`` and
+        ``.cache_write_tokens`` (0 if missing) -> ``Usage(input_tokens=prompt - cached - cache_write,
+        output_tokens=completion, cache_read_tokens=cached, cache_write_tokens=cache_write, requests=1)`` with
+        ``cost=self._cost(...)``. Zeros if no usage arrives. ``context_tokens`` = prompt + completion (None
+        without usage). ``stop_reason`` = ``finish_reason``.
+        """
         message = self._reply_message(
             collected.text_parts, collected.reasoning_parts, collected.calls, collected.finish_reason
         )
@@ -324,7 +354,15 @@ class OpenAICompatible(Model):
         pending_calls: dict[int, dict[str, Any]],
         finish_reason: str | None = None,
     ) -> Message:
-        """Builds the final assistant ``Message`` from the pieces collected from the stream."""
+        """Builds the final assistant ``Message`` from the pieces collected from the stream.
+
+        Block order: the reasoning ``RawBlock`` (if any), one ``TextBlock`` (if any), then the ``ToolCall``s in
+        index order. Empty-string arguments become ``{}``; non-JSON or non-dict arguments become
+        ``{INVALID_ARGS_KEY: raw text}``. A missing call id becomes ``call_{12 uuid hex chars}``: if servers that
+        give none got ``call_0`` every turn, late results and new calls would get mixed up.
+        ``finish_reason == "length"``: the last call may be incomplete even if its JSON parses, so its ``args``
+        become ``{INVALID_ARGS_KEY: TRUNCATED_ARGS_MESSAGE}``. Earlier calls are left alone.
+        """
         blocks: list[Any] = []
         text = "".join(text_parts)
         if text:

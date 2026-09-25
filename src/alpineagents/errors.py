@@ -33,7 +33,8 @@ class RateLimitError(ProviderError):
 
 
 class ContextTooLongError(ProviderError):
-    """The context is larger than the model's context window. Add a compaction block (compact_if_full) to the loop."""
+    """The context is larger than the model's context window. Add a compaction block such as ``compact_if_full``
+    to the loop."""
 
 
 class AuthError(ProviderError):
@@ -54,7 +55,7 @@ class NoHumanError(AlpineAgentsError):
 class MCPConnectionError(AlpineAgentsError):
     """Could not connect to an MCP server, or the connection was lost. The original exception is in ``__cause__``.
 
-    Errors the server reports for a tool call (``isError``) are not exceptions: they go to the model as the result.
+    Errors the server reports for a tool call (``isError``) go to the model as the result instead.
     """
 
 

@@ -53,32 +53,46 @@ def _needs_until_and_limit() -> TypeError:
 
 
 class Loop:
-    """A loop made by ``@loop``. Calling ``loop(agent, state)`` repeats the body until it stops.
+    """A loop made by ``@loop``. Calling ``loop(agent, state)`` runs the body turn by turn and returns
+    ``state.answer``.
 
-    Attributes: ``body`` (the original function), ``until`` (tuple of condition functions), ``limit`` (int),
-    ``is_async`` (the body is ``async def``, or an async Loop: calling the loop returns a coroutine).
-    ``__name__``, ``__doc__`` and ``__wrapped__`` follow the body (functools.update_wrapper).
-    Even when the body is another Loop, ``body``/``until``/``limit``/``is_async`` are this loop's own.
+    Before every turn it checks, in order:
+
+    1. ``state.is_finished()``: stops with ``state.stopped_by == "finish"``
+    2. each ``until`` function: stops with that function's name
+    3. the turn count against ``limit``: stops with ``"limit"``
+
+    Each call counts turns from zero. Exceptions from the body or the ``until`` functions propagate as is.
+    An async loop (``async def`` body) returns a coroutine that does the same; its ``until`` functions stay
+    plain functions.
     """
 
+    # __name__, __doc__ and __wrapped__ follow the body (functools.update_wrapper). Even when the body is another
+    # Loop, body/until/limit/is_async are this loop's own.
     body: Callable[[Any, State], Any]
+    """The one-turn function."""
     until: tuple[Condition, ...]
+    """The stop conditions, each a ``State -> bool`` function."""
     limit: int
+    """The most turns one call runs."""
     is_async: bool
+    """``True`` if the body is ``async def``. Calling the loop then returns a coroutine."""
 
     def __init__(self, body: Callable[[Any, State], Any], *, until: Any, limit: Any) -> None:
-        """All checks happen here (mistake-proofing errors, when ``@loop`` is applied):
+        """Usually created with ``@loop``. Every check happens here, when the decorator is applied.
 
-        - ``until`` or ``limit`` is ``None`` (missing) → ``TypeError``: both are required, example
-          ``@loop(until=State.is_answered, limit=50)``
-        - ``until`` is a bool (a call result, like ``until=state.is_answered()``) → ``TypeError``: pass
-          ``State.is_answered`` without parentheses
-        - ``until`` is a method bound to a State instance (``until=state.is_answered``) → ``TypeError``:
-          pass ``State.is_answered``
-        - ``until`` is one function or a list/tuple of functions. ``TypeError`` if any is not callable.
-          If ``__name__`` is ``"<lambda>"``, ``warnings.warn`` (UserWarning): stopped_by needs a name, so use a
-          named function. A function named ``"finish"``/``"limit"`` is a ``ValueError`` (reserved).
-        - ``limit`` is an int ≥ 1 (not a bool). Otherwise ``TypeError``/``ValueError``.
+        Args:
+            body: The one-turn function ``(agent, state) -> None``, or an ``async def`` one.
+            until: A ``State -> bool`` function or a list of them. Pass the function itself, e.g.
+                ``State.is_answered``. A lambda works but leaves no useful name in ``stopped_by``, so it warns.
+            limit: The most turns, an integer of 1 or more.
+
+        Raises:
+            TypeError: ``until`` or ``limit`` is missing, ``until`` got a call result (``state.is_answered()``)
+                or a bound method (``state.is_answered``), an ``until`` item is not callable, or ``limit`` is not
+                an integer.
+            ValueError: ``limit`` is less than 1, or an ``until`` function is named ``finish`` or ``limit``
+                (reserved names).
         """
         if until is None or limit is None:
             raise _needs_until_and_limit()
@@ -153,9 +167,7 @@ class Loop:
         self.is_async = is_async_callable(body)
 
     def __call__(self, agent: Agent, state: State) -> Any:
-        """Each call counts turns from 0 again:
-
-        ::
+        """Each call counts turns from 0 again::
 
             count = 0
             while True:
@@ -232,9 +244,18 @@ class Loop:
         return state.answer
 
     def copy(self, *, until: Any = ..., limit: Any = ...) -> Loop:
-        """A new Loop with only ``until``/``limit`` changed. Omitted ones keep their value. The original is unchanged.
+        """Returns a new Loop with ``until`` or ``limit`` changed. The original is unchanged.
 
-        New values go through the same checks as ``__init__``.
+        Example:
+            ``quick = coding.copy(limit=5)``
+
+        Args:
+            until: New stop conditions. Omit to keep the current ones.
+            limit: A new turn limit. Omit to keep the current one.
+
+        Raises:
+            TypeError: A new value fails the same checks as ``@loop``.
+            ValueError: A new value fails the same checks as ``@loop``.
         """
         new_until = self.until if until is ... else until
         new_limit = self.limit if limit is ... else limit
@@ -246,11 +267,31 @@ class Loop:
 
 
 def loop(fn: Any = None, /, *, until: Any = None, limit: Any = None) -> Any:
-    """``@loop(until=..., limit=...)``.
+    """Turns a one-turn function into a loop that takes ``(agent, state)`` and returns the answer.
 
-    - Used bare as ``@loop`` (``fn`` is a function) → ``TypeError``: until and limit are required, with an example.
-    - ``@loop(until=..., limit=...)`` returns a decorator that takes the body and returns
-      ``Loop(body, until=until, limit=limit)``. ``Loop.__init__`` does the checks.
+    ``until`` and ``limit`` are both required, so how the loop stops is always written next to it. The body
+    returns nothing; to set the answer yourself, call ``state.finish(answer)``. An ``async def`` body makes an
+    async loop for ``agent.arun``.
+
+    Example:
+        ```python
+        @loop(until=State.is_answered, limit=50)
+        def coding(agent: Agent, state: State):
+            compact_if_full(agent, state)
+            agent.think(state)
+            if state.wants_tools():
+                agent.use_tools(state)
+        ```
+
+    Args:
+        until: A ``State -> bool`` function or a list of them, checked before every turn.
+        limit: The most turns one run takes. Reaching it stops quietly with ``state.stopped_by == "limit"``.
+
+    Returns:
+        A decorator that turns the body into a ``Loop``.
+
+    Raises:
+        TypeError: ``@loop`` is used bare, without ``until`` and ``limit``. See ``Loop`` for the other checks.
     """
     if fn is not None:
         raise _needs_until_and_limit()
@@ -275,7 +316,12 @@ def _condition_name(condition: Any) -> str:
 
 @loop(until=State.is_answered, limit=50)
 def default_loop(agent: Agent, state: State):
-    """The default loop. Copy it with ``alpineagents add default_loop`` and edit it to start writing your own loop."""
+    """The loop ``agent.run`` uses when the Agent has no loop of its own.
+
+    Each turn compacts the context if it is over 60% full, asks the model, and runs the tools it asked for.
+    Stops when the model answers without tool calls (``State.is_answered``) or after 50 turns. Copy it as a
+    starting point for your own loop.
+    """
     compact_if_full(agent, state)
     agent.think(state)
     if state.wants_tools():
@@ -284,8 +330,7 @@ def default_loop(agent: Agent, state: State):
 
 @loop(until=State.is_answered, limit=50)
 async def adefault_loop(agent: Agent, state: State):
-    """The async default loop, used by ``agent.arun()`` when the Agent has the default loop. Same steps as
-    ``default_loop``."""
+    """The async version of ``default_loop``, used by ``agent.arun`` when the Agent has no loop of its own."""
     await acompact_if_full(agent, state)
     await agent.athink(state)
     if state.wants_tools():

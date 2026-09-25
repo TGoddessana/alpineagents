@@ -26,7 +26,22 @@ _NO = {"n", "no", "false", "0"}
 
 
 class Human(ABC):
-    """A conversation partner that asks a person. A subclass implements ``ask``, ``aask``, or both."""
+    """Asks a person and gets an answer. Used by ``agent.ask_human``.
+
+    A subclass implements ``ask``, or ``async aask`` for a person reached asynchronously (a web page, a chat
+    app), or both. An implementation asks again when an answer does not fit the ``returns`` format, asks one
+    question at a time, and does not change the State.
+
+    Raises:
+        TypeError: When creating an instance of a subclass that implements neither ``ask`` nor ``aask``.
+
+    Example:
+        ```python
+        class WebHuman(Human):
+            async def aask(self, state, prompt, returns=str):
+                return parse_answer(await ask_on_the_page(prompt), returns)
+        ```
+    """
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Human:
         # Checked here, not at class creation, so abstract intermediate classes still work.
@@ -43,9 +58,15 @@ class Human(ABC):
         return super().__new__(cls)
 
     def ask(self, state: State, prompt: str, returns: Any = str) -> Any:
-        """Ask a person and return the answer in the ``returns`` format. Ask again when the answer does not fit.
+        """Asks a person and returns the answer in the ``returns`` format, asking again when it does not fit.
 
-        The default is for a Human that implements only ``aask``: ``TypeError`` pointing to ``aask_human``.
+        Args:
+            state: The State of the run that asks.
+            prompt: The question.
+            returns: ``str``, ``bool`` or ``Literal[...]``.
+
+        Raises:
+            TypeError: The Human implements only ``aask``. Ask it with ``await agent.aask_human(...)``.
         """
         raise TypeError(
             fix_message(
@@ -56,8 +77,8 @@ class Human(ABC):
         )
 
     async def aask(self, state: State, prompt: str, returns: Any = str) -> Any:
-        """The async version of ``ask``, used by ``agent.aask_human``. The default runs ``ask`` on a worker
-        thread (a blocking ``input()`` does not block the event loop)."""
+        """The async version of ``ask``, used by ``agent.aask_human``. By default it runs ``ask`` on a worker
+        thread, so a blocking ``input()`` does not block the event loop."""
         return await run_in_thread(self.ask, state, prompt, returns)
 
 

@@ -27,24 +27,61 @@ __all__ = ["FakeModel", "FakeHuman", "tool_call"]
 
 
 def tool_call(name: str, /, **args: Any) -> ToolCall:
-    """A tool call to put in FakeModel replies. ``id`` is new each time: ``"call_"`` + 12 hex digits (uuid4)."""
+    """Builds a tool call to put in ``FakeModel`` replies.
+
+    Args:
+        name: The tool name.
+        **args: The tool arguments.
+
+    Returns:
+        A ``ToolCall`` with a new id each time (``"call_"`` + 12 hex digits).
+
+    Example:
+        ```python
+        FakeModel([tool_call("read_file", path="main.py"), "Done"])
+        ```
+    """
     return ToolCall(name=name, args=dict(args), id=f"call_{uuid.uuid4().hex[:12]}")
 
 
 class FakeModel(Model):
-    """A Model that returns prepared replies in order. ``provider = "fake"``, ``name`` defaults to ``"fake"``.
+    """A Model that returns prepared replies in order, with no API key or network.
 
-    Each reply item is used by one request (``think``, one attempt of ``ask``, ``compact``):
+    Each request (``think``, one attempt of ``ask``, ``compact``) uses the next item:
 
-    - ``str`` → a text reply (no tool calls)
-    - ``ToolCall`` → a reply with just that one call
-    - ``list``/``tuple`` (mixing ``str``, ``ToolCall``, ``RawBlock``) → a reply with those blocks in order
-    - ``Reply`` → used as is
-    - a ``BaseException`` instance → that exception is raised (for testing error paths)
-    - callable → calls ``item(request)`` and converts the result by the rules above
+    - ``str``: a text reply with no tool calls
+    - ``ToolCall``: a reply with just that call (see ``tool_call``)
+    - ``list`` or ``tuple`` of ``str``, ``ToolCall`` and ``RawBlock``: a reply with those blocks in order
+    - ``Reply``: used as is
+    - an exception instance: raised, for testing error paths
+    - a callable: called with the ``Request``, and its result is used by the rules above
+
+    Token usage is estimated from the text, so ``state.usage`` fills in as it would with a real model.
+    Safe to use from several threads.
+
+    Args:
+        replies: The reply items, in order.
+        name: Model name.
+        context_window: Context window size in tokens. A request estimated above it raises
+            ``ContextTooLongError``, so compaction can be tested.
+        price: Token prices for ``usage.cost``.
+
+    Example:
+        ```python
+        fake = FakeModel([tool_call("read_file", path="main.py"), "The bug is on line 3"])
+        agent.copy(model=fake, reporter=None).run(State("Find the bug"))
+        assert fake.remaining == 0
+        ```
     """
 
     provider = "fake"
+    """Always ``"fake"``."""
+    name: str
+    """Model name, ``"fake"`` by default."""
+    price: Price | None
+    """Token prices used for ``usage.cost``."""
+    requests: list[Request]
+    """Every request received, in order. Use it to assert what the agent sent."""
 
     def __init__(
         self,
@@ -54,7 +91,7 @@ class FakeModel(Model):
         context_window: int = 200_000,
         price: Price | None = None,
     ) -> None:
-        """``requests``: a list of received Requests, in order (for assertions). Items are taken thread-safely."""
+        # Items are taken under _lock, so concurrent runs share one reply list safely.
         self.name = name
         self.price = price
         self._context_window = context_window
@@ -65,6 +102,7 @@ class FakeModel(Model):
 
     @property
     def context_window(self) -> int:
+        """Context window size in tokens, as passed to ``context_window=``."""
         return self._context_window
 
     @property
@@ -76,18 +114,16 @@ class FakeModel(Model):
     def respond(
         self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
     ) -> Reply:
-        """Take the next reply item and build a Reply.
+        """Records ``request`` in ``requests`` and returns the next prepared reply.
 
-        1. Append ``request`` to ``self.requests``.
-        2. If ``self.count_tokens(request)`` is larger than ``context_window``, raise ``ContextTooLongError``
-           (no item is used).
-        3. If no items are left, raise ``RuntimeError`` ("FakeModel: ran out of prepared replies (all N used)"
-           plus the last message).
-        4. Call ``on_text(text)`` once per text block (if ``on_text`` is given).
-        5. ``Usage(input_tokens=count_tokens(request), output_tokens=<reply estimate>, requests=1,
-           cost=self._cost(...))``, ``context_tokens`` = input + output, ``stop_reason`` = ``"tool_use"`` if there
-           are tool calls, otherwise ``"end_turn"``.
+        Each text block is passed to ``on_text`` once.
+
+        Raises:
+            ContextTooLongError: The estimated request size is above ``context_window``. No item is used.
+            RuntimeError: Every prepared reply has been used.
         """
+        # Usage: input = count_tokens(request), output = estimate of the reply text, requests=1, cost from price.
+        # context_tokens = input + output. stop_reason = "tool_use" with tool calls, otherwise "end_turn".
         with self._lock:
             self.requests.append(request)
             estimated = self.count_tokens(request)
@@ -147,14 +183,25 @@ class FakeModel(Model):
 
 
 class FakeHuman(Human):
-    """A Human that returns prepared answers in order (``FakeHuman(["yes", "always"])``).
+    """A Human that returns prepared answers in order, for testing code that calls ``ask_human``.
 
-    - ``questions``: a list of received questions (prompts), in order.
-    - Answers go through ``parse_answer(answer, returns)``. If one does not fit (``ValueError``), the next answer is
-      used, as if the person answered again. When answers run out, raises ``RuntimeError``
-      ("FakeHuman: ran out of prepared answers", with the last question).
-    - Thread-safe (one question at a time).
+    Each answer is converted to the requested ``returns`` type the same way a typed answer is. An answer that
+    does not fit is skipped and the next one is used, as if the person answered again. An empty answer does not
+    fit ``returns=str``. Safe to use from several threads; questions are answered one at a time.
+
+    Args:
+        answers: The answers, in order.
+
+    Example:
+        ```python
+        human = FakeHuman(["yes", "always"])
+        agent.copy(model=fake, human=human, reporter=None).run(state)
+        assert human.remaining == 0
+        ```
     """
+
+    questions: list[str]
+    """Every question asked, in order."""
 
     def __init__(self, answers: Iterable[Any]) -> None:
         self._answers: list[Any] = list(answers)
@@ -164,10 +211,16 @@ class FakeHuman(Human):
 
     @property
     def remaining(self) -> int:
+        """Number of answers not used yet."""
         with self._lock:
             return len(self._answers) - self._index
 
     def ask(self, state: State, prompt: str, returns: Any = str) -> Any:
+        """Records ``prompt`` in ``questions`` and returns the next answer that fits ``returns``.
+
+        Raises:
+            RuntimeError: Every prepared answer has been used.
+        """
         with self._lock:
             self.questions.append(prompt)
             while True:

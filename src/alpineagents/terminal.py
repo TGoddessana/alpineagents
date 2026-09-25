@@ -57,7 +57,10 @@ def _turns(n: int) -> str:
 
 
 class Terminal(Reporter, Human):
-    """Shows progress in the terminal and asks the human in the terminal.
+    """Shows progress in the terminal and asks the human in the terminal. It is the default ``reporter`` and
+    ``human`` of every Agent.
+
+    Output from several threads never interleaves, and while a question is being written, other output waits.
 
     Example output::
 
@@ -77,15 +80,19 @@ class Terminal(Reporter, Human):
         input: Callable[[str], str] | None = None,
         show_text: bool = True,
     ) -> None:
-        """If ``output`` is None, ``sys.stdout`` is looked up on every write (so tests' capsys can capture it).
-        If ``input`` is None, ``builtins.input``. With ``show_text=False``, model text streaming is not shown.
-
-        Holds two locks: the output lock (``threading.RLock``, all writes) and the question lock (one question
-        at a time).
         """
+        Args:
+            output: Where to write. ``None`` writes to ``sys.stdout``, looked up on every write.
+            input: The function that reads an answer. It gets the full prompt text and shows it itself.
+                ``None`` uses ``builtins.input``, and Terminal writes the prompt to ``output``.
+            show_text: ``False`` hides the model's streamed text and shows only the structure lines.
+        """
+        # Holds two locks: the output lock (threading.RLock, all writes) and the question lock (one question at a
+        # time). Looking up sys.stdout on every write lets tests' capsys capture it.
         self._output = output
         self._input = input
         self.show_text = show_text
+        """Whether the model's streamed text is shown. Can be changed between runs."""
         self._output_lock = threading.RLock()
         self._question_lock = threading.Lock()
         # Whether we are at the start of a line (where the indent must be written again). Starts True.
@@ -131,16 +138,15 @@ class Terminal(Reporter, Human):
         """Prints nothing."""
 
     def on_think_start(self, state: State) -> None:
-        """One line: ``{indent}[turn {state.turn}] thinking``. The indent is ``"  " * state.depth``.
-
-        Right after the header, flushes the lines deferred by ``on_context_change`` (if any), so a
-        compaction line shows up under the new turn header.
-        """
+        """Writes ``[turn N] thinking``."""
+        # Right after the header, flushes the lines deferred by on_context_change (if any), so a compaction line
+        # shows up under the new turn header. The indent is "  " * state.depth.
         self._write_line(state, f"[turn {state.turn}] thinking")
         self._flush_pending_context_lines()
 
     def on_text(self, state: State, chunk: str) -> None:
-        """If ``show_text``, writes the chunk as is (indent at each line start). Remembers an unfinished line."""
+        """Writes the model's text as it arrives, unless ``show_text`` is ``False``."""
+        # Indents at each line start and remembers an unfinished line.
         if not self.show_text or not chunk:
             return
         indent = "  " * state.depth
@@ -158,7 +164,7 @@ class Terminal(Reporter, Human):
             out.flush()
 
     def on_think_end(self, state: State, reply: Reply) -> None:
-        """Ends the line if the text stopped mid-line. Prints nothing otherwise."""
+        """Ends the line if the text stopped mid-line."""
         with self._output_lock:
             if not self._at_line_start:
                 out = self._out()
@@ -167,15 +173,16 @@ class Terminal(Reporter, Human):
                 self._at_line_start = True
 
     def on_tool_start(self, state: State, call: ToolCall) -> None:
-        """``{indent}  tool {format_call(call)}``."""
+        """Writes ``tool read_file(path="main.py")``."""
         self._write_line(state, f"  tool {format_call(call)}")
 
     def on_tool_end(self, state: State, call: ToolCall, result: str, outcome: ToolOutcome) -> None:
-        """By ``outcome.kind``: input_error ``  {result}``; aborted or interrupted ``  aborted {call.name}: {result}``
-        (e.g. ``(aborted: TimeoutError)``, ``(interrupted by user)``); denied ``  denied {call.name}: {result}``;
-        error ``  error {call.name}: {first line of result, at most 100 characters}``;
-        done ``  done {size}`` (UTF-8 bytes: ``512B``, ``1.2KB``, ``3.4MB``).
-        """
+        """Writes one line by ``outcome.kind``: ``done 1.2KB`` (the result size), ``error {name}: ...``,
+        ``aborted {name}: ...``, ``denied {name}: ...``, or the input error itself."""
+        # input_error "  {result}"; aborted or interrupted "  aborted {call.name}: {result}" (e.g.
+        # "(aborted: TimeoutError)", "(interrupted by user)"); denied "  denied {call.name}: {result}";
+        # error "  error {call.name}: {first line of result, at most 100 characters}";
+        # done "  done {size}" (UTF-8 bytes: 512B, 1.2KB, 3.4MB).
         kind = outcome.kind
         if kind == "input_error":
             text = f"  {result}"
@@ -190,17 +197,15 @@ class Terminal(Reporter, Human):
         self._write_line(state, text)
 
     def on_context_change(self, state: State, change: ContextChange) -> None:
-        """``  {name}: {before} → {after} tokens`` (tokens as ``121k`` at 1000 and above).
-
-        Names: compact ``context compacted`` (followed by `` (cache rebuilds)``), start_from
-        ``context restarted`` (same tail), clear_tool_results ``tool results cleared``, rollback
-        ``context rolled back``.
-
-        Queued instead of written right away: many calls, like ``compact_if_full``, change the context just
-        before the next ``think``, so writing immediately would attach the line to the previous turn's output
-        (it belongs under the next turn header). Flushed after the next ``on_think_start`` writes its header,
-        or, if ``run`` ends first, by ``on_run_end`` before it writes the last line.
-        """
+        """Writes ``context compacted: 121k → 18k tokens (cache rebuilds)`` and similar lines, under the next turn
+        header."""
+        # Names: compact "context compacted" (followed by " (cache rebuilds)"), start_from "context restarted"
+        # (same tail), clear_tool_results "tool results cleared", rollback "context rolled back".
+        #
+        # Queued instead of written right away: many calls, like compact_if_full, change the context just before
+        # the next think, so writing immediately would attach the line to the previous turn's output (it belongs
+        # under the next turn header). Flushed after the next on_think_start writes its header, or, if run ends
+        # first, by on_run_end before it writes the last line.
         name = _CHANGE_NAMES.get(change.kind, change.kind)
         tail = " (cache rebuilds)" if change.kind in _CACHE_RESET_KINDS else ""
         before = _format_tokens(change.before_tokens)
@@ -210,23 +215,18 @@ class Terminal(Reporter, Human):
             self._pending_context_lines.append((state.depth, text))
 
     def on_model_event(self, state: State, event: ModelEvent) -> None:
-        """``  model: {event.message}`` (ends the current line first if mid-line)."""
+        """Writes ``model: {event.message}``."""
         self._write_line(state, f"  model: {event.message}")
 
     def on_run_end(self, state: State, error: BaseException | None) -> None:
-        """One last line (ends the current line first if mid-line):
-
-        - Normal: ``done: {stopped_by} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])``
-          (cost is left out when None; the cache hit rate is left out when None or 0. For a loop without
-          ``@loop``, ``stopped_by`` is ``None``: ``done: (2 turns)``). ``{turns}`` is ``1 turn`` / ``n turns``.
-        - ``stopped_by == "limit"``: ``done: reached limit({state.stopped_limit}), the task may be unfinished
-          ({turns})``
-        - ``KeyboardInterrupt``/``CancelledError``: ``done: interrupted by user ({turns})``
-        - Any other exception: ``done: error {type(error).__name__}: {error} ({turns})``
-
-        Before that, flushes any lines ``on_context_change`` still has queued because no next ``think`` came
-        (e.g. the last compaction happened after this run's last turn; otherwise they would be lost).
-        """
+        """Writes one last line, such as ``done: is_answered (5 turns, ~$0.42, cache hit 84%)``,
+        ``done: reached limit(50), the task may be unfinished (50 turns)`` or ``done: interrupted by user (3 turns)``."""
+        # - Normal: "done: {stopped_by} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])" (cost is left out when
+        #   None; the cache hit rate is left out when None or 0. For a loop without @loop, stopped_by is None:
+        #   "done: (2 turns)").
+        # - Any other exception: "done: error {type(error).__name__}: {error} ({turns})"
+        # Before that, flushes any lines on_context_change still has queued because no next think came (e.g. the
+        # last compaction happened after this run's last turn; otherwise they would be lost).
         self._flush_pending_context_lines()
         turns = _turns(state.turn)
         if error is not None:
@@ -252,20 +252,25 @@ class Terminal(Reporter, Human):
     # ------------------------------------------------------------ Human
 
     def ask(self, state: State, prompt: str, returns: Any = str) -> Any:
-        """Takes the question lock (concurrent questions wait in line) and asks. **The output lock is released
-        while ``input`` is called**, so that if this question is abandoned without an answer (e.g. the tool was
-        interrupted with Ctrl+C), the last line from ``on_run_end`` does not get stuck waiting on the lock too.
+        """Asks in the terminal and returns the answer in the ``returns`` format. Choices are shown after the
+        question (``yes/no``, ``a/b/c``), and an answer that does not fit gets a hint and the question again.
+        Concurrent questions wait in line.
 
-        - Ends the current line first if mid-line. The question is indented by ``"  " * state.depth``.
-        - If no ``input`` was given (``builtins.input`` is used), we write the question ourselves to this
-          Terminal's ``output``: ``builtins.input`` always writes its prompt to the real ``sys.stdout``, so with
-          a different ``output=`` stream the question and the re-ask message would end up in different places.
-          When ``input=`` is given, that function decides how to show the prompt (it gets the full text with
-          ``{describe_choices(returns)}`` appended), so we leave it alone.
-        - If ``parse_answer(answer, returns)`` raises ``ValueError``, writes its message on one line and asks
-          again.
-        - ``EOFError`` and ``KeyboardInterrupt`` propagate as is.
+        Raises:
+            EOFError: The input ended.
+            KeyboardInterrupt: The person pressed Ctrl+C.
         """
+        # Takes the question lock and asks. The output lock is released while input is called, so that if this
+        # question is abandoned without an answer (e.g. the tool was interrupted with Ctrl+C), the last line from
+        # on_run_end does not get stuck waiting on the lock too.
+        #
+        # - Ends the current line first if mid-line. The question is indented by "  " * state.depth.
+        # - If no input was given (builtins.input is used), we write the question ourselves to this Terminal's
+        #   output: builtins.input always writes its prompt to the real sys.stdout, so with a different output=
+        #   stream the question and the re-ask message would end up in different places. When input= is given,
+        #   that function decides how to show the prompt (it gets the full text with describe_choices(returns)
+        #   appended), so we leave it alone.
+        # - If parse_answer(answer, returns) raises ValueError, writes its message on one line and asks again.
         indent = "  " * state.depth
         choices = describe_choices(returns)
         shown = f"{prompt} ({choices}) " if choices else f"{prompt} "

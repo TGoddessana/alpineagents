@@ -90,7 +90,17 @@ def _same_tool(a: Tool, b: Tool) -> bool:
 
 
 class Agent:
-    """Settings (unchanged after creation) and the actions that need a model, tools or a human."""
+    """An agent's settings, and the actions that need a model, tools or a human.
+
+    Settings do not change after creation. Use ``copy`` to get an Agent with different settings.
+    The history of a run lives in a ``State``, and the order of steps is decided by the loop.
+
+    Example:
+        ```python
+        agent = Agent(model="claude-sonnet-5", system="You are a coding assistant", tools=[read_file])
+        answer = agent.run("Find the bug in main.py")
+        ```
+    """
 
     def __init__(
         self,
@@ -105,22 +115,36 @@ class Agent:
         name: str | None = None,
         description: str | None = None,
     ) -> None:
-        """Checks and stores the settings. Mistakes are reported right here, at ``Agent(...)`` creation
-        (mistake-proofing errors).
+        """Creates an Agent. Mistakes in the settings are reported here, with how to fix them.
 
-        - ``model``: builds a Model object with ``resolve_model(model)`` (no network).
-        - ``tools``: Agent instances among the items are checked first: missing ``name`` or ``description``
-          raises ``ValueError`` (the missing argument, e.g. ``Agent(name="researcher", description="...", ...)``).
-          If both are present, subagents are outside the MVP, so ``NotImplementedError``
-          ("Subagents are not supported yet"). The rest are flattened with ``collect_tools`` (duplicate names
-          and missing ``@tool`` error there).
-        - ``skills``: ``NotImplementedError`` if not empty (outside the MVP).
-        - ``loop``: ``alpineagents.loop.default_loop`` if ``None``. ``TypeError`` if not callable.
-        - ``reporter``/``human``: ``DEFAULT`` means ``terminal.default_terminal()`` (one per process, the same
-          object for both). ``None`` means none. ``reporter`` is an object with the Reporter ``on_*`` methods,
-          ``human`` an object with ``ask``.
-        - The original arguments are kept as given, for ``copy`` (including the ``DEFAULT`` marker).
+        Creating an Agent uses no network and needs no API key.
+
+        Args:
+            model: A model name such as ``"claude-sonnet-5"``, ``"anthropic/claude-sonnet-5"`` or
+                ``"ollama/llama3:8b"``, or a ``Model`` object such as ``Anthropic(...)`` when you need settings.
+            system: The system prompt.
+            tools: ``@tool`` functions, objects with ``@tool`` methods, single ``@tool`` methods, ``MCP`` servers
+                and single MCP tools (``github.create_issue``).
+            loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
+            reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent.
+            human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human.
+            name: The Agent's name.
+            description: What the Agent does.
+
+        Raises:
+            TypeError: A setting has the wrong type, for example a function without ``@tool`` in ``tools=``,
+                a ``loop`` that is not callable, or a Reporter or Human class instead of an object.
+            ValueError: Two tools share a name, or the model string is ambiguous.
         """
+        # - model: resolve_model(model), no network.
+        # - tools: Agent items are checked first: missing name or description is a ValueError; with both,
+        #   NotImplementedError (subagents are outside the MVP). MCP items are grouped by server (_add_mcp).
+        #   The rest are flattened with collect_tools (duplicate names and missing @tool error there).
+        # - skills: NotImplementedError if not empty (outside the MVP).
+        # - loop: default_loop if None. TypeError if not callable.
+        # - reporter/human: DEFAULT means terminal.default_terminal() (one per process, the same object for
+        #   both). reporter needs the Reporter on_* methods, human needs ask or aask.
+        # - The original arguments are kept as given in _kwargs, for copy (including the DEFAULT marker).
         tools = _as_tuple(tools, "tools", "Agent(model=..., tools=[web_search])")
         skills = (skills,) if isinstance(skills, str) else _as_tuple(
             skills, "skills", 'Agent(model=..., skills=["./skills"])'
@@ -249,16 +273,17 @@ class Agent:
 
     @property
     def model(self) -> Model:
-        """The resolved Model object."""
+        """The Model object. A model string given to ``Agent(model=...)`` is already turned into one."""
         return self._model
 
     @property
     def system(self) -> str | None:
+        """The system prompt, or ``None``."""
         return self._system
 
     @property
     def tools(self) -> tuple[Any, ...]:
-        """The items passed in ``tools=``, as given (a tuple)."""
+        """The items passed in ``tools=``, as given."""
         return self._tools
 
     @property
@@ -267,12 +292,13 @@ class Agent:
 
     @property
     def loop(self) -> Any:
-        """This Agent's loop (default ``default_loop``)."""
+        """The loop ``run`` calls. ``default_loop`` unless ``loop=`` was given."""
         return self._loop
 
     @property
     def reporter(self) -> Reporter | None:
-        """The actual Reporter object (the default Terminal if ``DEFAULT``)."""
+        """The Reporter that receives progress notifications, or ``None``. Defaults to the shared ``Terminal``."""
+        # DEFAULT resolves to terminal.default_terminal() on each access.
         if self._reporter is DEFAULT:
             from .terminal import default_terminal
 
@@ -281,7 +307,7 @@ class Agent:
 
     @property
     def human(self) -> Human | None:
-        """The actual Human object (the default Terminal if ``DEFAULT``)."""
+        """The Human that answers ``ask_human``, or ``None``. Defaults to the shared ``Terminal``."""
         if self._human is DEFAULT:
             from .terminal import default_terminal
 
@@ -290,36 +316,50 @@ class Agent:
 
     @property
     def name(self) -> str | None:
+        """The Agent's name, or ``None``."""
         return self._name
 
     @property
     def description(self) -> str | None:
+        """What the Agent does, or ``None``."""
         return self._description
 
     # ------------------------------------------------------------ actions
 
     def run(self, task: str | State) -> Any:
-        """Given a string, creates a new ``State(task)``; calls the loop and returns what the loop returns.
+        """Runs the loop on a task and returns what the loop returns, usually the answer.
 
-        Order (ARCHITECTURE.md "run order and the context rules after exceptions"):
+        MCP servers in ``tools=`` connect for the run and disconnect after it, unless ``with agent:`` keeps
+        them open. If an exception leaves the run, it is recorded in ``state.history``, tool calls still
+        waiting for a result are closed (``(interrupted by user)`` after Ctrl+C), and the exception is
+        raised as is. After Ctrl+C you can call ``run`` again with the same State.
 
-        1. str → ``State(task)``; State → as is; anything else → ``TypeError``.
-        2. ``ValueError`` if ``state.is_finished()``: a finish()ed State cannot run again. Fix: a new State.
-           Clears ``state.stopped_by`` to ``None`` (so a run ending in an exception does not keep the last
-           run's reason). Records the context window size with ``state._note_window(...)`` (so
-           ``compact_if_full`` works on the first turn; the owner is not set).
-        3. ``reporter.on_run_start(state)``
-        4. ``try: return self.loop(self, state)``
-        5. ``except BaseException as e``: ``state._record_error(e)``; ``state._close_pending(e)``; ``raise``
-           (the exception is re-raised as is, KeyboardInterrupt included)
-        6. ``finally``: closes the MCP connections this run opened, then ``reporter.on_run_end(state, error)``
-           (``error=None`` on normal exit).
+        Args:
+            task: A task string, which starts a new ``State``, or a ``State`` to continue.
 
-        ``on_run_start`` is also called inside the ``try``: whichever step raises, ``on_run_end`` is called.
-        Right after it, MCP servers in ``tools=`` connect (unless ``with agent:`` or another run holds them) and
-        the context window size is recorded with the full tool list.
-        An async loop (``async def`` body) raises ``TypeError`` before step 1: use ``arun``.
+        Returns:
+            What the loop returns. The default loop returns ``state.answer``.
+
+        Raises:
+            TypeError: The loop is async (use ``arun``), or ``task`` is neither a string nor a State.
+            ValueError: The State was already ended with ``state.finish()``.
+
+        Example:
+            ```python
+            state = State("Find the bug in this repo")
+            answer = agent.run(state)
+            print(state.stopped_by, state.usage.cost)
+            ```
         """
+        # Order (ARCHITECTURE.md "run order and the context rules after exceptions"):
+        # 1. _start_run: str -> State(task); State as is; anything else TypeError. A finish()ed State is a
+        #    ValueError. Clears state.stopped_by so a run ending in an exception keeps no stale reason.
+        # 2. try: on_run_start; connect MCP (_mcp_open); state._note_window(...) records the window size with the
+        #    full tool list so compact_if_full works on the first turn (the owner is not set); return loop(...)
+        #    on_run_start is inside the try, so on_run_end is called whichever step raises.
+        # 3. except BaseException: state._record_error(e); state._close_pending(e); raise (KeyboardInterrupt too)
+        # 4. finally: close the MCP connections this run opened, then on_run_end(state, error) (None on success).
+        # An async loop raises TypeError before step 1.
         check_sync_call("run")
         if is_async_callable(self._loop):
             raise TypeError(
@@ -354,12 +394,22 @@ class Agent:
                     reporter.on_run_end(state, error)
 
     async def arun(self, task: str | State) -> Any:
-        """The async version of ``run``: the same steps, awaiting an async loop.
+        """The async version of ``run``.
 
-        The loop is this Agent's loop if it is async; ``adefault_loop`` if it is the default loop; otherwise
-        ``TypeError`` (a sync loop would block the event loop). Cancelling the awaiting task is an interrupt:
-        the same rules as ``KeyboardInterrupt`` (pending calls are closed with ``(interrupted by user)``).
+        Uses this Agent's loop if it is async, or ``adefault_loop`` if the Agent uses the default loop.
+        Cancelling the task follows the same rules as Ctrl+C in ``run``.
+
+        Args:
+            task: A task string, which starts a new ``State``, or a ``State`` to continue.
+
+        Returns:
+            What the loop returns. The default loop returns ``state.answer``.
+
+        Raises:
+            TypeError: The loop is a sync loop other than ``default_loop``, which would block the event loop.
+            ValueError: The State was already ended with ``state.finish()``.
         """
+        # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
         state = self._start_run(task)
         reporter = self.reporter
@@ -388,22 +438,28 @@ class Agent:
                     reporter.on_run_end(state, error)
 
     def think(self, state: State, tools: Iterable[Any] | None = None) -> None:
-        """Sends one request to the Model and records the reply. Atomic: on failure the context is unchanged.
+        """Sends the context to the model once and records its reply in the State.
 
-        1. ``state._claim(self, context_window=model.context_window, overhead_tokens=...)``
-           (overhead = ``estimate_overhead_tokens(system, specs of the tools shown)``)
-        2. ``cp = state._begin_think()`` (checks for after-finish and pending calls, late result notices, turn+1)
-        3. ``try``: ``request = model.mark_cache(Request(system, state.context, specs))``;
-           ``on_think_start(state)``; ``reply = model.respond(request, on_text, on_event)``
-           (on_text is ``reporter.on_text(state, chunk)``, or None without a reporter);
-           ``state._record_reply(reply)``; ``on_think_end(state, reply)``
-        4. ``except BaseException as e``: ``state._rollback(cp, e)``; ``raise``
+        The reply may ask for tool calls. Check ``state.wants_tools()`` and run them with ``use_tools``.
+        If anything fails, the context goes back to how it was before this call, and the error is raised.
 
-        ``tools``: ``None`` shows all tools, ``[]`` shows none, a list shows only those tools.
-        List items are flattened with ``collect_tools``; any that is not one of this Agent's tools (looked up by
-        name, must be the same tool) raises ``ValueError`` (fix: add it to ``Agent(tools=...)`` first).
-        Returns ``None``.
+        Args:
+            state: The State to continue. The first Agent that thinks on a State owns it.
+            tools: Which of this Agent's tools the model may see this turn. ``None`` shows all of them,
+                ``[]`` shows none.
+
+        Raises:
+            ValueError: The State is finished, still has tool calls waiting for results, belongs to another
+                Agent, or ``tools`` has a tool this Agent does not have.
+            ProviderError: The model provider failed (``RateLimitError``, ``AuthError``,
+                ``ContextTooLongError`` or another ``ProviderError``).
         """
+        # 1. _begin_think: state._claim(self, context_window=, overhead_tokens=estimate_overhead_tokens(system,
+        #    specs shown)); cp = state._begin_think() (finish and pending checks, late result notices, turn + 1).
+        # 2. try: request = model.mark_cache(Request(system, state.context, specs)); on_think_start;
+        #    reply = model.respond(request, on_text, on_event); state._record_reply(reply); on_think_end.
+        # 3. except BaseException: state._rollback(cp, e); raise.
+        # tools= items are flattened with collect_tools and looked up by name; each must be the same tool.
         check_sync_call("think")
         self._mcp_ensure()
         specs, checkpoint = self._begin_think(state, tools, "think")
@@ -417,7 +473,8 @@ class Agent:
             raise
 
     async def athink(self, state: State, tools: Iterable[Any] | None = None) -> None:
-        """The async version of ``think`` (``model.arespond``). Cancelling it rolls back like any exception."""
+        """The async version of ``think``. Cancelling it rolls the context back like any other failure."""
+        # Same steps as think, with model.arespond.
         await self._amcp_ensure()
         specs, checkpoint = self._begin_think(state, tools, "athink")
         reporter = self.reporter
@@ -432,11 +489,21 @@ class Agent:
             raise
 
     def use_tools(self, state: State) -> None:
-        """Runs every pending call (``state.pending_calls``) and records the results.
+        """Runs the tool calls from the last reply and records their results in the State.
 
-        After ``state._ensure_open("use_tools")`` and ``state._claim(...)``, hands off to ``_runner.run_calls``.
-        Does nothing if there are no calls. Concurrency, exception and interrupt rules are in ``_runner.run_calls``.
+        Calls to tools made with ``parallel=True`` (the default) run at the same time, then the rest run one
+        by one. Does nothing if there are no calls. A tool that raises does not become an error result:
+        results of the calls that finished are recorded, and the exception is raised as is. Invalid arguments
+        and unknown tool names go back to the model as ``(input error: ...)`` results.
+
+        Args:
+            state: The State whose ``pending_calls`` to run.
+
+        Raises:
+            ValueError: The State is finished or belongs to another Agent.
         """
+        # state._ensure_open("use_tools") and state._claim(...) in _begin_use_tools, then _runner.run_calls.
+        # Concurrency, exception and interrupt rules are in _runner.run_calls.
         check_sync_call("use_tools")
         self._mcp_ensure()
         calls = self._begin_use_tools(state, "use_tools")
@@ -444,33 +511,62 @@ class Agent:
             run_calls(state, calls, self._tool_map(), self.reporter)
 
     async def ause_tools(self, state: State) -> None:
-        """The async version of ``use_tools`` (``_runner.arun_calls``): ``async def`` tools run as Tasks on the
-        running event loop, other tools on worker threads. Cancelling it is an interrupt."""
+        """The async version of ``use_tools``.
+
+        ``async def`` tools run as tasks on the running event loop, other tools on worker threads.
+        Cancelling it follows the same rules as Ctrl+C.
+        """
+        # _runner.arun_calls.
         await self._amcp_ensure()
         calls = self._begin_use_tools(state, "ause_tools")
         if calls:
             await arun_calls(state, calls, self._tool_map(), self.reporter)
 
     def ask(self, state: State, prompt: str, returns: Any = str, *, retries: int = 2) -> Any:
-        """Asks the model one question appended to the context and returns it in the ``returns`` format.
-        Changes neither the context nor the answer.
+        """Asks the model a question about the current context and returns the answer in the ``returns`` format.
 
-        - ``state._ensure_open("ask")``. No owner check (other Agents can read with ask too).
-        - ``_structured.check_returns(returns)`` (``TypeError`` if unsupported).
-        - messages = ``state._context_for_question()`` + ``Message.user(_structured.question_text(prompt, returns))``.
-        - Request: ``Request(system, messages, tools=all of this Agent's specs, tool_choice="none")``.
-          ``on_think_start`` → ``respond(request, on_text, on_event)`` → ``on_think_end`` (no ``_record_reply``).
-        - ``state._add_usage(reply.usage)`` for every reply.
-        - If ``_structured.parse_reply(reply.text, returns)`` raises ``ValueError``: appends that reply
-          (assistant) and ``Message.user(_structured.retry_text(err))`` to the messages and asks again,
-          up to ``retries`` more times.
-        - On success, ``state._record_ask(prompt, value)`` and the value. If it keeps failing,
-          ``state._record_ask(prompt, None)`` then ``OutputError`` (the last ValueError as ``__cause__``).
-        - Model exceptions propagate as is (the context was not changed, so there is nothing to roll back).
+        The question and answer are recorded in ``state.history`` but do not enter the context, so the run
+        continues as if the question was never asked. The model cannot call tools while answering. Any Agent
+        can ask about a State, not only the one running it.
 
-        The assistant message appended on retry keeps only text (tool calls and thinking blocks are dropped
-        so no tool_use without a result goes into the request).
+        Args:
+            state: The State whose context the model reads.
+            prompt: The question.
+            returns: The answer format: ``str``, a dataclass or a Pydantic model.
+            retries: How many more times to ask when the answer does not fit ``returns``.
+
+        Returns:
+            The answer, converted to ``returns``.
+
+        Raises:
+            TypeError: ``returns`` is not a supported format.
+            ValueError: The State is finished.
+            OutputError: The answer still did not fit ``returns`` after ``retries`` more tries.
+            ProviderError: The model provider failed.
+
+        Example:
+            ```python
+            @dataclass
+            class Review:
+                approved: bool
+                reason: str
+
+            review = agent.ask(state, "Is this change safe to merge?", returns=Review)
+            ```
         """
+        # - state._ensure_open("ask"). No owner check.
+        # - _structured.check_returns(returns) (TypeError if unsupported).
+        # - messages = state._context_for_question() + Message.user(_structured.question_text(prompt, returns)).
+        # - Request(system, messages, tools=all of this Agent's specs, tool_choice="none").
+        #   on_think_start -> respond(request, on_text, on_event) -> on_think_end (no _record_reply).
+        # - state._add_usage(reply.usage) for every reply.
+        # - If _structured.parse_reply(reply.text, returns) raises ValueError: append that reply (text only, so
+        #   no tool_use without a result goes into the request) and Message.user(_structured.retry_text(err)),
+        #   then ask again, up to retries more times.
+        # - Success: state._record_ask(prompt, value). Failure: state._record_ask(prompt, None), then
+        #   OutputError with the last ValueError as __cause__.
+        # - Model exceptions propagate as is (the context was not changed, so there is nothing to roll back).
+        # The steps live in _ask_steps, shared with aask.
         check_sync_call("ask")
         self._mcp_ensure()
         reporter = self.reporter
@@ -485,7 +581,8 @@ class Agent:
                 return done.value
 
     async def aask(self, state: State, prompt: str, returns: Any = str, *, retries: int = 2) -> Any:
-        """The async version of ``ask`` (``model.arespond``)."""
+        """The async version of ``ask``."""
+        # Same steps as ask (_ask_steps), with model.arespond.
         await self._amcp_ensure()
         reporter = self.reporter
         on_text, on_event = self._on_text(state, reporter), self._on_event(state, reporter)
@@ -499,14 +596,31 @@ class Agent:
                 return done.value
 
     def ask_human(self, state: State, prompt: str, returns: Any = str) -> Any:
-        """Asks the Human and returns the answer in the ``returns`` format (``str``, ``bool``, ``Literal[...]``).
+        """Asks the person through ``human`` and returns the answer in the ``returns`` format.
 
-        - ``NoHumanError`` if ``self.human`` is ``None`` (fix: give ``Agent(human=...)``, or write the rule
-          in code so no human is needed).
-        - ``human.check_returns(returns)`` (``TypeError`` if unsupported).
-        - ``value = self.human.ask(state, prompt, returns)``; ``state._record_human(prompt, value)``; the value.
-        - Does not change the context. No finish check. Not called while holding the State lock.
+        The question and answer are recorded in ``state.history``. The context does not change.
+
+        Args:
+            state: The State of the current run.
+            prompt: The question.
+            returns: The answer format: ``str``, ``bool`` or ``Literal[...]`` for a fixed set of choices.
+
+        Returns:
+            The answer, converted to ``returns``.
+
+        Raises:
+            NoHumanError: The Agent was created with ``human=None``.
+            TypeError: ``returns`` is not a supported format, or the Human only answers asynchronously
+                (use ``aask_human``).
+
+        Example:
+            ```python
+            choice = agent.ask_human(state, "Run the command?", returns=Literal["yes", "no", "always"])
+            ```
         """
+        # - NoHumanError if self.human is None; human.check_returns(returns) (in _human_to_ask).
+        # - value = human.ask(state, prompt, returns); state._record_human(prompt, value); return value.
+        # - No finish check. Never called while holding the State lock.
         check_sync_call("ask_human")
         human = self._human_to_ask(state, prompt, returns, "ask_human")
         ask = getattr(human, "ask", None)
@@ -523,8 +637,11 @@ class Agent:
         return value
 
     async def aask_human(self, state: State, prompt: str, returns: Any = str) -> Any:
-        """The async version of ``ask_human``: awaits ``human.aask`` (a Human's default runs ``ask`` on a worker
-        thread), or runs ``human.ask`` on a worker thread for an object without ``aask``."""
+        """The async version of ``ask_human``.
+
+        Awaits ``human.aask`` when the Human has it, and otherwise runs ``human.ask`` on a worker thread.
+        """
+        # A Human subclass's default aask runs ask on a worker thread too.
         human = self._human_to_ask(state, prompt, returns, "aask_human")
         aask = getattr(human, "aask", None)
         if callable(aask):
@@ -535,18 +652,26 @@ class Agent:
         return value
 
     def compact(self, state: State, instructions: str | None = None) -> None:
-        """Gets a summary from the Model and replaces the context with it.
+        """Asks the model to summarize the context, then replaces the context with the task and that summary.
 
-        1. ``state._claim(...)``; ``state._begin_compact()``
-        2. ``reply = model.compact(Request(system, state.context, all specs), instructions, on_event)``
-        3. ``state._add_usage(reply.usage)``
-        4. ``state._replace_context(reply.text, "compact")`` (State does the recording and ``on_context_change``)
-        5. ``state._end_compact()``, also when any step above raised
+        ``state.history`` keeps everything. If anything fails, the context is left unchanged.
+        In a loop, ``compact_if_full`` calls this only when the context is getting full.
 
-        Model exceptions propagate as is and the context is unchanged. The request uses ``tool_choice="none"``
-        and goes through ``mark_cache``. If the summary is empty, the context is left unchanged and
-        ``OutputError`` is raised (so no work is lost).
+        Args:
+            state: The State to compact.
+            instructions: What the summary should keep, for example ``"Keep file paths and failing tests"``.
+
+        Raises:
+            ValueError: The State still has tool calls waiting for results, or belongs to another Agent.
+            OutputError: The model returned an empty summary.
+            ProviderError: The model provider failed.
         """
+        # 1. _begin_compact: state._claim(...); state._begin_compact()
+        # 2. reply = model.compact(mark_cache(Request(system, state.context, all specs, tool_choice="none")),
+        #    instructions, on_event)
+        # 3. _apply_summary: state._add_usage(reply.usage); empty summary -> OutputError with the context
+        #    unchanged; otherwise state._replace_context(reply.text, "compact") (records, on_context_change)
+        # 4. state._end_compact(), also when a step above raised
         check_sync_call("compact", " (in a loop: await acompact_if_full(agent, state))")
         self._mcp_ensure()
         self._begin_compact(state, instructions, "compact")
@@ -558,7 +683,8 @@ class Agent:
             state._end_compact()
 
     async def acompact(self, state: State, instructions: str | None = None) -> None:
-        """The async version of ``compact`` (``model.acompact``)."""
+        """The async version of ``compact``."""
+        # Same steps as compact, with model.acompact.
         await self._amcp_ensure()
         self._begin_compact(state, instructions, "acompact")
         try:
@@ -569,12 +695,25 @@ class Agent:
             state._end_compact()
 
     def copy(self, **changes: Any) -> Agent:
-        """A new Agent with some settings changed. The original is unchanged.
+        """Returns a new Agent with some settings changed. The original Agent does not change.
 
-        Keys of ``changes`` must be in ``SETTINGS``. Otherwise ``TypeError`` (listing the settings that can
-        change). The new Agent is built with ``Agent(**{**original_arguments, **changes})`` and goes through
-        the same checks.
+        The new Agent goes through the same checks as ``Agent(...)``.
+
+        Args:
+            **changes: Settings to change, by the same names as the ``Agent(...)`` arguments.
+
+        Returns:
+            The new Agent.
+
+        Raises:
+            TypeError: A name in ``changes`` is not a setting.
+
+        Example:
+            ```python
+            quiet = agent.copy(model=FakeModel(["Done"]), reporter=None)
+            ```
         """
+        # Agent(**{**self._kwargs, **changes}); keys must be in SETTINGS.
         unknown = [key for key in changes if key not in SETTINGS]
         if unknown:
             raise TypeError(

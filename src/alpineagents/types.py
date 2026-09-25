@@ -70,15 +70,19 @@ class TextBlock:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """One tool call the model requested (``call``). Also a block of an assistant message.
+    """One tool call the model requested. Also a block of an assistant message.
 
-    Calls are told apart by ``id``. ``args`` is a dict, so the hash uses ``id`` only.
+    Calls are told apart by ``id``, and two calls with the same ``id`` hash the same.
     """
 
     name: str
+    """The tool name the model called."""
     args: dict[str, Any]
+    """The arguments the model gave, as a dict."""
     id: str
+    """The call id. Tool results refer to the call by this id."""
 
+    # args is a dict, so the hash uses id only.
     def __hash__(self) -> int:
         return hash(self.id)
 
@@ -115,14 +119,18 @@ Block: TypeAlias = TextBlock | ToolCall | ToolResultBlock | RawBlock
 class Message:
     """One message in the context (``state.context``).
 
-    ``tokens``: the token count of the whole context up to and including this message, when known from API usage
-    (the Agent sets ``Reply.context_tokens`` on assistant replies only). ``None`` if unknown.
-    It is the anchor for estimating the context size (``alpineagents._tokens.context_tokens``).
+    The system prompt is not a message; it goes in ``Request.system``.
     """
 
+    # tokens is the anchor for estimating the context size (alpineagents._tokens.context_tokens).
     role: Literal["user", "assistant"]
+    """``"user"`` or ``"assistant"``. Notices and tool results are user messages."""
     content: tuple[Block, ...]
+    """The blocks in order: text, tool calls (assistant only), tool results (user only) and provider-specific
+    blocks such as thinking."""
     tokens: int | None = None
+    """The token count of the whole context up to and including this message, from API usage. Set on assistant
+    replies only; ``None`` if unknown."""
 
     @classmethod
     def user(cls, text: str) -> Message:
@@ -136,6 +144,7 @@ class Message:
 
     @property
     def tool_calls(self) -> tuple[ToolCall, ...]:
+        """The tool calls in this message, in order."""
         return tuple(b for b in self.content if isinstance(b, ToolCall))
 
 
@@ -144,49 +153,55 @@ class Message:
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """One tool shown to the model. ``input_schema`` is a JSON Schema (object)."""
+    """One tool shown to the model."""
 
     name: str
+    """The tool name the model calls."""
     description: str
+    """What the tool does, as the model reads it."""
     input_schema: dict[str, Any]
+    """The arguments as a JSON Schema object."""
 
 
 @dataclass(frozen=True)
 class Request:
-    """A request the Agent sends to the Model. Model settings (max_tokens etc.) belong to the Model object.
-
-    With ``tool_choice="none"``, tool definitions are still sent but the model cannot call tools
-    (used by ``ask`` and ``compact``; some providers need tool definitions when the context has tool_use blocks).
-    """
+    """A request the Agent sends to the Model. Model settings (``max_tokens`` etc.) belong to the Model object."""
 
     system: str | None
+    """The system prompt, or ``None``."""
     messages: tuple[Message, ...]
+    """The context to send."""
     tools: tuple[ToolSpec, ...] = ()
+    """The tools shown to the model."""
+    # tool_choice="none" is used by ask and compact: some providers need tool definitions when the context has
+    # tool_use blocks, even when no tool may be called.
     tool_choice: Literal["auto", "none"] = "auto"
+    """``"auto"`` lets the model call tools. ``"none"`` still sends the tool definitions but forbids calling
+    them."""
 
 
 @dataclass(frozen=True)
 class Reply:
-    """One reply from the Model.
-
-    - ``message``: a message with role ``"assistant"``. Blocks stay in the order the provider gave.
-    - ``usage``: the usage of this one request (``requests=1``).
-    - ``context_tokens``: the token count of the whole context up to and including this reply (computed from API
-      usage: input + cache read + cache write + output). ``None`` if unknown.
-    - ``stop_reason``: exactly what the provider gave (e.g. ``"end_turn"``, ``"tool_use"``, ``"max_tokens"``).
-    """
+    """One reply from the Model."""
 
     message: Message
+    """The assistant message. Blocks stay in the order the provider gave."""
     usage: Usage
+    """The usage of this one request (``requests=1``)."""
     context_tokens: int | None = None
+    """The token count of the whole context up to and including this reply (input + cache read + cache write +
+    output). ``None`` if unknown."""
     stop_reason: str | None = None
+    """Exactly what the provider gave, e.g. ``"end_turn"``, ``"tool_use"`` or ``"max_tokens"``."""
 
     @property
     def text(self) -> str:
+        """The text of the reply message."""
         return self.message.text
 
     @property
     def tool_calls(self) -> tuple[ToolCall, ...]:
+        """The tool calls in the reply message, in order."""
         return self.message.tool_calls
 
 
@@ -195,14 +210,23 @@ class Reply:
 
 @dataclass(frozen=True)
 class Price:
-    """Dollars per million tokens. Cache prices default to the input price when not given."""
+    """Dollars per million tokens. Cache prices default to the input price when not given.
+
+    Example:
+        ``Anthropic("claude-sonnet-5", price=Price(input=3, output=15, cache_read=0.3))``
+    """
 
     input: float
+    """Dollars per million input tokens that did not go through the cache."""
     output: float
+    """Dollars per million output tokens."""
     cache_read: float | None = None
+    """Dollars per million tokens read from the cache. ``None`` uses ``input``."""
     cache_write: float | None = None
+    """Dollars per million tokens written to the cache. ``None`` uses ``input``."""
 
     def cost(self, usage: Usage) -> float:
+        """The cost of ``usage`` in dollars."""
         cache_read = self.input if self.cache_read is None else self.cache_read
         cache_write = self.input if self.cache_write is None else self.cache_write
         return (
@@ -215,23 +239,25 @@ class Price:
 
 @dataclass(frozen=True)
 class Usage:
-    """Token usage. Token counts are what the API returned; the adapter maps them to the meanings below.
+    """Token usage. Every provider's counts are mapped to the same meanings, so total input is
+    ``input_tokens + cache_read_tokens + cache_write_tokens``.
 
-    - ``input_tokens``: input tokens that did not go through the cache
-    - ``cache_read_tokens``: input tokens read from the cache
-    - ``cache_write_tokens``: input tokens newly written to the cache
-    - total input = the sum of the three
-    - ``cost``: estimated dollars. ``None`` when the price is unknown (distinct from 0).
-
-    Adding (``+``) returns a new Usage. ``cost`` is ``None`` if either side is unknown (has requests but ``None``).
+    Adding two Usages (``+``) returns a new one. Its ``cost`` is ``None`` if either side has requests but an
+    unknown cost.
     """
 
     input_tokens: int = 0
+    """Input tokens that did not go through the cache."""
     output_tokens: int = 0
+    """Output tokens."""
     cache_read_tokens: int = 0
+    """Input tokens read from the cache."""
     cache_write_tokens: int = 0
+    """Input tokens newly written to the cache."""
     requests: int = 0
+    """The number of model requests."""
     cost: float | None = None
+    """Estimated dollars. ``None`` when the price is unknown, which is different from 0."""
 
     def __add__(self, other: Usage) -> Usage:
         if not isinstance(other, Usage):
@@ -281,30 +307,33 @@ ContextChangeKind: TypeAlias = Literal["compact", "start_from", "clear_tool_resu
 
 @dataclass(frozen=True)
 class ContextChange:
-    """A record that the context changed. Before/after token counts are ``state.context_tokens`` estimates.
-
-    ``summary`` is the raw summary text ``compact``/``start_from`` put in the context (``None`` otherwise).
-    """
+    """A record that the context changed. Shown by ``Reporter.on_context_change`` and kept in history."""
 
     kind: ContextChangeKind
+    """``"compact"``, ``"start_from"``, ``"clear_tool_results"`` or ``"rollback"``."""
     before_tokens: int
+    """The estimated context size before the change (``state.context_tokens``)."""
     after_tokens: int
+    """The estimated context size after the change."""
     summary: str | None = None
+    """The summary text ``compact`` or ``start_from`` put in the context. ``None`` for other kinds."""
 
 
 @dataclass(frozen=True)
 class ModelEvent:
-    """Something the Model went through while handling a request (e.g. falling back to another model, a retry).
-    Not part of the reply.
+    """Something the Model went through while handling a request, such as falling back to another model or a
+    retry. It is not part of the reply.
 
-    When the Model reports it via ``on_event`` in ``respond``/``compact``, the Agent records it in history
-    (``model_event``) and shows it via ``Reporter.on_model_event``. ``kind`` is a short type name
-    (e.g. ``"fallback"``), ``message`` is one line to show a person, ``data`` is extra values the implementation adds.
+    A Model reports it by calling ``on_event`` in ``respond`` or ``compact``. The Agent records it in history
+    (``model_event``) and shows it with ``Reporter.on_model_event``.
     """
 
     kind: str
+    """A short type name, e.g. ``"fallback"``."""
     message: str
+    """One line to show a person."""
     data: Mapping[str, Any] = field(default_factory=dict)
+    """Extra values the Model adds."""
 
 
 ToolOutcomeKind: TypeAlias = Literal["done", "error", "input_error", "aborted", "interrupted", "denied"]
@@ -312,51 +341,57 @@ ToolOutcomeKind: TypeAlias = Literal["done", "error", "input_error", "aborted", 
 
 @dataclass(frozen=True)
 class ToolOutcome:
-    """How a tool call ended, for ``Reporter.on_tool_end``. The ``result`` string next to it is what the model
-    sees; this is what a display branches on, so it never has to read that string.
+    """How a tool call ended, passed to ``Reporter.on_tool_end`` next to the result string.
 
-    - ``"done"``: the tool returned (the result is its output)
-    - ``"error"``: the tool returned an error result, which the model sees as an error (an MCP server's
-      ``isError``)
-    - ``"input_error"``: the tool was not called: unknown tool or arguments that failed validation
-    - ``"aborted"``: the tool raised; ``error`` is the exception
-    - ``"interrupted"``: closed by an interrupt (``KeyboardInterrupt``/``CancelledError``); ``error`` is it
-    - ``"denied"``: closed by ``state.deny`` (the result is the reason)
+    The result string is written for the model and may change. Branch on ``kind`` instead of reading it.
     """
 
     kind: ToolOutcomeKind
+    """One of:
+
+    - ``"done"``: the tool returned, and the result is its output
+    - ``"error"``: the tool returned an error result, which the model sees as an error (an MCP server's
+      ``isError``)
+    - ``"input_error"``: the tool was not called because the tool is unknown or the arguments failed validation
+    - ``"aborted"``: the tool raised
+    - ``"interrupted"``: closed by ``KeyboardInterrupt`` or ``CancelledError``
+    - ``"denied"``: closed by ``state.deny``, and the result is the reason
+    """
     error: BaseException | None = None
+    """The exception for ``"aborted"`` and ``"interrupted"``, otherwise ``None``."""
 
 
 @dataclass(frozen=True)
 class HistoryEntry:
-    """One entry of ``state.history``. ``content`` by ``kind``:
-
-    ============== ==============================================================================================
-    kind           content
-    ============== ==============================================================================================
-    user           str (what the person said; the first entry is the task)
-    reply          Reply
-    tool_result    str (the result sent to the model). Has ``call``. ``late=True`` for a late result
-    notice         str (starts with ``"[notice] "``)
-    denied         str (the denial reason). Has ``call``
-    ask            Exchange
-    human          Exchange
-    context_change ContextChange
-    model_event    ModelEvent
-    error          str (``"TimeoutError: ..."``). ``error`` holds the exception; has ``call`` if raised by a tool
-    ============== ==============================================================================================
-
-    ``turn`` is ``state.turn`` at record time. ``substate`` is for a future subagent extension (always ``None`` in
-    the MVP).
-    """
+    """One entry of ``state.history``. History only grows; shrinking the context never removes entries."""
 
     kind: HistoryKind
+    """What happened. ``content`` depends on it:
+
+    | kind | content |
+    | --- | --- |
+    | ``user`` | ``str``, what the person said. The first entry is the task |
+    | ``reply`` | ``Reply`` |
+    | ``tool_result`` | ``str``, the result sent to the model. Has ``call`` |
+    | ``notice`` | ``str`` starting with ``"[notice] "`` |
+    | ``denied`` | ``str``, the denial reason. Has ``call`` |
+    | ``ask`` | an object with ``question`` and ``answer`` (``answer`` is ``None`` if no answer came) |
+    | ``human`` | same as ``ask`` |
+    | ``context_change`` | ``ContextChange`` |
+    | ``model_event`` | ``ModelEvent`` |
+    | ``error`` | ``str`` such as ``"TimeoutError: ..."``. ``error`` holds the exception |
+    """
     content: Any
+    """The recorded value. Its type depends on ``kind``."""
     turn: int
+    """``state.turn`` when the entry was recorded."""
     call: ToolCall | None = None
+    """The tool call, for ``tool_result``, ``denied`` and errors raised by a tool."""
     error: BaseException | None = None
+    """The exception, for ``error`` entries."""
     late: bool = False
+    """``True`` for a tool result that arrived after its call was already closed."""
+    # substate is for a future subagent extension (always None in the MVP).
     substate: Any = None
 
 
