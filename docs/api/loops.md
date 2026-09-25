@@ -1,5 +1,7 @@
 # Loops and blocks
 
+Concepts: [Loops](../concepts/loops.md).
+
 ::: alpineagents.loop.loop
 
 ::: alpineagents.Loop

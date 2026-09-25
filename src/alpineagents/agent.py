@@ -125,6 +125,7 @@ class Agent:
             system: The system prompt.
             tools: ``@tool`` functions, objects with ``@tool`` methods, single ``@tool`` methods, ``MCP`` servers
                 and single MCP tools (``github.create_issue``).
+            skills: Not implemented yet. A non-empty value raises ``NotImplementedError``.
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
             reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent.
             human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human.
@@ -288,6 +289,7 @@ class Agent:
 
     @property
     def skills(self) -> tuple[str, ...]:
+        """Reserved for skills, which are not implemented yet. Always empty."""
         return self._skills
 
     @property
@@ -728,11 +730,11 @@ class Agent:
     # ------------------------------------------------------------ outside the MVP (extension points)
 
     def run_tool(self, state: State, tool: Any, /, **args: Any) -> Any:
-        """Outside the MVP. The loop runs a tool directly and records the result as a notice."""
+        """Not implemented yet. Raises ``NotImplementedError``."""
         raise NotImplementedError("agent.run_tool() is not implemented yet")
 
     def load_skill(self, state: State, name: str) -> None:
-        """Outside the MVP. Puts a skill's body into the context as a notice."""
+        """Not implemented yet. Raises ``NotImplementedError``."""
         raise NotImplementedError("agent.load_skill() is not implemented yet")
 
     def __enter__(self) -> Agent:

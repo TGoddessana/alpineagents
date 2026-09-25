@@ -391,8 +391,8 @@ class HistoryEntry:
     """The exception, for ``error`` entries."""
     late: bool = False
     """``True`` for a tool result that arrived after its call was already closed."""
-    # substate is for a future subagent extension (always None in the MVP).
     substate: Any = None
+    """Reserved for subagents, which are not implemented yet. Always ``None``."""
 
 
 # ---------------------------------------------------------------- display helpers

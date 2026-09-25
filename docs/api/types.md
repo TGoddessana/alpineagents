@@ -1,5 +1,7 @@
 # Data types
 
+The data objects that the other classes take and return.
+
 ::: alpineagents.Message
 
 ::: alpineagents.ToolCall
@@ -23,3 +25,13 @@
 ::: alpineagents.ModelEvent
 
 ::: alpineagents.ToolOutcome
+
+## Content blocks
+
+The parts of a `Message`. `ToolCall` above is also one.
+
+::: alpineagents.types.TextBlock
+
+::: alpineagents.types.ToolResultBlock
+
+::: alpineagents.types.RawBlock

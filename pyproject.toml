@@ -55,6 +55,10 @@ docs = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/alpineagents"]
 
+[tool.ruff.lint.per-file-ignores]
+# Some docs examples continue the example before them on the same page, so they use names defined there.
+"docs_src/*" = ["F821"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

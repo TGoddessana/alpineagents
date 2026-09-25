@@ -1,5 +1,7 @@
 # Tools and MCP
 
+Concepts: [Tools](../concepts/tools.md). Guide: [MCP servers](../guides/mcp.md).
+
 ::: alpineagents.tool.tool
 
 ::: alpineagents.Tool

@@ -10,6 +10,7 @@ theme:
   features:
     - content.code.copy
     - navigation.sections
+    - navigation.footer
     - search.highlight
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -54,6 +55,28 @@ plugins:
 
 nav:
   - Home: index.md
+  - Concepts:
+      - How a run works: concepts/overview.md
+      - Agent: concepts/agent.md
+      - State: concepts/state.md
+      - Loops: concepts/loops.md
+      - Tools: concepts/tools.md
+      - Errors and interruptions: concepts/errors.md
+      - Glossary: concepts/glossary.md
+  - Guides:
+      - Stop conditions: guides/stop-conditions.md
+      - Ask before a tool runs: guides/approval.md
+      - Check the work before finishing: guides/verify.md
+      - Plan before acting: guides/plan-first.md
+      - Chat: guides/chat.md
+      - Structured output: guides/structured-output.md
+      - Tools that use the State: guides/tool-state.md
+      - Context size: guides/context-size.md
+      - Models: guides/models.md
+      - Progress and questions: guides/progress.md
+      - Async: guides/async.md
+      - MCP servers: guides/mcp.md
+      - Testing: guides/testing.md
   - API reference:
       - Agent: api/agent.md
       - State: api/state.md
@@ -64,3 +87,7 @@ nav:
       - Data types: api/types.md
       - Errors: api/errors.md
       - Testing: api/testing.md
+
+validation:
+  links:
+    anchors: warn

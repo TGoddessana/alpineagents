@@ -394,14 +394,17 @@ class State:
 
     @property
     def parent(self) -> State | None:
+        """Reserved for subagents, which are not implemented yet. Always ``None``."""
         return self._parent
 
     @property
     def root(self) -> State:
+        """Reserved for subagents, which are not implemented yet. Always this State."""
         return self._root
 
     @property
     def depth(self) -> int:
+        """Reserved for subagents, which are not implemented yet. Always ``0``."""
         return self._depth
 
     @property
@@ -616,13 +619,13 @@ class State:
     # ------------------------------------------------------------ saving (outside MVP)
 
     def save(self, path: str) -> None:
-        """Outside MVP. Only defined: raise via ``_ensure_no_pending("save")`` if there are pending calls."""
+        """Not implemented yet. Raises ``NotImplementedError``, or ``ValueError`` while calls are pending."""
         self._ensure_no_pending("save")
         raise NotImplementedError("state.save() is not implemented yet")
 
     @classmethod
     def load(cls, path: str) -> State:
-        """Outside MVP."""
+        """Not implemented yet. Raises ``NotImplementedError``."""
         raise NotImplementedError("State.load() is not implemented yet")
 
     # ------------------------------------------------------------ display
