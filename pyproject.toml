@@ -11,12 +11,31 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "JAEGYUN JUNG" }]
+keywords = ["agents", "ai-agents", "llm", "agent-framework", "anthropic", "claude", "openai", "mcp", "tool-calling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pydantic>=2",
     "typing_extensions>=4.6",
     "anthropic",
     "openai",
 ]
+
+[project.urls]
+Homepage = "https://github.com/TGoddessana/alpineagents"
+Source = "https://github.com/TGoddessana/alpineagents"
+Issues = "https://github.com/TGoddessana/alpineagents/issues"
 
 [project.optional-dependencies]
 dev = [
