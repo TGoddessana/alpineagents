@@ -1,15 +1,21 @@
 # alpineagents
 
-A Python agent framework. An agent keeps its **configuration** (`Agent`) and its **history** (`State`) apart, and a
-**loop** (`Loop`), which is a plain Python function, takes both and returns the answer. There is one sentence to
-remember.
+[![CI](https://github.com/TGoddessana/alpineagents/actions/workflows/ci.yml/badge.svg)](https://github.com/TGoddessana/alpineagents/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+A Python agent framework where the agent loop is a function you write.
+
+`Agent` holds the configuration, `State` holds the history, and a loop takes both and returns the answer.
 
 > The agent looks at the state and thinks, and uses tools when it needs them. Repeat until there is an answer.
 
-- The repetition is `@loop`, the stop condition is `until=`, the turn count is `limit=`: all visible in code. No hidden
-  hooks, no silent compaction.
-- The default loop, `alpineagents.default_loop`, is open source too.
-- Mistakes are reported as early as possible, together with how to fix them.
+## Why
+
+In most frameworks the loop lives inside the library. LangGraph has you declare it as a graph, and the OpenAI Agents
+SDK and PydanticAI run it for you. In alpineagents the loop is a few lines of Python in your own code: `until=` decides
+when it stops, `limit=` caps the turns, and compaction runs only where you call it. The default loop,
+`alpineagents.default_loop`, is written the same way, so you can read it or copy it as a starting point. Misuse raises
+an error that says how to fix it.
 
 ## Install
 
@@ -82,9 +88,6 @@ state = State("Find the bug in this repo")
 answer = agent.run(state)
 print(state.stopped_by, state.usage.cost)
 ```
-
-> **Not implemented yet.** The planned design also puts a subagent (`researcher`) in `tools=` and passes
-> `skills=["./skills"]`. Passing either raises `NotImplementedError`.
 
 ## Core concepts
 
@@ -190,31 +193,11 @@ Run this repository's tests like this:
 .venv/bin/python -m pytest -q
 ```
 
-## What is in the MVP and what comes next
-
-**Available now (MVP)**
-
-- `Agent`: `run`, `think` (limit tools with `tools=`), `use_tools` (a turn's calls run concurrently, `parallel=False`,
-  `async def` tools), `ask` (`returns=` str, dataclass or Pydantic model; asks again after format validation fails),
-  `ask_human`, `compact`, `copy`
-- `State`: separate history and context, context rules after exceptions and interrupts, notices for late tool
-  results, `finish`, `deny`, `add_user_message`, `add_notice`, `start_from`, `clear_tool_results`, `data` and `lock`,
-  `print(state)`
-- `@loop` (with `copy`), `default_loop`, `compact_if_full` / `CompactIfFull`
-- Async API: `arun`, `athink`, `ause_tools`, `aask`, `aask_human`, `acompact`, async `@loop`, `adefault_loop`,
-  `acompact_if_full`, `Model.arespond`, `Human.aask`
-- `MCP` servers in `tools=` (stdio and Streamable HTTP, `server__tool` names, picking tools, `with agent:`)
-- `@tool`: type-hint schema, `Args:` descriptions, argument validation (`(input error: ...)`), `State` injection
-- `Terminal` (Reporter and Human), `Reporter` and `Human` base classes
-- Model adapters: `Anthropic`, `OpenAICompatible` (Ollama, vLLM, OpenRouter, etc.)
-- Test doubles: `FakeModel`, `FakeHuman`, `tool_call`
-- All the mistake-proofing errors (`TypeError`/`ValueError` that show how to fix the mistake, `NoHumanError`)
-
-**Coming next**
+## Roadmap
 
 - OpenAI adapter, LiteLLM adapter
-- Subagents (`tools=[researcher]`, `state.root`, `substate`)
-- Skills (`skills=`, `load_skill`)
+- Subagents (`tools=[researcher]`, `state.root`, `substate`). Passing an Agent in `tools=` raises `NotImplementedError` for now
+- Skills (`skills=`, `load_skill`). Passing `skills=` raises `NotImplementedError` for now
 - `agent.run_tool`, `agent.load_skill`
 - `state.save()` / `State.load()`
 - Multimodal tool results (`Image`, `File`)
