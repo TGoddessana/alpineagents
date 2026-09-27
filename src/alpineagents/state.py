@@ -6,6 +6,8 @@ Internal rules (the user-facing contract is in the public docstrings):
   ``self.lock``, and Reporter notifications (``on_context_change``, ``on_tool_end`` for a deny) are sent after
   the lock is released.
 - ``history`` is append-only. Shrinking or rolling back the context never deletes from it.
+- Every entry gets its ``at`` when ``HistoryEntry`` is created inside the lock (``__init__`` or ``_append``),
+  so ``at`` does not go backwards in history order (unless the system clock does). There is no other clock.
 - Blocks of received messages (``Reply.message``) go into the context unchanged.
 - It never calls the model, runs tools or prints.
 - Methods starting with ``_`` are for Agent (and Loop) only. User code does not call them.
@@ -18,6 +20,7 @@ import dataclasses
 import threading
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from . import _tokens
@@ -228,8 +231,8 @@ class State:
         ```
     """
 
-    # A new State starts with history [HistoryEntry("user", task, turn=0)], context (Message.user(task),),
-    # turn 0, Usage(), no pending calls, stopped_by None, parent None, root itself, depth 0
+    # A new State starts with history [HistoryEntry("user", task, turn=0)] (its at is created_at), context
+    # (Message.user(task),), turn 0, Usage(), no pending calls, stopped_by None, parent None, root itself, depth 0
     # (subagents are an extension, see _child).
 
     def __init__(self, task: str) -> None:
@@ -416,6 +419,21 @@ class State:
         """
         with self._lock:
             return tuple(self._history)
+
+    @property
+    def created_at(self) -> datetime:
+        """When this State was created: the ``at`` of the first history entry (the task), in UTC."""
+        with self._lock:
+            return self._history[0].at
+
+    @property
+    def updated_at(self) -> datetime:
+        """When something was last recorded: the ``at`` of the latest history entry, in UTC.
+
+        Anything added to ``history`` moves it. Changes to ``state.data`` alone do not.
+        """
+        with self._lock:
+            return self._history[-1].at
 
     @property
     def context(self) -> tuple[Message, ...]:
