@@ -124,3 +124,26 @@ with state.lock:
 | Stopped by `limit` | Runs up to `limit` more turns. The loop counts turns from zero on every call |
 | Stopped by Ctrl+C or an exception | Continues. Pending calls were closed with a result such as `(interrupted by user)` |
 | Ended with `finish()` | Raises `ValueError` |
+
+### A State saved by another Agent
+
+Saving a State is not implemented yet. When it is, a saved State also records which Agent saved it: its name, model,
+a hash of its system prompt, its tools and its MCP servers. The Agent's settings live in your code, so an Agent that
+resumes the State after a deploy may differ. The run still works, but it may behave differently: the model gets an
+error result when it calls a tool that was removed, and blocks only one provider understands are not sent to another
+provider.
+
+So the first `run` or `arun` of a loaded State compares the two Agents. If they differ, it warns with `ResumeWarning`,
+for example `tools: removed search_web, added search_docs; model: anthropic/claude-sonnet-5 -> openai/gpt-5`. The
+system prompt is reported only as changed. To refuse such a resume, make the warning an exception:
+
+```python
+import warnings
+
+from alpineagents import ResumeWarning
+
+warnings.filterwarnings("error", category=ResumeWarning)
+```
+
+`run` then raises `ResumeWarning` before the loop starts. Its `changes` attribute holds
+`{key: (saved_value, current_value)}` for each difference, for example to show a notice in your UI.

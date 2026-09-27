@@ -7,6 +7,8 @@ Principle 5 (fail honestly): wrap into common types only at the provider boundar
 
 from __future__ import annotations
 
+from typing import Any
+
 __all__ = [
     "AlpineAgentsError",
     "ProviderError",
@@ -16,6 +18,7 @@ __all__ = [
     "OutputError",
     "NoHumanError",
     "ToolInputError",
+    "ResumeWarning",
     "fix_message",
 ]
 
@@ -57,6 +60,27 @@ class MCPConnectionError(AlpineAgentsError):
 
     Errors the server reports for a tool call (``isError``) go to the model as the result instead.
     """
+
+
+class ResumeWarning(UserWarning):
+    """The Agent resuming a saved State differs from the Agent that saved it.
+
+    A State holds the conversation, while the Agent's settings live in code. If the tools, model or system prompt
+    changed between saving and resuming, the run still works but may behave differently: the model gets an error
+    result when it calls a removed tool, and provider-specific blocks are not sent to a model of another provider.
+    This may be what you want after a deploy, so it is a warning and not an error. It is given once per loaded
+    State, at the first ``run`` or ``arun``.
+
+    To refuse such a resume, turn it into an exception with
+    ``warnings.filterwarnings("error", category=ResumeWarning)``. To show a notice in your UI, catch it with
+    ``warnings.catch_warnings(record=True)`` and read ``.changes``.
+    """
+
+    def __init__(self, message: str, changes: dict[str, tuple[Any, Any]]) -> None:
+        super().__init__(message)
+        self.changes = changes
+        """What changed: ``{key: (saved_value, current_value)}`` for each differing key of the Agent summary
+        (``name``, ``model``, ``system_sha256``, ``tools``, ``mcp_servers``)."""
 
 
 class ToolInputError(Exception):

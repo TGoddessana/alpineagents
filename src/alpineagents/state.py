@@ -289,6 +289,9 @@ class State:
         self._root: State = self
         self._depth = 0
         self._data = _LockedDict(self._lock)
+        # Summary of the Agent that saved this State (Agent._summary). Set by the Store loader (not implemented
+        # yet); compared once by Agent._start_run.
+        self._saved_agent: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ yes/no questions
 
@@ -703,6 +706,20 @@ class State:
                 return
             self._context_window = context_window
             self._overhead = overhead_tokens
+
+    def _set_saved_agent(self, summary: dict[str, Any] | None) -> None:
+        """Called by the Store loader when it rebuilds a saved State: records the summary of the Agent that saved
+        it (``Agent._summary()``, ``None`` if the snapshot has none). The next ``Agent.run`` compares it with
+        itself and warns with ``ResumeWarning`` if they differ."""
+        with self._lock:
+            self._saved_agent = summary
+
+    def _take_saved_agent(self) -> dict[str, Any] | None:
+        """Called by ``Agent.run`` at start: returns the saved Agent summary and clears it, so the comparison
+        happens only once (after the next save, the snapshot holds the current Agent's summary anyway)."""
+        with self._lock:
+            summary, self._saved_agent = self._saved_agent, None
+            return summary
 
     def _ensure_open(self, action: str) -> None:
         """``ValueError`` after ``finish()``: ``{action}`` cannot be called after ``finish()``.

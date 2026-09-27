@@ -8,7 +8,9 @@ steps (the Loop's job).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
+import warnings
 from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
@@ -17,7 +19,7 @@ from . import _structured
 from ._async import ASYNC_RUN, check_sync_call, is_async_callable, run_in_thread
 from ._runner import arun_calls, run_calls
 from ._tokens import estimate_overhead_tokens
-from .errors import NoHumanError, OutputError, fix_message
+from .errors import NoHumanError, OutputError, ResumeWarning, fix_message
 from .human import check_returns as check_human_returns
 from .mcp_tools import MCP, MCPTool, MCPToolRef, check_tool_names, wait_sync
 from .mcp_tools import _Loop as _MCPLoop
@@ -346,6 +348,9 @@ class Agent:
             TypeError: The loop is async (use ``arun``), or ``task`` is neither a string nor a State.
             ValueError: The State was already ended with ``state.finish()``.
 
+        Warns:
+            ResumeWarning: The State was saved by an Agent with a different model, system prompt or tools.
+
         Example:
             ```python
             state = State("Find the bug in this repo")
@@ -355,7 +360,8 @@ class Agent:
         """
         # Order (ARCHITECTURE.md "run order and the context rules after exceptions"):
         # 1. _start_run: str -> State(task); State as is; anything else TypeError. A finish()ed State is a
-        #    ValueError. Clears state.stopped_by so a run ending in an exception keeps no stale reason.
+        #    ValueError. Clears state.stopped_by so a run ending in an exception keeps no stale reason. A loaded
+        #    State saved by a different Agent gives a ResumeWarning (once, outside the State lock).
         # 2. try: on_run_start; connect MCP (_mcp_open); state._note_window(...) records the window size with the
         #    full tool list so compact_if_full works on the first turn (the owner is not set); return loop(...)
         #    on_run_start is inside the try, so on_run_end is called whichever step raises.
@@ -410,6 +416,9 @@ class Agent:
         Raises:
             TypeError: The loop is a sync loop other than ``default_loop``, which would block the event loop.
             ValueError: The State was already ended with ``state.finish()``.
+
+        Warns:
+            ResumeWarning: The State was saved by an Agent with a different model, system prompt or tools.
         """
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
@@ -757,7 +766,8 @@ class Agent:
     # ------------------------------------------------------------ steps shared by the sync and async versions
 
     def _start_run(self, task: str | State) -> State:
-        """Steps 1 and 2 of ``run``: the State to run, checked and prepared."""
+        """Step 1 of ``run``: the State to run, checked and prepared. Warns with ``ResumeWarning`` if the State
+        was saved by a different Agent."""
         if isinstance(task, str):
             state = State(task)
         elif isinstance(task, State):
@@ -780,6 +790,19 @@ class Agent:
             )
 
         state._set_stopped_by(None)
+
+        saved = state._take_saved_agent()
+        if saved is not None:
+            changes = _resume_changes(saved, self._summary())
+            if changes:
+                try:
+                    # stacklevel 3: the user's run()/arun() call (warn <- _start_run <- run <- caller).
+                    warnings.warn(ResumeWarning(_describe_changes(changes), changes), stacklevel=3)
+                except BaseException:
+                    # A warnings filter turned it into an exception: the run did not start, so the next run
+                    # compares again.
+                    state._set_saved_agent(saved)
+                    raise
         return state
 
     def _note_window(self, state: State) -> None:
@@ -1083,6 +1106,23 @@ class Agent:
 
         return on_event
 
+    def _summary(self) -> dict[str, Any]:
+        """What a saved State records about the Agent that saved it, compared when the State is resumed
+        (``_start_run``). Plain JSON values only. Needs no MCP connection."""
+        model = self._model
+        return {
+            "name": self._name,
+            "model": f"{model.provider}/{model.name}" if model.provider else model.name,
+            # A hash, not the text: enough to see that the prompt changed, without copying long prompts or
+            # internal instructions into storage.
+            "system_sha256": (
+                hashlib.sha256(self._system.encode("utf-8")).hexdigest() if self._system is not None else None
+            ),
+            # Only this Agent's own tools (MCP tools are known only while connected); servers are listed by name.
+            "tools": sorted(self._tool_by_name),
+            "mcp_servers": sorted(use.server.name for use in self._mcp_uses),
+        }
+
     def _tool_map(self) -> dict[str, Any]:
         """Name → Tool: the ``collect_tools`` result, then the connected MCP servers' tools."""
         return {**self._tool_by_name, **self._mcp_tools}
@@ -1186,6 +1226,55 @@ def _add_mcp(uses: dict[str, _MCPUse], item: MCP | MCPToolRef) -> None:
             )
         )
     use.add(item)
+
+
+#: Keys of ``Agent._summary`` that hold lists of names. Their changes are shown as removed and added names.
+_SUMMARY_LISTS = ("tools", "mcp_servers")
+
+
+def _resume_changes(saved: dict[str, Any], current: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    """``{key: (saved, current)}`` for each ``Agent._summary`` key that differs. A key missing from ``saved`` is
+    not compared, so an older or partial summary does not warn."""
+    changes: dict[str, tuple[Any, Any]] = {}
+    for key, now in current.items():
+        if key not in saved:
+            continue
+        before = saved[key]
+        if key in _SUMMARY_LISTS and isinstance(before, list):
+            same = set(before) == set(now)
+        else:
+            same = before == now
+        if not same:
+            changes[key] = (before, now)
+    return changes
+
+
+def _describe_changes(changes: dict[str, tuple[Any, Any]]) -> str:
+    """The ``ResumeWarning`` message, e.g. ``... (tools: removed search_web, added search_docs; model: a -> b)``.
+    The system prompt is only reported as changed."""
+    parts = []
+    for key, (before, now) in changes.items():
+        if key == "system_sha256":
+            parts.append("system prompt changed")
+        elif key in _SUMMARY_LISTS and isinstance(before, list):
+            moves = []
+            removed = [name for name in before if name not in now]
+            added = [name for name in now if name not in before]
+            if removed:
+                moves.append(f"removed {', '.join(map(str, removed))}")
+            if added:
+                moves.append(f"added {', '.join(added)}")
+            parts.append(f"{key}: {', '.join(moves)}")
+        else:
+            parts.append(f"{key}: {_or_none(before)} -> {_or_none(now)}")
+    return (
+        f"This State was saved by a different Agent ({'; '.join(parts)}). "
+        "The run continues, but may behave differently than before it was saved"
+    )
+
+
+def _or_none(value: Any) -> str:
+    return "(none)" if value is None else str(value)
 
 
 def _loop_name(loop: Any) -> str:
