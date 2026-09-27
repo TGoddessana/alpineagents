@@ -39,6 +39,8 @@ class Model(ABC):
     Rules for an adapter:
 
     - Only return a reply. Do not change the State; the Agent records the reply and its usage.
+    - Put the model that actually answered in ``Reply.model``: the name the provider reported, or ``self.name`` if
+      it did not say. A Model that falls back to another model puts the fallback's name there.
     - Use no network and no credentials in ``__init__``. Create the SDK client on the first request, so an Agent
       can be built without an API key.
     - Let the SDK do retries (``retries`` is passed as its retry count). Wrap only SDK exceptions that finally
@@ -86,8 +88,8 @@ class Model(ABC):
 
         Returns:
             A ``Reply`` whose ``message`` is an assistant message with blocks in the order received,
-            ``usage.requests == 1``, ``usage.cost`` from ``price`` (or ``None``), and ``context_tokens`` set to
-            all input tokens (cached or not) plus output tokens.
+            ``usage.requests == 1``, ``usage.cost`` from ``price`` (or ``None``), ``context_tokens`` set to
+            all input tokens (cached or not) plus output tokens, and ``model`` set to the model that answered.
 
         Raises:
             ProviderError: The provider request finally failed. Use a subclass such as ``RateLimitError`` when
