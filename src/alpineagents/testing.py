@@ -56,7 +56,8 @@ class FakeModel(Model):
     - an exception instance: raised, for testing error paths
     - a callable: called with the ``Request``, and its result is used by the rules above
 
-    Token usage is estimated from the text, so ``state.usage`` fills in as it would with a real model.
+    Token usage is estimated from the text, so ``state.usage`` fills in as it would with a real model. The
+    replies it builds have ``model=name``.
     Safe to use from several threads.
 
     Args:
@@ -179,6 +180,7 @@ class FakeModel(Model):
             usage=usage,
             context_tokens=input_tokens + output_tokens,
             stop_reason=stop_reason,
+            model=self.name,
         )
 
 

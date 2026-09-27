@@ -194,6 +194,10 @@ class Reply:
     output). ``None`` if unknown."""
     stop_reason: str | None = None
     """Exactly what the provider gave, e.g. ``"end_turn"``, ``"tool_use"`` or ``"max_tokens"``."""
+    model: str | None = None
+    """The model that answered, as the provider reported it. The requested name if the provider did not say.
+    ``None`` only for a custom Model that does not set it. It can differ from the requested name (an alias, a
+    router, a fallback); ``usage.cost`` is still computed from the requested Model's price."""
 
     @property
     def text(self) -> str:

@@ -264,7 +264,9 @@ def test_human(models, monkeypatch, tmp_path):
 
 def test_custom_model():
     ns = run("custom_model")
-    assert Agent(model=ns["Echo"](), reporter=None).run("hello") == "hello"
+    state = State("hello")
+    assert Agent(model=ns["Echo"](), reporter=None).run(state) == "hello"
+    assert [h.content.model for h in state.history if h.kind == "reply"] == ["echo"]
 
 
 def test_testing_example(tmp_path, monkeypatch):

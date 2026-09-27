@@ -20,4 +20,5 @@ class Echo(Model):
             message=Message("assistant", (TextBlock(text),)),
             usage=Usage(requests=1),
             context_tokens=self.count_tokens(request),
+            model=self.name,
         )

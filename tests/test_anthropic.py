@@ -306,6 +306,33 @@ def test_respond_streams_text_and_converts_blocks(monkeypatch):
     assert reply.stop_reason == "tool_use"
 
 
+def test_respond_records_the_model_the_provider_reported(monkeypatch):
+    model = Anthropic("claude-sonnet-5")
+    final_message = SimpleNamespace(
+        content=[fake_block("text", text="ok")],
+        usage=fake_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
+        model="claude-sonnet-5-20260101",
+    )
+    install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=[], final_message=final_message))
+    reply = model.respond(Request(system=None, messages=(Message("user", (TextBlock("hi"),)),)))
+    assert reply.model == "claude-sonnet-5-20260101"
+
+
+@pytest.mark.parametrize("reported", [{}, {"model": None}, {"model": ""}])
+def test_respond_model_falls_back_to_requested_name(monkeypatch, reported):
+    model = Anthropic("claude-sonnet-5")
+    final_message = SimpleNamespace(
+        content=[fake_block("text", text="ok")],
+        usage=fake_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
+        **reported,
+    )
+    install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=[], final_message=final_message))
+    reply = model.respond(Request(system=None, messages=(Message("user", (TextBlock("hi"),)),)))
+    assert reply.model == "claude-sonnet-5"
+
+
 def test_respond_without_on_text_callback(monkeypatch):
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
