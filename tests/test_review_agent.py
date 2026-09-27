@@ -176,7 +176,7 @@ def _two_pending_calls():
 
 
 def _done_job(call, result: str) -> _runner._Job:
-    job = _runner._Job(call, tool=None, kwargs={})  # type: ignore[arg-type]
+    job = _runner._Job(call, tool=None)  # type: ignore[arg-type]
     job.future = Future()
     job.future.set_result(result)
     return job

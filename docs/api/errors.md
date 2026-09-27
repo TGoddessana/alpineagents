@@ -21,3 +21,5 @@ Concepts: [Errors and interruptions](../concepts/errors.md).
 ::: alpineagents.ResumeWarning
 
 ::: alpineagents.ToolError
+
+::: alpineagents.ToolInputError

@@ -23,9 +23,8 @@ from concurrent.futures import Future, wait
 from contextlib import AsyncExitStack
 from typing import Any
 
-from .errors import MCPConnectionError, ToolInputError, fix_message
-from .tool import DONE, hint_values
-from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
+from .errors import MCPConnectionError, ToolError, ToolInputError, fix_message
+from .tool import DONE, Tool, hint_values
 
 __all__ = ["MCP", "MCPTool", "MCPToolRef", "SEPARATOR"]
 
@@ -343,29 +342,18 @@ class MCPToolRef:
         return f"{self.server.name}.{self.tool_name}"
 
 
-class MCPTool:
+class MCPTool(Tool):
     """A tool of a connected MCP server, as found in ``agent.tool_map`` under ``{server}__{tool}``.
 
-    It has the same ``name``, ``description``, ``input_schema`` and hints as a ``@tool`` tool. The hints come from the
+    It has the same ``name``, ``description``, ``input_schema`` and hints as any ``Tool``. The hints come from the
     server's tool annotations (``readOnlyHint`` and so on), with the same defaults as ``@tool`` for the ones it
     leaves out. They are what the server says about itself, not a guarantee: do not trust them more than the server.
     """
-
-    # The runner uses the same members as for Tool: spec, parallel, is_async, prepare, invoke, format_result,
-    # is_error_result.
-    parallel = True
-    is_async = True
 
     server: MCP
     """The MCP server the tool belongs to."""
     remote_name: str
     """The tool's name on the server (``name`` has the ``{server}__`` prefix)."""
-    name: str
-    """The name the model calls: ``{server}__{tool}``."""
-    description: str
-    """The server's description of the tool."""
-    input_schema: dict[str, Any]
-    """The server's JSON Schema for the arguments."""
     read_only: bool
     """From ``readOnlyHint``. ``False`` if the server does not say."""
     destructive: bool
@@ -378,11 +366,8 @@ class MCPTool:
     def __init__(self, server: MCP, remote: Any) -> None:
         self.server = server
         self.remote_name = remote.name
-        self.name = tool_name(server, remote.name)
-        self.description = remote.description or ""
         schema = dict(remote.input_schema or {})
         schema.setdefault("type", "object")
-        self.input_schema = schema
         # A server's hints are read leniently: a value that is not a bool counts as not given.
         annotations = getattr(remote, "annotations", None)
 
@@ -390,52 +375,40 @@ class MCPTool:
             value = getattr(annotations, field, None)
             return value if isinstance(value, bool) else None
 
-        self.read_only, self.destructive, self.idempotent, self.open_world = hint_values(
+        read_only, destructive, idempotent, open_world = hint_values(
             hint("read_only_hint"), hint("destructive_hint"), hint("idempotent_hint"), hint("open_world_hint")
         )
+        super().__init__(
+            name=tool_name(server, remote.name),
+            description=remote.description or "",
+            input_schema=schema,
+            read_only=read_only,
+            destructive=destructive,
+            idempotent=idempotent,
+            open_world=open_world,
+        )
 
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(self.name, self.description, self.input_schema)
+    async def run(self, args: dict[str, Any], state: Any) -> str:
+        """Calls the tool on the server. Missing required arguments are an input error; the server checks the
+        rest. An error the server reports (``isError``, or an error response) becomes an error result; a lost
+        connection raises ``MCPConnectionError``.
 
-    def prepare(self, args: Mapping[str, Any]) -> dict[str, Any]:
-        """Argument JSON that could not be read, and missing required arguments, are input errors. The server
-        checks the rest (its errors go to the model)."""
-        if INVALID_ARGS_KEY in args:
-            raw = args[INVALID_ARGS_KEY]
-            if raw == TRUNCATED_ARGS_MESSAGE:
-                raise ToolInputError(raw)
-            raise ToolInputError(f"arguments are not valid JSON: {raw}")
+        Text blocks are joined by newlines, other blocks become short placeholders, ``structured_content`` is sent
+        as JSON when there are no blocks, and ``(done)`` when there is nothing."""
         missing = [key for key in self.input_schema.get("required", ()) if key not in args]
         if missing:
             raise ToolInputError(f"missing required arguments: {', '.join(missing)}")
-        return dict(args)
-
-    def invoke(self, kwargs: Mapping[str, Any], state: Any) -> Any:
-        return self._ainvoke(dict(kwargs))
-
-    async def _ainvoke(self, args: dict[str, Any]) -> Any:
-        """Runs the call on the background loop and awaits it from the caller's loop (a cancel reaches it)."""
-        return await asyncio.wrap_future(_Loop.submit(self.server._call(self.remote_name, args)))
-
-    @staticmethod
-    def format_result(result: Any) -> str:
-        """Text blocks joined by newlines; other blocks as short placeholders; ``structured_content`` as JSON
-        when there are no blocks; ``(done)`` when there is nothing."""
+        # Runs on the background loop; awaited from the caller's loop, so a cancel reaches it.
+        result = await asyncio.wrap_future(_Loop.submit(self.server._call(self.remote_name, args)))
         if isinstance(result, _ErrorResult):
-            return result.text
+            raise ToolError(result.text)
         parts = [_content_text(block) for block in (result.content or ())]
         text = "\n".join(part for part in parts if part)
         if not text and result.structured_content is not None:
             text = json.dumps(result.structured_content, ensure_ascii=False)
+        if getattr(result, "is_error", False):
+            raise ToolError(text or f"(MCP server {self.server.name!r} reported an error without a message)")
         return text or DONE
-
-    @staticmethod
-    def is_error_result(result: Any) -> bool:
-        return isinstance(result, _ErrorResult) or bool(getattr(result, "is_error", False))
-
-    def __repr__(self) -> str:
-        return f"MCPTool({self.name!r})"
 
 
 class _ErrorResult:
@@ -520,23 +493,28 @@ def check_tool_names(server: MCP, tools: tuple[Any, ...], only: frozenset[str] |
                     f"tools=[{server.name}[{next(iter(by_remote), 'tool_name')!r}]]",
                 )
             )
-    chosen = [MCPTool(server, remote) for name, remote in by_remote.items() if only is None or name in only]
+    # Names are checked before the MCPTools are made (Tool.__init__ would reject a long name less clearly).
     seen: dict[str, str] = {}
-    for mcp_tool in chosen:
-        if len(mcp_tool.name) > _MAX_NAME:
+    chosen = []
+    for remote_name, remote in by_remote.items():
+        if only is not None and remote_name not in only:
+            continue
+        name = tool_name(server, remote_name)
+        if len(name) > _MAX_NAME:
             raise ValueError(
                 fix_message(
-                    f"MCP tool name {mcp_tool.name!r} is longer than {_MAX_NAME} characters",
+                    f"MCP tool name {name!r} is longer than {_MAX_NAME} characters",
                     "Give the server a shorter name=",
                 )
             )
-        if mcp_tool.name in seen:
+        if name in seen:
             raise ValueError(
                 fix_message(
-                    f"MCP server {server.name!r} has tools {seen[mcp_tool.name]!r} and {mcp_tool.remote_name!r}, "
-                    f"which both become {mcp_tool.name!r}",
+                    f"MCP server {server.name!r} has tools {seen[name]!r} and {remote_name!r}, "
+                    f"which both become {name!r}",
                     f"Pick one of them with tools=[{server.name}[...]]",
                 )
             )
-        seen[mcp_tool.name] = mcp_tool.remote_name
+        seen[name] = remote_name
+        chosen.append(MCPTool(server, remote))
     return chosen

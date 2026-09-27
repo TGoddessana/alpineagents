@@ -29,8 +29,17 @@ All notable changes to alpineagents are listed here. The format follows
 - `think(tools=...)` accepts the values of `agent.tool_map`, including MCP tools, so
   `[t for t in agent.tool_map.values() if t.read_only]` works.
 
+- **Tools that are not functions.** Subclass `Tool`, call `super().__init__(name=..., description=...,
+  input_schema=..., ...)` and implement `run(args, state)` (or `async def run`), for tools whose name and schema come
+  as data, such as rows in a database or an OpenAPI spec. `run` returns the result as a `@tool` function does, and
+  signals with `ToolInputError` (wrong arguments) and `ToolError` (a failure the model should handle).
+- `ToolInputError` is public: raise it from a tool for arguments it cannot use. The model gets `(input error: ...)`.
+
 ### Changed
 
+- `Tool` is now the base class of every tool. `@tool` makes a `FunctionTool` (a `Tool` subclass), and an MCP server's
+  tool is an `MCPTool` (also a `Tool` subclass). Code that created a tool with `Tool(fn)` uses `FunctionTool(fn)`;
+  `isinstance(t, Tool)` is true for every tool.
 - The [Ask before a tool runs](https://tgoddessana.github.io/alpineagents/guides/approval/) guide asks before calls
   whose tool is not `read_only`, instead of before tools in a list of names.
 - `print(state)` shows error results as `tool_result fetch_url (error): HTTP 404: ...` instead of their size.

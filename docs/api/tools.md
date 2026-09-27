@@ -6,10 +6,14 @@ Concepts: [Tools](../concepts/tools.md). Guide: [MCP servers](../guides/mcp.md).
 
 ::: alpineagents.Tool
     options:
-      filters: ["!^_", "!^(prepare|invoke|format_result|is_error_result|fn|needs_self|bound_to)$"]
+      filters: ["!^_"]
+
+::: alpineagents.FunctionTool
+    options:
+      filters: ["!^_", "!^(prepare|invoke|fn|needs_self|bound_to)$"]
 
 ::: alpineagents.MCP
 
 ::: alpineagents.MCPTool
     options:
-      filters: ["!^_", "!^(prepare|invoke|format_result|is_error_result|spec|parallel|is_async)$"]
+      filters: ["!^_"]

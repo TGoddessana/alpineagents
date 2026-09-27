@@ -13,6 +13,7 @@ from .errors import (
     RateLimitError,
     ResumeWarning,
     ToolError,
+    ToolInputError,
 )
 from .human import Human
 from .loop import Loop, adefault_loop, default_loop, loop
@@ -22,7 +23,7 @@ from .reporter import Reporter
 from .state import State
 from .store import FileStore, SavedState, Store
 from .terminal import Terminal
-from .tool import Tool, tool
+from .tool import FunctionTool, Tool, tool
 from .types import (
     ContextChange,
     HistoryEntry,
@@ -49,6 +50,7 @@ __all__ = [
     "adefault_loop",
     "tool",
     "Tool",
+    "FunctionTool",
     "compact_if_full",
     "acompact_if_full",
     "MCP",
@@ -87,4 +89,5 @@ __all__ = [
     "MCPConnectionError",
     "ResumeWarning",
     "ToolError",
+    "ToolInputError",
 ]

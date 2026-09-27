@@ -1,13 +1,14 @@
 # Tools
 
-A tool is a Python function the model can call.
+A tool is something the model can call. Most tools are Python functions with `@tool`. A tool that is not a function,
+such as one built from a JSON Schema, is an object of a [`Tool` subclass](#tools-that-are-not-functions).
 
 ## Define a tool
 
 ```python
 from pathlib import Path
 
-from alpineagents import tool
+from alpineagents import ToolError, tool
 
 
 @tool
@@ -20,7 +21,7 @@ def read_file(path: str, max_lines: int = 200) -> str:
     """
     file = Path(path)
     if not file.exists():
-        return f"No such file: {path}"
+        raise ToolError(f"No such file: {path}")
     return "\n".join(file.read_text().splitlines()[:max_lines])
 ```
 
@@ -59,6 +60,7 @@ A value that cannot become JSON raises `TypeError`, which stops the run like any
 | Situation | What happens | The run |
 | --- | --- | --- |
 | The model sends invalid arguments or an unknown tool name | The model gets `(input error: ...)` as the result | Continues |
+| The tool raises `ToolInputError("...")` | The model gets `(input error: ...)` as the result | Continues |
 | The tool raises `ToolError("...")` | The model gets the message as an error result | Continues |
 | The tool raises an exception its `exception_handler` takes | The model gets the handler's message as an error result | Continues |
 | The tool raises any other exception | The exception propagates out of `use_tools` and `run` | Stops |
@@ -145,6 +147,47 @@ See [Tools that use the State](../guides/tool-state.md).
 ```
 
 Use an object when tools share settings, such as a root folder or a client.
+
+## Tools that are not functions
+
+`@tool` needs a Python function with type hints. For a tool whose name, description and input schema come as data,
+such as tools stored in a database or built from an OpenAPI spec, subclass `Tool`:
+
+```python
+import httpx
+
+from alpineagents import Agent, State, Tool, ToolError, ToolInputError
+
+
+class Webhook(Tool):
+    def __init__(self, name: str, description: str, schema: dict, url: str):
+        super().__init__(name=name, description=description, input_schema=schema, open_world=True)
+        self.url = url
+
+    def run(self, args: dict, state: State) -> dict:
+        if "title" not in args:
+            raise ToolInputError("title is required")
+        response = httpx.post(self.url, json=args)
+        if response.status_code >= 400:
+            raise ToolError(f"HTTP {response.status_code}")
+        return response.json()
+
+
+agent = Agent(model="claude-sonnet-5", tools=[Webhook(**row) for row in rows])
+```
+
+- `super().__init__` takes `name`, `description`, `input_schema` (an object schema, left out for no arguments),
+  `parallel` and the [hints](#describe-what-a-tool-does).
+- `run(args, state)` gets the model's arguments as a dict, not checked against `input_schema`. Check what you rely
+  on and raise `ToolInputError` when it is wrong.
+- What `run` returns and raises works as for `@tool`: see [Return values](#return-values) and
+  [When a call goes wrong](#when-a-call-goes-wrong). Arguments that are not valid JSON never reach `run`.
+- `run` can be `async def`.
+- A subclass that does not call `super().__init__` or does not define `run`, or passing the class instead of an
+  object, raises `TypeError` when you create the Agent.
+
+`@tool` makes a `FunctionTool`, and an MCP server's tool is an `MCPTool`. Both are `Tool` subclasses, so every value of
+`agent.tool_map` is a `Tool`.
 
 ## Describe what a tool does
 

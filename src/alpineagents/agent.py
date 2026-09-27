@@ -27,7 +27,7 @@ from .models.resolve import resolve_model
 from .reporter import Reporter
 from .state import State
 from .store import Store
-from .tool import Tool, ToolMap, collect_tools
+from .tool import FunctionTool, Tool, ToolMap, collect_tools
 from .types import Message, ModelEvent, Request, TextBlock
 
 if TYPE_CHECKING:
@@ -86,9 +86,11 @@ def _check_state(state: Any, method: str) -> None:
 
 
 def _same_tool(a: Tool, b: Tool) -> bool:
-    """Whether two tools are the same. ``obj.method`` gives a new Tool on every access, so compare the original
-    function and the bound object."""
-    return a is b or (a.fn is b.fn and a.bound_to is b.bound_to)
+    """Whether two tools are the same. ``obj.method`` gives a new FunctionTool on every access, so compare the
+    original function and the bound object."""
+    if a is b:
+        return True
+    return isinstance(a, FunctionTool) and isinstance(b, FunctionTool) and a.fn is b.fn and a.bound_to is b.bound_to
 
 
 class Agent:
@@ -126,8 +128,8 @@ class Agent:
             model: A model name such as ``"claude-sonnet-5"``, ``"anthropic/claude-sonnet-5"`` or
                 ``"ollama/llama3:8b"``, or a ``Model`` object such as ``Anthropic(...)`` when you need settings.
             system: The system prompt.
-            tools: ``@tool`` functions, objects with ``@tool`` methods, single ``@tool`` methods, ``MCP`` servers
-                and single MCP tools (``github.create_issue``).
+            tools: ``@tool`` functions, objects with ``@tool`` methods, single ``@tool`` methods, objects of ``Tool``
+                subclasses, ``MCP`` servers and single MCP tools (``github.create_issue``).
             skills: Not implemented yet. A non-empty value raises ``NotImplementedError``.
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
             reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent.
@@ -209,6 +211,15 @@ class Agent:
             if isinstance(item, (MCP, MCPToolRef)):
                 _add_mcp(mcp_uses, item)
                 continue
+            if isinstance(item, MCPTool):
+                raise TypeError(
+                    fix_message(
+                        f"{item!r} passed in tools= is a connected tool of another Agent's MCP server",
+                        "Pass the server, or pick the tool from it",
+                        f"Agent(model=..., tools=[{item.server.name}])  # or [{item.server.name}"
+                        f"[{item.remote_name!r}]]",
+                    )
+                )
             plain.append(item)
         self._tools = tools
         self._tool_by_name: dict[str, Tool] = collect_tools(plain)

@@ -13,6 +13,7 @@ Terms in the order you meet them.
 | Reply | What the model returns for one request: text, tool calls or both. A `Reply` object |
 | Answer | `state.answer`: the value given to `finish`, or the text of the latest reply without tool calls |
 | Stop condition | A function from State to `bool` in `until=`. The loop stops when one returns `True` |
+| Tool | Something the model can call. A `Tool` object: `@tool` makes a `FunctionTool`, an MCP server's tool is an `MCPTool`, and you can subclass `Tool` |
 | Tool call | A request in the model's reply to run one tool with arguments. A `ToolCall` object |
 | Pending call | A tool call that has no result yet. Listed in `state.pending_calls` |
 | Tool hint | What a tool does, for your code: `read_only`, `destructive`, `idempotent`, `open_world`. The model does not see it |

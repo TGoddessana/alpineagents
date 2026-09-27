@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from .errors import ToolError, ToolInputError
 from .state import closed_outcome, closed_result
+from .tool import format_result, invalid_args_message
 from .types import ToolOutcome, format_call
 
 if TYPE_CHECKING:
@@ -55,14 +56,15 @@ class _Job:
     """Execution state of one call. The worker thread and the main thread share it under ``lock``."""
 
     __slots__ = (
-        "call", "tool", "kwargs", "future", "waiter", "seq", "lock", "loop", "task", "cancel_requested",
-        "announced", "ended", "cancelled_error", "is_error", "tool_error",
+        "call", "tool", "args", "future", "waiter", "seq", "lock", "loop", "task", "cancel_requested",
+        "announced", "ended", "cancelled_error", "is_error", "input_error", "tool_error",
     )
 
-    def __init__(self, call: ToolCall, tool: Tool, kwargs: dict[str, Any]) -> None:
+    def __init__(self, call: ToolCall, tool: Tool) -> None:
         self.call = call
         self.tool = tool
-        self.kwargs = kwargs
+        #: What ``tool.run`` gets: a copy of the model's arguments.
+        self.args: dict[str, Any] = dict(call.args)
         #: The sync API's worker thread future. In the async API, the asyncio Task of an ``async def`` tool.
         self.future: Future[str] | asyncio.Task[str] | None = None
         #: Async API only: what the event loop awaits (the Task itself, or the wrapped thread future).
@@ -78,8 +80,10 @@ class _Job:
         self.ended = False
         #: The ``CancelledError`` standing for a Task the tool cancelled itself (one object, recorded once).
         self.cancelled_error: asyncio.CancelledError | None = None
-        #: The tool returned an error result (``Tool.is_error_result``) or raised ``ToolError``.
+        #: The tool raised ``ToolError`` or ``ToolInputError``.
         self.is_error = False
+        #: The tool raised ``ToolInputError``.
+        self.input_error = False
         #: The ``ToolError`` the tool raised, kept in the history entry.
         self.tool_error: ToolError | None = None
 
@@ -125,16 +129,15 @@ def _run_awaitable(job: _Job, awaitable: Any) -> Any:
 
 def _work(job: _Job, state: State) -> str:
     """Worker thread: calls the tool and builds the result string. Does no State recording or Reporter notification.
-    A ``ToolError`` becomes an error result with its message."""
+    A ``ToolError`` or ``ToolInputError`` becomes an error result."""
     try:
         try:
-            value = job.tool.invoke(job.kwargs, state)
+            value = job.tool.run(job.args, state)
             if inspect.isawaitable(value):
                 value = _run_awaitable(job, value)
-            text = job.tool.format_result(value)
-            job.is_error = job.tool.is_error_result(value)
-        except ToolError as e:
-            text = _tool_error_result(job, e)
+            text = format_result(value)
+        except (ToolError, ToolInputError) as e:
+            text = _error_result(job, e)
     except BaseException:
         job.seq = _next_seq()
         raise
@@ -142,9 +145,12 @@ def _work(job: _Job, state: State) -> str:
     return text
 
 
-def _tool_error_result(job: _Job, error: ToolError) -> str:
-    """The result for a ``ToolError``: its message, as an error result."""
+def _error_result(job: _Job, error: ToolError | ToolInputError) -> str:
+    """The result for a ``ToolError`` (its message) or a ``ToolInputError`` (``(input error: ...)``)."""
     job.is_error = True
+    if isinstance(error, ToolInputError):
+        job.input_error = True
+        return INPUT_ERROR.format(error)
     job.tool_error = error
     return str(error)
 
@@ -248,8 +254,8 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
     """Records one finished call and calls ``on_tool_end`` (main thread).
 
     - Success: if it is still a pending call, records the result and calls ``on_tool_end(result, "done")``
-      (``"error"`` and ``is_error`` for an error result: ``Tool.is_error_result``, or a ``ToolError`` the tool
-      raised, which the history entry keeps in ``error``).
+      (``"error"`` and ``is_error`` for a ``ToolError`` the tool raised, which the history entry keeps in
+      ``error``; ``"input_error"`` and ``is_error`` for a ``ToolInputError``).
       If a tool in the same turn already closed it with ``state.deny``, nothing is recorded (``deny`` already
       called ``on_tool_end``).
     - Exception: records ``error``, adds the job to ``failures`` and calls
@@ -264,7 +270,7 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
         text = job.future.result()
         recorded = _record_if_pending(state, job.call, text, job.is_error, job.tool_error)
         shown: str | None = text if recorded else None
-        outcome = ToolOutcome("error" if job.is_error else "done")
+        outcome = ToolOutcome("input_error" if job.input_error else "error" if job.is_error else "done")
     else:
         state._record_error(error, job.call)
         if job not in failures:
@@ -357,15 +363,15 @@ def run_calls(
     All Reporter notifications and State records happen on **the thread that called this function (main)**.
     Worker threads only run tools.
 
-    1. Prepare (in request order): if the tool does not exist the result is ``UNKNOWN_TOOL``; if
-       ``tool.prepare(call.args)`` raises ``ToolInputError`` it is ``INPUT_ERROR``: ``on_tool_start`` →
+    1. Prepare (in request order): if the tool does not exist the result is ``UNKNOWN_TOOL``; if the arguments
+       were not valid JSON (``invalid_args_message``) it is ``INPUT_ERROR``: ``on_tool_start`` →
        ``state._record_tool_result(call, result, is_error=True)`` → ``on_tool_end``. The tool is not called.
     2. Parallel group (``tool.parallel``): for each call, ``on_tool_start``, then hand it to ``_Executor``
        (daemon worker threads, at most ``_MAX_WORKERS`` at once).
-       The worker thread runs ``value = tool.invoke(kwargs, state)``; if it is a coroutine, it creates a new
+       The worker thread runs ``value = tool.run(dict(call.args), state)``; if it is a coroutine, it creates a new
        event loop in that thread and runs it as a Task (keeping the loop and Task so it can be cancelled).
-       The result is ``Tool.format_result(value)`` (on the worker thread). A ``ToolError`` the tool raises is not an
-       exception here: its message becomes an error result.
+       The result is ``format_result(value)`` (on the worker thread). A ``ToolError`` or ``ToolInputError`` the
+       tool raises is not an exception here: it becomes an error result (``(input error: ...)`` for the latter).
     3. As they finish (completion order), on the main thread: success → ``state._record_tool_result(call, text)``
        → ``on_tool_end`` (check and record under one ``state.lock``; a call closed by ``state.deny`` in between
        is not recorded).
@@ -423,8 +429,8 @@ def run_calls(
 def _prepare(
     state: State, calls: Sequence[ToolCall], tools: Mapping[str, Tool], reporter: Reporter | None
 ) -> tuple[list[_Job], list[_Job]]:
-    """Step 1 of ``run_calls``: records unknown tools and input errors right away and splits the rest into the
-    parallel and serial groups (request order)."""
+    """Step 1 of ``run_calls``: records unknown tools and arguments that are not valid JSON right away, and splits
+    the rest into the parallel and serial groups (request order)."""
     parallel: list[_Job] = []
     serial: list[_Job] = []
     for call in calls:
@@ -433,12 +439,11 @@ def _prepare(
             available = ", ".join(tools) or "(none)"
             _record_now(state, reporter, call, UNKNOWN_TOOL.format(call.name, available))
             continue
-        try:
-            kwargs = tool.prepare(call.args)
-        except ToolInputError as e:
-            _record_now(state, reporter, call, INPUT_ERROR.format(e))
+        invalid = invalid_args_message(call.args)
+        if invalid is not None:
+            _record_now(state, reporter, call, INPUT_ERROR.format(invalid))
             continue
-        (parallel if tool.parallel else serial).append(_Job(call, tool, kwargs))
+        (parallel if tool.parallel else serial).append(_Job(call, tool))
     return parallel, serial
 
 
@@ -462,16 +467,15 @@ _abandoned: set[asyncio.Task[str]] = set()
 
 async def _awork(job: _Job, state: State) -> str:
     """An ``async def`` tool as a Task on the running event loop: calls it and builds the result string. A
-    ``ToolError`` becomes an error result with its message."""
+    ``ToolError`` or ``ToolInputError`` becomes an error result."""
     try:
         try:
-            value = job.tool.invoke(job.kwargs, state)
+            value = job.tool.run(job.args, state)
             if inspect.isawaitable(value):
                 value = await value
-            text = job.tool.format_result(value)
-            job.is_error = job.tool.is_error_result(value)
-        except ToolError as e:
-            text = _tool_error_result(job, e)
+            text = format_result(value)
+        except (ToolError, ToolInputError) as e:
+            text = _error_result(job, e)
     except BaseException:
         job.seq = _next_seq()
         raise

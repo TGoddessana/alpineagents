@@ -1,8 +1,8 @@
-"""@tool: turns Python functions and methods into tools the model can call.
+"""Tools: the ``Tool`` base class, and ``@tool``, which makes a ``FunctionTool`` from a Python function or method.
 
-The contract is in ARCHITECTURE.md "Tool contract". This module only does schema generation, argument
-validation, State injection and result-to-string conversion. Execution order, threads and exception handling
-belong to Agent (``_runner.py``).
+The contract is in ARCHITECTURE.md "Tool contract". This module does schema generation, argument validation,
+State injection and result-to-string conversion. Execution order, threads and exception handling belong to Agent
+(``_runner.py``).
 """
 
 from __future__ import annotations
@@ -29,7 +29,18 @@ from .errors import ToolError, ToolInputError, fix_message
 from .state import State
 from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
 
-__all__ = ["tool", "Tool", "ToolMap", "collect_tools", "hint_values", "SUPPORTED_TYPES_TEXT", "DONE"]
+__all__ = [
+    "tool",
+    "Tool",
+    "FunctionTool",
+    "ToolMap",
+    "collect_tools",
+    "format_result",
+    "hint_values",
+    "invalid_args_message",
+    "SUPPORTED_TYPES_TEXT",
+    "DONE",
+]
 
 #: Text sent to the model when a tool returns ``None``.
 DONE = "(done)"
@@ -362,27 +373,66 @@ def _describe_validation_error(err: dict[str, Any]) -> str:
     return f"{loc}: {text}"
 
 
-class Tool:
-    """A tool made by ``@tool``. Calling it runs the original function as is, without validation.
+_TOOL_CLASS_EXAMPLE = (
+    "class Webhook(Tool):\n"
+    "    def __init__(self, url: str):\n"
+    '        super().__init__(name="create_ticket", description="Create a ticket", input_schema=SCHEMA)\n'
+    "        self.url = url\n"
+    "\n"
+    "    def run(self, args: dict, state: State) -> str:\n"
+    "        return httpx.post(self.url, json=args).text"
+)
 
-    A ``@tool`` method in a class becomes a bound tool when accessed on an object (``fs.read_file``).
-    The attributes do not change after creation.
+#: ``input_schema`` when none is given: a tool that takes no arguments.
+_NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}}
+
+
+class Tool:
+    """A tool the model can call. ``@tool`` makes one from a function; subclass it for a tool that is not a Python
+    function, such as one built from a JSON Schema in a database or an OpenAPI spec.
+
+    A subclass calls ``super().__init__(...)`` with the name, description and input schema, and implements ``run``.
+    ``run`` gets the model's arguments as a dict and returns the result, which the model gets as ``@tool`` results
+    are: a ``str`` as is, ``None`` as ``(done)``, anything else as JSON. It signals with exceptions:
+
+    - ``ToolInputError("...")``: the arguments are wrong. The model gets ``(input error: ...)``.
+    - ``ToolError("...")``: a failure the model should handle. The model gets it as an error result.
+    - Any other exception stops the run.
+
+    Arguments that are not valid JSON, or that were cut off by the output token limit, never reach ``run``: the model
+    gets an input error. ``run`` can be ``async def``; ``agent.arun`` then awaits it on the event loop, and a regular
+    ``run`` runs on a worker thread.
+
+    Example:
+        ```python
+        class Webhook(Tool):
+            def __init__(self, row):
+                super().__init__(
+                    name=row.name,
+                    description=row.description,
+                    input_schema=row.schema,  # {"type": "object", "properties": {...}}
+                    open_world=True,
+                )
+                self.url = row.url
+
+            def run(self, args: dict, state: State) -> dict:
+                if "title" not in args:
+                    raise ToolInputError("title is required")
+                response = httpx.post(self.url, json=args)
+                if response.status_code >= 400:
+                    raise ToolError(f"HTTP {response.status_code}")
+                return response.json()
+        ```
     """
 
     name: str
-    """The name the model calls. Defaults to the function name."""
+    """The name the model calls."""
     description: str
-    """What the model reads. Defaults to the docstring's first paragraph, or an empty string."""
+    """What the model reads about the tool."""
+    input_schema: dict[str, Any]
+    """The JSON Schema object of the arguments, shown to the model."""
     parallel: bool
     """``True`` runs the tool together with the turn's other calls. ``False`` runs it alone after they finish."""
-    input_schema: dict[str, Any]
-    """The JSON Schema object shown to the model. ``State`` parameters and ``self`` are left out, ``Args:``
-    descriptions become property descriptions, and parameters with defaults are optional."""
-    is_async: bool
-    """``True`` if the original function is ``async def``."""
-    exception_handler: Callable[[Any], str] | None
-    """Turns the exceptions named in its parameter's type hint into error results the model sees. ``None`` if not
-    given."""
     read_only: bool
     """The tool does not change its environment. ``False`` unless given. The model does not see the hints; they are
     for your own code, such as a loop that asks before calls that are not read-only."""
@@ -393,6 +443,147 @@ class Tool:
     read-only tool."""
     open_world: bool
     """The tool reaches outside its own domain, such as the web, a shell or another system. ``True`` unless given."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str = "",
+        input_schema: Mapping[str, Any] | None = None,
+        parallel: bool = True,
+        read_only: bool | None = None,
+        destructive: bool | None = None,
+        idempotent: bool | None = None,
+        open_world: bool | None = None,
+    ) -> None:
+        """Sets what the model sees and what the tool does. A subclass calls it from its own ``__init__``.
+
+        Args:
+            name: The name the model calls. Must match ``[A-Za-z0-9_-]{1,64}``.
+            description: What the model reads about the tool.
+            input_schema: The JSON Schema of the arguments, an object schema such as
+                ``{"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}``.
+                Leave it out for a tool without arguments.
+            parallel: ``False`` runs the tool alone after the turn's other calls finish.
+            read_only: The tool does not change its environment. Sets ``destructive=False`` and
+                ``idempotent=True``.
+            destructive: The tool may delete or overwrite something.
+            idempotent: Calling it again with the same arguments has no further effect.
+            open_world: The tool reaches outside its own domain, such as the web, a shell or another system.
+
+        Raises:
+            TypeError: The name is invalid, ``description`` is not a string, ``input_schema`` is not an object
+                schema, or ``parallel`` or a hint is not a bool.
+            ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
+        """
+        self.name = _check_tool_name(name, explicit=True)
+        if not isinstance(description, str):
+            raise TypeError(
+                fix_message(
+                    f"Tool {self.name}: description= takes a string (got: {description!r})",
+                    "Pass what the model should know about the tool as a string",
+                )
+            )
+        self.description = description
+        self.input_schema = _check_input_schema(self.name, input_schema)
+        if not isinstance(parallel, bool):
+            raise TypeError(
+                fix_message(
+                    f"Tool {self.name}: parallel= takes True or False (got: {parallel!r})",
+                    "Pass False for a tool that must run alone",
+                )
+            )
+        self.parallel = parallel
+        self.read_only, self.destructive, self.idempotent, self.open_world = _check_hints(
+            self.name, read_only=read_only, destructive=destructive, idempotent=idempotent, open_world=open_world
+        )
+        self._tool_initialized = True
+
+    @property
+    def spec(self) -> ToolSpec:
+        """The tool as the model sees it: ``ToolSpec(name, description, input_schema)``."""
+        return ToolSpec(self.name, self.description, self.input_schema)
+
+    @property
+    def is_async(self) -> bool:
+        """``True`` if ``run`` is ``async def``."""
+        return inspect.iscoroutinefunction(self.run)
+
+    def run(self, args: dict[str, Any], state: State) -> Any:
+        """Runs one call. A subclass implements it, as ``def`` or ``async def``.
+
+        Args:
+            args: The model's arguments, parsed from JSON. Not checked against ``input_schema``: check what you
+                rely on, and raise ``ToolInputError`` when it is wrong.
+            state: The State of the run.
+
+        Returns:
+            The result: a ``str`` as is, ``None`` as ``(done)``, anything else as JSON.
+
+        Raises:
+            ToolInputError: The arguments are wrong. The model gets ``(input error: ...)``.
+            ToolError: A failure the model should handle. The model gets it as an error result.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement run(self, args, state)")
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.name!r})"
+
+
+def _check_input_schema(tool_name: str, schema: Any) -> dict[str, Any]:
+    if schema is None:
+        return copy.deepcopy(_NO_ARGUMENTS)
+    if not isinstance(schema, Mapping) or schema.get("type") != "object":
+        raise TypeError(
+            fix_message(
+                f"Tool {tool_name}: input_schema= must be a JSON Schema object with \"type\": \"object\" "
+                f"(got: {schema!r})",
+                "Describe the arguments as the properties of an object. Providers accept only object schemas",
+                '{"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}',
+            )
+        )
+    return dict(schema)
+
+
+def format_result(value: Any) -> str:
+    """Converts what ``run`` returned into the string sent to the model.
+
+    - ``str`` as is, ``None`` as ``"(done)"``
+    - Anything else (dict, list, numbers, bool, dataclass, Pydantic model, combinations of these) goes
+      through ``pydantic_core.to_jsonable_python`` and then ``json.dumps(..., ensure_ascii=False)``
+    - If it cannot become JSON, ``TypeError`` (fix: return a str, dict, list, dataclass or Pydantic model).
+      This exception is treated like any tool exception.
+    """
+    if value is None:
+        return DONE
+    if isinstance(value, str):
+        return value
+    try:
+        jsonable = to_jsonable_python(value)
+        return json.dumps(jsonable, ensure_ascii=False)
+    except Exception as e:
+        raise TypeError(
+            fix_message(
+                f"Cannot convert tool return value {value!r} to JSON",
+                "Return a str, dict, list, dataclass or Pydantic model",
+            )
+        ) from e
+
+
+class FunctionTool(Tool):
+    """A tool made by ``@tool`` from a function or method. Calling it runs the original function as is, without
+    validation.
+
+    A ``@tool`` method in a class becomes a bound tool when accessed on an object (``fs.read_file``).
+    The attributes do not change after creation.
+    """
+
+    input_schema: dict[str, Any]
+    """The JSON Schema object shown to the model. ``State`` parameters and ``self`` are left out, ``Args:``
+    descriptions become property descriptions, and parameters with defaults are optional."""
+    exception_handler: Callable[[Any], str] | None
+    """Turns the exceptions named in its parameter's type hint into error results the model sees. ``None`` if not
+    given."""
     # Internal: the original function, whether it is a method in a class (first parameter is ``self`` with no
     # type hint), and the bound object (None if unbound).
     fn: Callable[..., Any]
@@ -442,25 +633,19 @@ class Tool:
         #   ``extra="forbid"``). Field names are internal names and parameter names are aliases (so they do not
         #   clash with BaseModel attribute names).
         self.fn = fn
-        self.name = _check_tool_name(fn.__name__ if name is None else name, explicit=name is not None)
-        self.parallel = parallel
-        self.is_async = inspect.iscoroutinefunction(fn)
+        tool_name = _check_tool_name(fn.__name__ if name is None else name, explicit=name is not None)
         self.bound_to = None
         # The options as given, for copy.
         self._options: dict[str, Any] = {
             "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
             "read_only": read_only, "destructive": destructive, "idempotent": idempotent, "open_world": open_world,
         }
-        self.read_only, self.destructive, self.idempotent, self.open_world = _check_hints(
-            self.name, read_only=read_only, destructive=destructive, idempotent=idempotent, open_world=open_world
-        )
         self.exception_handler = exception_handler
         self._handles: tuple[type[Exception], ...] = (
-            () if exception_handler is None else _handled_types(exception_handler, self.name)
+            () if exception_handler is None else _handled_types(exception_handler, tool_name)
         )
 
         doc_description, arg_docs = _parse_docstring(fn.__doc__)
-        self.description = description if description is not None else doc_description
 
         sig = inspect.signature(fn)
         params = list(sig.parameters.values())
@@ -474,7 +659,7 @@ class Tool:
             if p.kind in _BAD_PARAM_KINDS:
                 raise TypeError(
                     fix_message(
-                        f"Tool {self.name}: parameter {p.name} is of an unsupported kind",
+                        f"Tool {tool_name}: parameter {p.name} is of an unsupported kind",
                         "Use only named parameters, without *args, **kwargs or positional-only parameters",
                     )
                 )
@@ -484,7 +669,7 @@ class Tool:
         except NameError as e:
             raise TypeError(
                 fix_message(
-                    f"Tool {self.name}: cannot resolve type hints: {e}",
+                    f"Tool {tool_name}: cannot resolve type hints: {e}",
                     "Check that the types are imported in this function's module",
                 )
             ) from e
@@ -496,9 +681,9 @@ class Tool:
             if p.name not in hints:
                 raise TypeError(
                     fix_message(
-                        f"Tool {self.name}: parameter {p.name} has no type hint",
+                        f"Tool {tool_name}: parameter {p.name} has no type hint",
                         "Add a type hint. To receive State, use state: State",
-                        f"@tool\ndef {self.name}({p.name}: str): ...",
+                        f"@tool\ndef {tool_name}({p.name}: str): ...",
                     )
                 )
             tp = hints[p.name]
@@ -508,11 +693,11 @@ class Tool:
             if not _is_supported_type(tp):
                 raise TypeError(
                     fix_message(
-                        f"Tool {self.name}: parameter {p.name} has unsupported type {tp!r}",
+                        f"Tool {tool_name}: parameter {p.name} has unsupported type {tp!r}",
                         f"Only these types can be used: {SUPPORTED_TYPES_TEXT}",
                     )
                 )
-            _check_stdlib_typeddict(self.name, p.name, tp)
+            _check_stdlib_typeddict(tool_name, p.name, tp)
             # Pydantic field names are internal names (a0, a1, ...) and parameter names are aliases.
             # This keeps parameter names like model_config, model_dump, _x or json from clashing with
             # BaseModel attributes. The schema shown to the model and validation use the alias (parameter name).
@@ -529,7 +714,7 @@ class Tool:
         self._param_names: tuple[tuple[str, str], ...] = tuple(param_names)
         try:
             self._model: type[BaseModel] = create_model(
-                f"{self.name}_input",
+                f"{tool_name}_input",
                 __config__=ConfigDict(extra="forbid"),
                 **fields,
             )
@@ -537,7 +722,7 @@ class Tool:
         except (PydanticUserError, NameError, ValueError, TypeError) as e:
             raise TypeError(
                 fix_message(
-                    f"Tool {self.name}: cannot build the input schema: {e}",
+                    f"Tool {tool_name}: cannot build the input schema: {e}",
                     f"Pick parameter types from: {SUPPORTED_TYPES_TEXT}",
                 )
             ) from e
@@ -545,10 +730,19 @@ class Tool:
         for prop in schema.get("properties", {}).values():
             if isinstance(prop, dict):
                 prop.pop("title", None)
-        self.input_schema = schema
+        super().__init__(
+            name=tool_name,
+            description=description if description is not None else doc_description,
+            input_schema=schema,
+            parallel=parallel,
+            read_only=read_only,
+            destructive=destructive,
+            idempotent=idempotent,
+            open_world=open_world,
+        )
 
-    def __get__(self, obj: Any, objtype: type | None = None) -> Tool:
-        """Descriptor. Accessed as ``obj.method``, returns a new Tool bound to ``obj`` (same schema).
+    def __get__(self, obj: Any, objtype: type | None = None) -> FunctionTool:
+        """Descriptor. Accessed as ``obj.method``, returns a new tool bound to ``obj`` (same schema).
 
         If ``obj`` is ``None`` (accessed on the class), returns itself (unbound).
         """
@@ -565,9 +759,14 @@ class Tool:
         return self.fn(*args, **kwargs)
 
     @property
-    def spec(self) -> ToolSpec:
-        """The tool as the model sees it: ``ToolSpec(name, description, input_schema)``."""
-        return ToolSpec(self.name, self.description, self.input_schema)
+    def is_async(self) -> bool:
+        """``True`` if the original function is ``async def``."""
+        return inspect.iscoroutinefunction(self.fn)
+
+    def run(self, args: dict[str, Any], state: State) -> Any:
+        """Checks the arguments against the type hints (``ToolInputError`` if they do not fit), then calls the
+        function with them and the State. Returns a coroutine for an ``async def`` function."""
+        return self.invoke(self.prepare(args), state)
 
     def prepare(self, args: Mapping[str, Any]) -> dict[str, Any]:
         """Validates the model's arguments and converts them to Python values (State parameters excluded).
@@ -582,11 +781,9 @@ class Tool:
           model's attributes (dataclass and Pydantic model arguments as objects of that type, omitted arguments
           as their defaults).
         """
-        if INVALID_ARGS_KEY in args:
-            raw = args[INVALID_ARGS_KEY]
-            if raw == TRUNCATED_ARGS_MESSAGE:
-                raise ToolInputError(raw)
-            raise ToolInputError(f"arguments are not valid JSON: {raw}")
+        invalid = invalid_args_message(args)
+        if invalid is not None:
+            raise ToolInputError(invalid)
         try:
             validated = self._model.model_validate(dict(args))
         except ValidationError as e:
@@ -641,15 +838,15 @@ class Tool:
             ) from error
         raise ToolError(message) from error
 
-    def copy(self, **changes: Any) -> Tool:
-        """Returns a new Tool with some options changed. The original does not change, and a bound tool stays bound.
+    def copy(self, **changes: Any) -> FunctionTool:
+        """Returns a new tool with some options changed. The original does not change, and a bound tool stays bound.
 
         Args:
             **changes: Any ``@tool`` option: ``name``, ``description``, ``parallel``, ``exception_handler``,
                 ``read_only``, ``destructive``, ``idempotent`` or ``open_world``.
 
         Returns:
-            The new Tool.
+            The new tool.
 
         Raises:
             TypeError: A name in ``changes`` is not an option, or a new value fails the same checks as ``@tool``.
@@ -669,48 +866,31 @@ class Tool:
                     "fetch_url.copy(exception_handler=None)",
                 )
             )
-        new = Tool(self.fn, **{**self._options, **changes})
+        new = FunctionTool(self.fn, **{**self._options, **changes})
         new.bound_to = self.bound_to
         return new
 
-    @staticmethod
-    def format_result(value: Any) -> str:
-        """Converts a return value into the string sent to the model.
-
-        - ``str`` as is, ``None`` as ``"(done)"``
-        - Anything else (dict, list, numbers, bool, dataclass, Pydantic model, combinations of these) goes
-          through ``pydantic_core.to_jsonable_python`` and then ``json.dumps(..., ensure_ascii=False)``
-        - If it cannot become JSON, ``TypeError`` (fix: return a str, dict, list, dataclass or Pydantic model).
-          This exception is treated like any tool exception.
-        """
-        if value is None:
-            return DONE
-        if isinstance(value, str):
-            return value
-        try:
-            jsonable = to_jsonable_python(value)
-            return json.dumps(jsonable, ensure_ascii=False)
-        except Exception as e:
-            raise TypeError(
-                fix_message(
-                    f"Cannot convert tool return value {value!r} to JSON",
-                    "Return a str, dict, list, dataclass or Pydantic model",
-                )
-            ) from e
-
-    @staticmethod
-    def is_error_result(value: Any) -> bool:
-        """Whether a return value is an error result (sent to the model with ``is_error``). Always false for
-        ``@tool`` functions: a failure the model should handle is returned as a plain string."""
-        return False
-
     def __repr__(self) -> str:
         bound = f", bound_to={self.bound_to!r}" if self.bound_to is not None else ""
-        return f"Tool({self.name!r}{bound})"
+        return f"FunctionTool({self.name!r}{bound})"
+
+
+def invalid_args_message(args: Mapping[str, Any]) -> str | None:
+    """The input error for arguments the model adapter could not read (``INVALID_ARGS_KEY``), or ``None``.
+
+    "arguments are not valid JSON: {raw}", except when the value is ``TRUNCATED_ARGS_MESSAGE`` (the reply was cut off
+    so the arguments are incomplete), which is used as is.
+    """
+    if INVALID_ARGS_KEY not in args:
+        return None
+    raw = args[INVALID_ARGS_KEY]
+    if raw == TRUNCATED_ARGS_MESSAGE:
+        return str(raw)
+    return f"arguments are not valid JSON: {raw}"
 
 
 @overload
-def tool(fn: Callable[..., Any], /) -> Tool: ...
+def tool(fn: Callable[..., Any], /) -> FunctionTool: ...
 @overload
 def tool(
     *,
@@ -722,7 +902,7 @@ def tool(
     destructive: bool | None = None,
     idempotent: bool | None = None,
     open_world: bool | None = None,
-) -> Callable[[Callable[..., Any]], Tool]: ...
+) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
 
 def tool(
@@ -737,7 +917,7 @@ def tool(
     destructive: bool | None = None,
     idempotent: bool | None = None,
     open_world: bool | None = None,
-) -> Tool | Callable[[Callable[..., Any]], Tool]:
+) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """Turns a function or method into a tool the model can call.
 
     Type hints become the input schema and the docstring becomes the description. The ``Args:`` section of the
@@ -793,12 +973,13 @@ def tool(
         open_world: The tool reaches outside its own domain, such as the web, a shell or another system.
 
     Returns:
-        A ``Tool``, or a decorator that makes one when options are given.
+        A ``FunctionTool``, or a decorator that makes one when options are given. For a tool that is not a Python
+        function, subclass ``Tool`` instead.
 
     Raises:
         TypeError: ``@tool`` is applied twice or to something that is not a function, the function cannot be a
             tool, ``exception_handler`` is not a function with one parameter whose type hint names
-            ``Exception`` subclasses, or a hint is not a bool (see ``Tool``).
+            ``Exception`` subclasses, or a hint is not a bool (see ``FunctionTool``).
         ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
     """
     options: dict[str, Any] = {
@@ -820,9 +1001,9 @@ def tool(
                     "Apply @tool to a plain function or method",
                 )
             )
-        return Tool(fn, **options)
+        return FunctionTool(fn, **options)
 
-    def decorate(inner: Callable[..., Any]) -> Tool:
+    def decorate(inner: Callable[..., Any]) -> FunctionTool:
         return tool(inner, **options)
 
     return decorate
@@ -831,11 +1012,13 @@ def tool(
 def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
     """Flattens the items of ``Agent(tools=...)`` or ``think(tools=...)`` into a name → Tool dict (insertion order).
 
-    Rules per item (Agent instances are filtered out by Agent first, so they never get here):
+    Rules per item (Agent instances and MCP items are filtered out by Agent first, so they never get here):
 
-    - A bound Tool, or a Tool with ``needs_self=False`` → as is
-    - An unbound method Tool (``FileSystem.read_file``) → ``TypeError``: create an object and pass that
+    - A bound ``FunctionTool``, or one with ``needs_self=False`` → as is
+    - An unbound method tool (``FileSystem.read_file``) → ``TypeError``: create an object and pass that
       (``tools=[FileSystem()]`` or ``tools=[fs.read_file]``)
+    - Any other ``Tool`` object → as is, if it called ``Tool.__init__`` and implements ``run`` (``TypeError``
+      otherwise). A ``Tool`` subclass itself (not an object) → ``TypeError``: create an object
     - A function or method without ``@tool`` → ``TypeError``: add ``@tool``
     - Any other object → finds every Tool attribute in the MRO of ``type(obj)`` and binds it with
       ``getattr(obj, attr)``. If there are none, ``TypeError``: an object with no ``@tool`` methods
@@ -856,7 +1039,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
         sources[t.name] = source
 
     for item in items:
-        if isinstance(item, Tool):
+        if isinstance(item, FunctionTool):
             if item.needs_self and item.bound_to is None:
                 raise TypeError(
                     fix_message(
@@ -867,6 +1050,18 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
                 )
             _add(item, item)
             continue
+        if isinstance(item, Tool):
+            _check_tool_object(item)
+            _add(item, item)
+            continue
+        if isinstance(item, type) and issubclass(item, Tool):
+            raise TypeError(
+                fix_message(
+                    f"tools= got the class {item.__name__}. A Tool subclass is a tool only as an object",
+                    "Create an object and pass that, not the class",
+                    f"tools=[{item.__name__}(...)]",
+                )
+            )
 
         if inspect.isfunction(item) or inspect.ismethod(item):
             raise TypeError(
@@ -877,7 +1072,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             )
 
         if isinstance(item, type):
-            if any(isinstance(attr, Tool) for klass in item.__mro__ for attr in vars(klass).values()):
+            if any(isinstance(attr, FunctionTool) for klass in item.__mro__ for attr in vars(klass).values()):
                 raise TypeError(
                     fix_message(
                         f"tools= got the class {item.__name__}. @tool methods are tools only on an object",
@@ -891,7 +1086,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             for attr_name, attr in vars(klass).items():
                 if attr_name in seen_names:
                     continue
-                if isinstance(attr, Tool):
+                if isinstance(attr, FunctionTool):
                     seen_names.add(attr_name)
                     found = True
                     bound_tool = getattr(item, attr_name)
@@ -905,6 +1100,26 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             )
 
     return result
+
+
+def _check_tool_object(item: Tool) -> None:
+    """A ``Tool`` subclass object must have called ``Tool.__init__`` and implement ``run``."""
+    if not getattr(item, "_tool_initialized", False):
+        raise TypeError(
+            fix_message(
+                f"{type(item).__name__} object passed in tools= did not call Tool.__init__",
+                "Call super().__init__(name=..., description=..., input_schema=...) in its __init__",
+                _TOOL_CLASS_EXAMPLE,
+            )
+        )
+    if type(item).run is Tool.run:
+        raise TypeError(
+            fix_message(
+                f"{item!r} does not implement run",
+                "Define run(self, args, state) in the subclass. It returns the result for the model",
+                _TOOL_CLASS_EXAMPLE,
+            )
+        )
 
 
 class ToolMap(Mapping[str, Any]):

@@ -141,9 +141,18 @@ class ToolError(Exception):
 
 
 class ToolInputError(Exception):
-    """Internal. The tool arguments the model gave do not match the schema.
+    """Raised by a tool when the arguments the model gave are wrong, such as a missing or invalid value.
 
-    Never raised to the caller. The Agent catches it and records ``(input error: {message})`` as the tool result.
+    The model gets ``(input error: {message})`` as the call's result, and the run continues. ``@tool`` raises it for
+    arguments that do not fit the type hints; a ``Tool`` subclass raises it from ``run`` for arguments it cannot use.
+
+    Example:
+        ```python
+        def run(self, args: dict, state: State) -> str:
+            if "title" not in args:
+                raise ToolInputError("title is required")
+            ...
+        ```
     """
 
 
