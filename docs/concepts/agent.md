@@ -25,6 +25,7 @@ agent = Agent(
 | `loop` | `default_loop` | The loop `run` calls. See [Loops](loops.md) |
 | `reporter` | `Terminal` | Receives progress. `None` shows nothing. See [Progress and questions](../guides/progress.md) |
 | `human` | `Terminal` | Answers `ask_human`. `None` means nobody can answer |
+| `store` | `None` | Saves each State as it runs, so it can be continued later. See [Save and resume](../guides/resume.md) |
 | `name`, `description` | `None` | Labels for your own use |
 
 - Creating an Agent uses no network and needs no API key.
@@ -47,12 +48,13 @@ Every action except `run` takes the State it works on.
 | `compact(state)` | Replaces the context with the task and a summary written by the model | Yes |
 | `ask(state, prompt, returns=...)` | Asks the model a side question, and returns the answer | No |
 | `ask_human(state, prompt, returns=...)` | Asks the person, and returns the answer | No |
+| `save(state)` | Saves what the store does not have yet. The other actions save by themselves | No |
 
 You call `run`. The loop body calls `think`, `use_tools` and `compact`. `ask` and `ask_human` work in the loop body
 and after a run.
 
 Each action has an async version with an `a` prefix: `arun`, `athink`, `ause_tools`, `acompact`, `aask`,
-`aask_human`. See [Async](../guides/async.md).
+`aask_human`, `asave`. See [Async](../guides/async.md).
 
 ## think and use_tools
 
@@ -93,6 +95,9 @@ The first Agent that calls `think`, `use_tools` or `compact` on a State owns it.
 raise `ValueError`. `ask` works from any Agent.
 
 `agent.copy(...)` returns another Agent. It cannot continue a State that the original Agent already ran.
+
+A State loaded with `store.load(id)` has no owner yet, so the Agent in your code can continue it. See
+[Save and resume](../guides/resume.md).
 
 ## After finish
 

@@ -58,6 +58,9 @@ except RateLimitError:
     agent.run(state)
 ```
 
+With a [store](../guides/resume.md), the State is saved after an exception too. If that save also fails, the original
+exception is raised with a note about the failed save, so `except RateLimitError:` still catches it.
+
 ## Catch an exception inside the loop body
 
 If the loop body catches an exception from `use_tools`, the calls that did not finish stay pending, and the next
@@ -77,3 +80,6 @@ except TimeoutError:
 - A sync tool that is still running keeps running in its thread. If it finishes later, the model gets its result as a
   notice at the next `think`.
 - In async code, cancelling the task follows the same rules. See [Async](../guides/async.md).
+- A process that is killed (SIGKILL, or SIGTERM without a handler) stops at once, without closing calls. With a
+  store, `store.load(id)` closes the calls that were running with a result telling the model they may or may not
+  have run. See [Save and resume](../guides/resume.md#if-the-process-stops).

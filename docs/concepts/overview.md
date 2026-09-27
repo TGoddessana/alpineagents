@@ -76,3 +76,6 @@ print(state)      # one line per history entry
 [turn 2] reply: Line 1 is fine.
 done: is_answered (2 turns)
 ```
+
+To keep a State after the process ends, and continue it later, give the Agent a store. See
+[Save and resume](../guides/resume.md).

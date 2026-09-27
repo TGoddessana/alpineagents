@@ -24,3 +24,5 @@ Terms in the order you meet them.
 | Reporter | An object that receives progress events. See [Progress and questions](../guides/progress.md) |
 | Human | An object that answers `ask_human`. See [Progress and questions](../guides/progress.md) |
 | Owner | The first Agent that called `think`, `use_tools` or `compact` on a State. Only it can make those calls on that State |
+| Store | Where an Agent saves States so another process can continue them. A `Store` object, such as `FileStore`. See [Save and resume](../guides/resume.md) |
+| State id | The name a store saves a State under: `state.id` |

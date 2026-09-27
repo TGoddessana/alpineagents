@@ -61,6 +61,18 @@ An answer that does not fit the question's `returns` type is skipped, and the ne
 | What happened, in order | `state.history`, for example `[h.kind for h in state.history]`. The kinds are listed in the [Data types API](../api/types.md) |
 | What the model saw | `fake.requests` |
 
+## Test saving and resuming
+
+Use a `FileStore` in pytest's `tmp_path`, then load the State as another process would:
+
+```python
+store = FileStore(tmp_path)
+agent.copy(model=FakeModel(["Done"]), reporter=None, store=store).run(State("Fix it", id="t1"))
+
+state = store.load("t1")
+assert state.answer == "Done"
+```
+
 ## Related
 
 - [Testing API](../api/testing.md)
