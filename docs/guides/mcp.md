@@ -47,7 +47,7 @@ about itself, so do not trust them more than the server. See
 
 | Situation | What happens |
 | --- | --- |
-| The server returns an error for a call | The model gets it as the tool result. The run continues |
+| The server returns an error for a call | The model gets it as an error result (`outcome.kind == "error"`). The run continues |
 | The connection fails or is lost | `MCPConnectionError` is raised |
 
 ## Related

@@ -35,6 +35,21 @@ The replies FakeModel builds have `model` set to the fake's name, `"fake"` by de
 assert [t.name for t in fake.requests[0].tools] == ["read_file"]
 ```
 
+## A tool that fails
+
+A failure the model should handle, raised with `ToolError`, becomes an error result, and the run continues:
+
+```python
+--8<-- "docs_src/test_tool_failure.py"
+```
+
+- The `tool_result` entry in `state.history` has the message the model got, and `is_error=True`.
+- `state.stopped_by == "is_answered"` shows the run went on after the failure. An exception that is not a
+  `ToolError` would have stopped the run and been raised by `run`.
+- To test only the tool, call it without an Agent. A `@tool` function runs as a plain function
+  (`read_file("missing.py")` raises the `ToolError`), and a [`Tool` subclass](../concepts/tools.md#tools-that-are-not-functions)
+  has `run(args, state)`: `Webhook(...).run({"title": "x"}, State("test"))`.
+
 ## Questions to the person
 
 `FakeHuman` answers `ask_human` with prepared answers in order. `agent` is the Agent from

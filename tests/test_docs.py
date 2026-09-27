@@ -312,6 +312,11 @@ def test_testing_example(tmp_path, monkeypatch):
     ns["test_reads_the_file_then_answers"](tmp_path, monkeypatch)
 
 
+def test_testing_tool_failure_example(tmp_path, monkeypatch):
+    ns = run("test_tool_failure")
+    ns["test_a_missing_file_is_an_error_result"](tmp_path, monkeypatch)
+
+
 def test_tool_object(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     Path("my-repo").mkdir()

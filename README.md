@@ -41,14 +41,16 @@ Define a tool, create an Agent, run a task:
 ```python
 from pathlib import Path
 
-from alpineagents import Agent, tool
+from alpineagents import Agent, ToolError, tool
 
 
 @tool
 def read_file(path: str) -> str:
     """Read a text file"""
     file = Path(path)
-    return file.read_text() if file.exists() else f"No such file: {path}"
+    if not file.exists():
+        raise ToolError(f"No such file: {path}")
+    return file.read_text()
 
 
 agent = Agent(model="claude-sonnet-5", tools=[read_file])
@@ -56,6 +58,7 @@ print(agent.run("Summarize README.md in three lines"))
 ```
 
 - `@tool` turns the function into a tool. The type hints and the docstring tell the model how to call it.
+- `ToolError` tells the model the call failed, and the run continues. Any other exception stops the run.
 - `agent.run` repeats turns until the model answers, then returns the answer.
 - Progress is printed to the terminal while it runs.
 
@@ -82,7 +85,7 @@ The Agent above uses `default_loop`. To change what happens in a turn, write the
 ```python
 from pathlib import Path
 
-from alpineagents import Agent, State, compact_if_full, loop, tool
+from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool
 
 
 @tool
@@ -95,7 +98,9 @@ def list_files(folder: str = ".") -> list[str]:
 def read_file(path: str) -> str:
     """Read a file"""
     file = Path(path)
-    return file.read_text() if file.exists() else f"No such file: {path}"
+    if not file.exists():
+        raise ToolError(f"No such file: {path}")
+    return file.read_text()
 
 
 @tool

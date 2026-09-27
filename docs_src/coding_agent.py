@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, compact_if_full, loop, tool
+from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool
 
 
 @tool
@@ -13,7 +13,9 @@ def list_files(folder: str = ".") -> list[str]:
 def read_file(path: str) -> str:
     """Read a file"""
     file = Path(path)
-    return file.read_text() if file.exists() else f"No such file: {path}"
+    if not file.exists():
+        raise ToolError(f"No such file: {path}")
+    return file.read_text()
 
 
 @tool

@@ -21,7 +21,7 @@ agent = Agent(
 | --- | --- | --- |
 | `model` | required | A model name such as `"claude-sonnet-5"`, or a `Model` object. See [Models](../guides/models.md) |
 | `system` | `None` | The system prompt |
-| `tools` | none | `@tool` functions, objects with `@tool` methods, MCP servers. See [Tools](tools.md) |
+| `tools` | none | `@tool` functions, objects with `@tool` methods, objects of `Tool` subclasses, MCP servers. See [Tools](tools.md) |
 | `loop` | `default_loop` | The loop `run` calls. See [Loops](loops.md) |
 | `reporter` | `Terminal` | Receives progress. `None` shows nothing. See [Progress and questions](../guides/progress.md) |
 | `human` | `Terminal` | Answers `ask_human`. `None` means nobody can answer |
@@ -75,6 +75,9 @@ Rules:
 
 - `think` raises `ValueError` while calls are pending. Run them with `use_tools`, or refuse them with `state.deny`.
 - `think(state, tools=[...])` limits the tools the model sees in this request. `tools=[]` shows none.
+- `agent.tool_map` has every tool the model can call, by name. Use it to find the tool of a pending call, for example
+  to ask before calls that are not `read_only`. See
+  [Tools: describe what a tool does](tools.md#describe-what-a-tool-does).
 - If `think` fails, the context goes back to how it was before the call, and the turn does not count.
 
 ## ask compared with think

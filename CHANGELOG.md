@@ -42,6 +42,9 @@ All notable changes to alpineagents are listed here. The format follows
   `isinstance(t, Tool)` is true for every tool.
 - The [Ask before a tool runs](https://tgoddessana.github.io/alpineagents/guides/approval/) guide asks before calls
   whose tool is not `read_only`, instead of before tools in a list of names.
+- The quick start and the other examples raise `ToolError` for a missing file instead of returning a string, which
+  the model would have taken as an ordinary result. The [Testing](https://tgoddessana.github.io/alpineagents/guides/testing/)
+  guide shows how to test a tool that fails.
 - `print(state)` shows error results as `tool_result fetch_url (error): HTTP 404: ...` instead of their size.
 
 ### Fixed
