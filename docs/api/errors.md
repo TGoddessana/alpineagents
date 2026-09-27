@@ -17,3 +17,5 @@ Concepts: [Errors and interruptions](../concepts/errors.md).
 ::: alpineagents.NoHumanError
 
 ::: alpineagents.MCPConnectionError
+
+::: alpineagents.ResumeWarning
