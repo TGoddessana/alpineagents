@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, TypeAlias
 
 __all__ = [
@@ -361,6 +362,11 @@ class ToolOutcome:
     """The exception for ``"aborted"`` and ``"interrupted"``, otherwise ``None``."""
 
 
+def _now() -> datetime:
+    """The current time in UTC, used to stamp ``HistoryEntry.at``."""
+    return datetime.now(timezone.utc)
+
+
 @dataclass(frozen=True)
 class HistoryEntry:
     """One entry of ``state.history``. History only grows; shrinking the context never removes entries."""
@@ -393,6 +399,14 @@ class HistoryEntry:
     """``True`` for a tool result that arrived after its call was already closed."""
     substate: Any = None
     """Reserved for subagents, which are not implemented yet. Always ``None``."""
+    # A lambda rather than _now itself, so _now is looked up at call time (tests monkeypatch types._now).
+    at: datetime = field(default_factory=lambda: _now(), compare=False)
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``. ``==`` ignores it.
+
+    It is the time the entry was added to history, not when the work started: a ``reply`` is stamped when the
+    reply finished, a ``human`` entry when the answer arrived, and a ``user`` message added while tools run when
+    ``add_user_message`` was called, even though it goes into the context later.
+    """
 
 
 # ---------------------------------------------------------------- display helpers
