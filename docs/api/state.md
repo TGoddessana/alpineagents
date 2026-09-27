@@ -4,4 +4,4 @@ Concepts: [State](../concepts/state.md).
 
 ::: alpineagents.State
     options:
-      filters: ["!^_", "!^(save|load|parent|root|depth)$"]
+      filters: ["!^_", "!^(parent|root|depth)$"]

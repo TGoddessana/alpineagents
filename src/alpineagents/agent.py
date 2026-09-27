@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import threading
 import warnings
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Awaitable, Callable, Generator, Iterable
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
@@ -26,13 +26,13 @@ from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
 from .reporter import Reporter
 from .state import State
+from .store import Store
 from .tool import Tool, collect_tools
 from .types import Message, ModelEvent, Request, TextBlock
 
 if TYPE_CHECKING:
     from .human import Human
     from .models.base import Model
-    from .state import Checkpoint
     from .types import Reply, ToolCall, ToolSpec
 
 __all__ = ["Agent", "DEFAULT"]
@@ -55,7 +55,7 @@ class _Default:
 DEFAULT: Any = _Default()
 
 #: Setting names ``copy`` accepts (same as the constructor arguments).
-SETTINGS = ("model", "system", "tools", "skills", "loop", "reporter", "human", "name", "description")
+SETTINGS = ("model", "system", "tools", "skills", "loop", "reporter", "human", "store", "name", "description")
 
 #: Notification methods a Reporter must have: every ``on_*`` the Reporter base class defines.
 _REPORTER_METHODS = tuple(name for name in vars(Reporter) if name.startswith("on_"))
@@ -114,6 +114,7 @@ class Agent:
         loop: Any = None,
         reporter: Reporter | None = DEFAULT,
         human: Human | None = DEFAULT,
+        store: Store | None = None,
         name: str | None = None,
         description: str | None = None,
     ) -> None:
@@ -131,12 +132,14 @@ class Agent:
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
             reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent.
             human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human.
+            store: Saves the States this Agent runs as they go, so they can be continued with
+                ``store.load(id)``. ``None`` (the default) saves nothing.
             name: The Agent's name.
             description: What the Agent does.
 
         Raises:
             TypeError: A setting has the wrong type, for example a function without ``@tool`` in ``tools=``,
-                a ``loop`` that is not callable, or a Reporter or Human class instead of an object.
+                a ``loop`` that is not callable, a Reporter, Human or Store class instead of an object.
             ValueError: Two tools share a name, or the model string is ambiguous.
         """
         # - model: resolve_model(model), no network.
@@ -160,6 +163,7 @@ class Agent:
             "loop": loop,
             "reporter": reporter,
             "human": human,
+            "store": store,
             "name": name,
             "description": description,
         }
@@ -272,6 +276,18 @@ class Agent:
                 )
         self._human = human
 
+        if store is not None and not isinstance(store, Store):
+            raise TypeError(
+                fix_message(
+                    f"store={store!r} is not a Store object",
+                    "Pass an object of an alpineagents.Store subclass (an object, not the class), such as FileStore",
+                    'agent = Agent(model=..., store=FileStore(".agent-runs"))',
+                )
+            )
+        self._store = store
+        # Agent._summary() for snapshots, computed at the first save (settings do not change).
+        self._saved_summary: dict[str, Any] | None = None
+
     # ------------------------------------------------------------ settings (read-only)
 
     @property
@@ -319,6 +335,11 @@ class Agent:
         return self._human
 
     @property
+    def store(self) -> Store | None:
+        """The Store that saves this Agent's States as they run, or ``None``."""
+        return self._store
+
+    @property
     def name(self) -> str | None:
         """The Agent's name, or ``None``."""
         return self._name
@@ -338,6 +359,10 @@ class Agent:
         waiting for a result are closed (``(interrupted by user)`` after Ctrl+C), and the exception is
         raised as is. After Ctrl+C you can call ``run`` again with the same State.
 
+        With ``store=``, the State is saved as the run goes: at the start and end of the run, before and after
+        each ``think``, after each tool result, and after ``use_tools`` and ``compact``. If saving fails while
+        the run is already failing, the original exception is raised with a note about the failed save.
+
         Args:
             task: A task string, which starts a new ``State``, or a ``State`` to continue.
 
@@ -345,8 +370,10 @@ class Agent:
             What the loop returns. The default loop returns ``state.answer``.
 
         Raises:
-            TypeError: The loop is async (use ``arun``), or ``task`` is neither a string nor a State.
-            ValueError: The State was already ended with ``state.finish()``.
+            TypeError: The loop is async (use ``arun``), ``task`` is neither a string nor a State, a value in the
+                State cannot be saved as JSON, or the store only works asynchronously.
+            ValueError: The State was already ended with ``state.finish()``, or it is new and the store already
+                has a State with its id.
 
         Warns:
             ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
@@ -368,7 +395,9 @@ class Agent:
         #    on_run_start is inside the try, so on_run_end is called whichever step raises.
         # 3. except BaseException: state._record_error(e); state._close_pending(e); raise (KeyboardInterrupt too)
         # 4. finally: close the MCP connections this run opened, then on_run_end(state, error) (None on success).
-        # An async loop raises TypeError before step 1.
+        # With a store: save after step 1 (before on_run_start: a failed first save means the run never started),
+        # after the loop returns, and in step 3 after closing the pending calls (_save_after).
+        # An async loop (or a store that only works asynchronously) raises TypeError before step 1.
         check_sync_call("run")
         if is_async_callable(self._loop):
             raise TypeError(
@@ -378,7 +407,10 @@ class Agent:
                     'answer = await agent.arun("...")',
                 )
             )
+        if self._store is not None and type(self._store).write is Store.write:
+            raise self._store._async_only("write", "awrite")
         state = self._start_run(task)
+        self._save(state)
         reporter = self.reporter
         error: BaseException | None = None
         connected = False
@@ -388,11 +420,14 @@ class Agent:
             self._mcp_open()
             connected = True
             self._note_window(state)
-            return self._loop(self, state)
+            result = self._loop(self, state)
+            self._save(state)
+            return result
         except BaseException as e:
             error = e
             state._record_error(e)
             state._close_pending(e)
+            self._save_after(state, e)
             raise
         finally:
             try:
@@ -425,6 +460,7 @@ class Agent:
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
         state = self._start_run(task)
+        await self._asave(state)
         reporter = self.reporter
         error: BaseException | None = None
         token = ASYNC_RUN.set(asyncio.get_running_loop())
@@ -435,11 +471,14 @@ class Agent:
             await self._amcp_open()
             connected = True
             self._note_window(state)
-            return await loop(self, state)
+            result = await loop(self, state)
+            await self._asave(state)
+            return result
         except BaseException as e:
             error = e
             state._record_error(e)
             state._close_pending(e)
+            await self._asave_after(state, e)
             raise
         finally:
             ASYNC_RUN.reset(token)
@@ -471,11 +510,15 @@ class Agent:
         #    specs shown)); cp = state._begin_think() (finish and pending checks, late result notices, turn + 1).
         # 2. try: request = model.mark_cache(Request(system, state.context, specs)); on_think_start;
         #    reply = model.respond(request, on_text, on_event); state._record_reply(reply); on_think_end.
-        # 3. except BaseException: state._rollback(cp, e); raise.
+        # 3. except BaseException: state._rollback(cp, e); _save_after; raise.
+        # With a store: save between _claim and state._begin_think (the snapshot _replay starts from), and after
+        # step 2 outside its try, so a failed save never rolls back a reply that already arrived.
         # tools= items are flattened with collect_tools and looked up by name; each must be the same tool.
         check_sync_call("think")
         self._mcp_ensure()
-        specs, checkpoint = self._begin_think(state, tools, "think")
+        specs = self._prepare_think(state, tools, "think")
+        self._save(state)
+        checkpoint = state._begin_think()
         reporter = self.reporter
         try:
             request = self._think_request(state, specs, reporter)
@@ -483,13 +526,17 @@ class Agent:
             self._end_think(state, reply, reporter)
         except BaseException as e:
             state._rollback(checkpoint, e)
+            self._save_after(state, e)
             raise
+        self._save(state)
 
     async def athink(self, state: State, tools: Iterable[Any] | None = None) -> None:
         """The async version of ``think``. Cancelling it rolls the context back like any other failure."""
         # Same steps as think, with model.arespond.
         await self._amcp_ensure()
-        specs, checkpoint = self._begin_think(state, tools, "athink")
+        specs = self._prepare_think(state, tools, "athink")
+        await self._asave(state)
+        checkpoint = state._begin_think()
         reporter = self.reporter
         try:
             request = self._think_request(state, specs, reporter)
@@ -499,7 +546,9 @@ class Agent:
             self._end_think(state, reply, reporter)
         except BaseException as e:
             state._rollback(checkpoint, e)
+            await self._asave_after(state, e)
             raise
+        await self._asave(state)
 
     def use_tools(self, state: State) -> None:
         """Runs the tool calls from the last reply and records their results in the State.
@@ -517,11 +566,18 @@ class Agent:
         """
         # state._ensure_open("use_tools") and state._claim(...) in _begin_use_tools, then _runner.run_calls.
         # Concurrency, exception and interrupt rules are in _runner.run_calls.
+        # With a store: save after each batch of recorded results. Those saves do not stop the tools: an
+        # Exception is dropped, and the save at the end (which writes everything not saved yet) raises instead.
         check_sync_call("use_tools")
         self._mcp_ensure()
         calls = self._begin_use_tools(state, "use_tools")
-        if calls:
-            run_calls(state, calls, self._tool_map(), self.reporter)
+        try:
+            if calls:
+                run_calls(state, calls, self._tool_map(), self.reporter, self._tool_saver(state))
+        except BaseException as e:
+            self._save_after(state, e)
+            raise
+        self._save(state)
 
     async def ause_tools(self, state: State) -> None:
         """The async version of ``use_tools``.
@@ -532,8 +588,13 @@ class Agent:
         # _runner.arun_calls.
         await self._amcp_ensure()
         calls = self._begin_use_tools(state, "ause_tools")
-        if calls:
-            await arun_calls(state, calls, self._tool_map(), self.reporter)
+        try:
+            if calls:
+                await arun_calls(state, calls, self._tool_map(), self.reporter, self._atool_saver(state))
+        except BaseException as e:
+            await self._asave_after(state, e)
+            raise
+        await self._asave(state)
 
     def ask(self, state: State, prompt: str, returns: Any = str, *, retries: int = 2) -> Any:
         """Asks the model a question about the current context and returns the answer in the ``returns`` format.
@@ -685,15 +746,21 @@ class Agent:
         # 3. _apply_summary: state._add_usage(reply.usage); empty summary -> OutputError with the context
         #    unchanged; otherwise state._replace_context(reply.text, "compact") (records, on_context_change)
         # 4. state._end_compact(), also when a step above raised
+        # 5. With a store: save (_save_after if a step above raised)
         check_sync_call("compact", " (in a loop: await acompact_if_full(agent, state))")
         self._mcp_ensure()
         self._begin_compact(state, instructions, "compact")
         try:
-            request = self._compact_request(state)
-            reply = self._model.compact(request, instructions, self._on_event(state, self.reporter))
-            self._apply_summary(state, reply)
-        finally:
-            state._end_compact()
+            try:
+                request = self._compact_request(state)
+                reply = self._model.compact(request, instructions, self._on_event(state, self.reporter))
+                self._apply_summary(state, reply)
+            finally:
+                state._end_compact()
+        except BaseException as e:
+            self._save_after(state, e)
+            raise
+        self._save(state)
 
     async def acompact(self, state: State, instructions: str | None = None) -> None:
         """The async version of ``compact``."""
@@ -701,11 +768,47 @@ class Agent:
         await self._amcp_ensure()
         self._begin_compact(state, instructions, "acompact")
         try:
-            request = self._compact_request(state)
-            reply = await self._model.acompact(request, instructions, self._on_event(state, self.reporter))
-            self._apply_summary(state, reply)
-        finally:
-            state._end_compact()
+            try:
+                request = self._compact_request(state)
+                reply = await self._model.acompact(request, instructions, self._on_event(state, self.reporter))
+                self._apply_summary(state, reply)
+            finally:
+                state._end_compact()
+        except BaseException as e:
+            await self._asave_after(state, e)
+            raise
+        await self._asave(state)
+
+    def save(self, state: State) -> None:
+        """Saves what the store does not have yet. For changes made outside the Agent's own steps.
+
+        ``run``, ``think``, ``use_tools`` and ``compact`` save by themselves. Call this to save something else
+        right away, such as the person's next message in a chat loop, before the next ``run``.
+
+        Args:
+            state: The State to save.
+
+        Raises:
+            ValueError: The Agent has no store, the State is saved in another store, or it is new and the store
+                already has a State with its id.
+            TypeError: A value in the State cannot be saved as JSON, or the store only works asynchronously.
+
+        Example:
+            ```python
+            state.add_user_message(input("> "))
+            agent.save(state)
+            ```
+        """
+        check_sync_call("save")
+        _check_state(state, "save")
+        self._need_store("save")
+        self._save(state)
+
+    async def asave(self, state: State) -> None:
+        """The async version of ``save``."""
+        _check_state(state, "asave")
+        self._need_store("asave")
+        await self._asave(state)
 
     def copy(self, **changes: Any) -> Agent:
         """Returns a new Agent with some settings changed. The original Agent does not change.
@@ -816,6 +919,93 @@ class Agent:
             overhead_tokens=estimate_overhead_tokens(self._system, self._specs(None)),
         )
 
+    # ------------------------------------------------------------ saving to the store
+
+    def _save(self, state: State) -> None:
+        """A save point: writes what the store does not have yet. Nothing without a store, or when the store has
+        everything. The State is marked saved only after the write returns."""
+        store = self._store
+        if store is None:
+            return
+        batch = state._unsaved(store, self._store_summary())
+        if batch is None:
+            return
+        store.write(state.id, batch.entries, batch.snapshot, create=batch.create)
+        state._mark_saved(store, batch)
+
+    async def _asave(self, state: State) -> None:
+        """The async version of ``_save``."""
+        store = self._store
+        if store is None:
+            return
+        batch = state._unsaved(store, self._store_summary())
+        if batch is None:
+            return
+        await store.awrite(state.id, batch.entries, batch.snapshot, create=batch.create)
+        state._mark_saved(store, batch)
+
+    def _save_after(self, state: State, error: BaseException) -> None:
+        """A save point while ``error`` is being raised (called in the ``except`` block that re-raises it).
+
+        A save that fails with an ``Exception`` becomes a note on ``error``, so callers still catch the original.
+        Any other ``BaseException`` (Ctrl+C, cancellation, ``SystemExit``) propagates, with ``error`` as its
+        ``__context__``.
+        """
+        try:
+            self._save(state)
+        except Exception as failure:
+            _note_failed_save(error, failure)
+
+    async def _asave_after(self, state: State, error: BaseException) -> None:
+        """The async version of ``_save_after``."""
+        try:
+            await self._asave(state)
+        except Exception as failure:
+            _note_failed_save(error, failure)
+
+    def _tool_saver(self, state: State) -> Callable[[], None] | None:
+        """The per-result save for ``run_calls``: an ``Exception`` is dropped (the tools keep running, and the save
+        at the end of ``use_tools`` writes what is missing or raises)."""
+        if self._store is None:
+            return None
+
+        def save() -> None:
+            try:
+                self._save(state)
+            except Exception:
+                pass
+
+        return save
+
+    def _atool_saver(self, state: State) -> Callable[[], Awaitable[None]] | None:
+        """The async version of ``_tool_saver``."""
+        if self._store is None:
+            return None
+
+        async def save() -> None:
+            try:
+                await self._asave(state)
+            except Exception:
+                pass
+
+        return save
+
+    def _store_summary(self) -> dict[str, Any]:
+        """``_summary()`` for snapshots, computed once."""
+        if self._saved_summary is None:
+            self._saved_summary = self._summary()
+        return self._saved_summary
+
+    def _need_store(self, method: str) -> None:
+        if self._store is None:
+            raise ValueError(
+                fix_message(
+                    f"{method}() needs a store, and this Agent has none",
+                    "create the Agent with store=",
+                    'agent = Agent(model=..., store=FileStore(".agent-runs"))',
+                )
+            )
+
     def _async_loop(self) -> Any:
         """The loop ``arun`` awaits: this Agent's loop if async, ``adefault_loop`` for the default loop."""
         from .loop import adefault_loop, default_loop
@@ -839,10 +1029,8 @@ class Agent:
             )
         )
 
-    def _begin_think(
-        self, state: State, tools: Iterable[Any] | None, method: str
-    ) -> tuple[tuple[ToolSpec, ...], Checkpoint]:
-        """Steps 1 and 2 of ``think``: the specs to show and the checkpoint to roll back to."""
+    def _prepare_think(self, state: State, tools: Iterable[Any] | None, method: str) -> tuple[ToolSpec, ...]:
+        """Step 1 of ``think`` up to ``state._begin_think``: the specs to show."""
         _check_state(state, method)
         specs = self._specs(tools)
         state._claim(
@@ -850,7 +1038,7 @@ class Agent:
             context_window=self._model.context_window,
             overhead_tokens=estimate_overhead_tokens(self._system, specs),
         )
-        return specs, state._begin_think()
+        return specs
 
     def _think_request(self, state: State, specs: tuple[ToolSpec, ...], reporter: Reporter | None) -> Request:
         request = self._model.mark_cache(Request(self._system, state.context, specs))
@@ -1275,6 +1463,16 @@ def _describe_changes(changes: dict[str, tuple[Any, Any]]) -> str:
         f"This State was saved by a different Agent ({'; '.join(parts)}). "
         "The run continues, but may behave differently than before it was saved"
     )
+
+
+def _note_failed_save(error: BaseException, failure: Exception) -> None:
+    """Adds ``saving the state also failed: ...`` to ``error`` once, unless ``failure`` says the same as ``error``
+    (the failed save being raised was tried once more)."""
+    if type(failure) is type(error) and str(failure) == str(error):
+        return
+    note = f"saving the state also failed: {type(failure).__name__}: {failure}"
+    if note not in getattr(error, "__notes__", ()):  # think and then run both try to save
+        error.add_note(note)
 
 
 def _is_name_list(value: Any) -> bool:

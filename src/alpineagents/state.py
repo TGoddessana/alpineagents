@@ -8,7 +8,9 @@ Internal rules (the user-facing contract is in the public docstrings):
 - ``history`` is append-only. Shrinking or rolling back the context never deletes from it.
 - Every entry gets its ``at`` when ``HistoryEntry`` is created: in ``__init__`` (before the State is shared) or
   in ``_append`` (inside the lock), so ``at`` does not go backwards in history order (unless the system clock
-  does). There is no other clock.
+  does). There is no other clock. A State loaded from a Store (``_from_record``) keeps the saved ``at`` values.
+- Saving: State turns itself into JSON values (``_unsaved``) but never calls a Store; the Agent writes them
+  outside the lock and then calls ``_mark_saved``.
 - Blocks of received messages (``Reply.message``) go into the context unchanged.
 - It never calls the model, runs tools or prints.
 - Methods starting with ``_`` are for Agent (and Loop) only. User code does not call them.
@@ -18,13 +20,15 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 import threading
+import uuid
 
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from . import _tokens
+from . import _serial, _tokens
 from .errors import fix_message
 from .types import (
     ContextChange,
@@ -42,6 +46,8 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from .agent import Agent
     from .reporter import Reporter
 
@@ -62,6 +68,22 @@ NOT_RUN_YET = "(not run yet)"
 #: Notice that puts a late result into the context.
 LATE_RESULT = NOTICE_PREFIX + "interrupted {call} finished later: {content}"
 
+#: Result a loaded State gives a call whose result was never saved (the process stopped while it ran).
+UNSAVED_RESULT = (
+    "(unknown: the run stopped before this result was saved, so the tool may or may not have run. "
+    "Check whether it took effect before relying on it or running it again)"
+)
+#: Notice a loaded State gets when its saved steps could not be replayed (it continues from the last snapshot).
+UNSAVED_STEPS = NOTICE_PREFIX + "the previous run stopped before its last steps were saved, so they are missing here"
+#: Added to ``UNSAVED_STEPS`` when some of those steps were tool calls.
+UNSAVED_CALLS = (
+    ". These tool calls may or may not have run: {calls}. Check whether they took effect before relying on "
+    "them or running them again"
+)
+
+#: What a State id may contain. It becomes a file name in FileStore, so no dots or slashes.
+_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 
 def closed_result(error: BaseException) -> str:
     """Result text for a call closed by an exception.
@@ -81,6 +103,39 @@ def closed_outcome(error: BaseException) -> ToolOutcome:
 
 def _is_interrupt(error: BaseException) -> bool:
     return isinstance(error, (KeyboardInterrupt, asyncio.CancelledError))
+
+
+@dataclass(frozen=True)
+class _Batch:
+    """What a store does not have yet (``State._unsaved``): JSON-ready entries and snapshot."""
+
+    entries: list[dict[str, Any]]
+    snapshot: dict[str, Any] | None
+    #: How many history entries the store has once this batch is written.
+    end: int
+    #: The first write of this State: the store must refuse an id it already has.
+    create: bool
+
+
+def check_id(value: Any, where: str) -> str:
+    """A State id: letters, digits, ``_`` and ``-``, 1 to 128 characters. ``TypeError``/``ValueError`` otherwise."""
+    if not isinstance(value, str):
+        raise TypeError(
+            fix_message(
+                f"{where} needs the id as a string (got: {type(value).__name__})",
+                "use letters, digits, _ and -",
+                'State("Find the bug", id="bug-hunt-1")',
+            )
+        )
+    if not _ID_PATTERN.fullmatch(value):
+        raise ValueError(
+            fix_message(
+                f"{where} got the id {value!r}, which may only have letters, digits, _ and - (1 to 128 characters)",
+                "leave out dots, slashes and spaces (a FileStore uses the id as a file name)",
+                'State("Find the bug", id="bug-hunt-1")',
+            )
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -236,15 +291,18 @@ class State:
     # (Message.user(task),), turn 0, Usage(), no pending calls, stopped_by None, parent None, root itself, depth 0
     # (subagents are an extension, see _child).
 
-    def __init__(self, task: str) -> None:
+    def __init__(self, task: str, *, id: str | None = None) -> None:
         """Start a run with one user message.
 
         Args:
             task: What the agent should do. The first user message the model sees.
+            id: The name a store saves this State under: letters, digits, ``_`` and ``-``, at most 128
+                characters. A random id when left out. Continue a saved State with ``store.load(id)``, not
+                with a new State of the same id.
 
         Raises:
             TypeError: ``task`` is not a string.
-            ValueError: ``task`` is empty or whitespace only.
+            ValueError: ``task`` is empty or whitespace only, or ``id`` has other characters.
         """
         if not isinstance(task, str):
             raise TypeError(
@@ -262,6 +320,7 @@ class State:
                     'state = State("Find the bug in this repo")',
                 )
             )
+        self._id = uuid.uuid4().hex if id is None else check_id(id, "State(id=...)")
         self._lock = threading.RLock()
         self._task = task
         self._history: list[HistoryEntry] = [HistoryEntry("user", task, turn=0)]
@@ -293,9 +352,14 @@ class State:
         self._root: State = self
         self._depth = 0
         self._data = _LockedDict(self._lock)
-        # Summary of the Agent that saved this State (Agent._summary). Set by the Store loader (not implemented
-        # yet); compared once by Agent._start_run.
+        # Summary of the Agent that saved this State (Agent._summary). Set by the Store loader; compared once by
+        # Agent._start_run.
         self._saved_agent: dict[str, Any] | None = None
+        # Saving (see _unsaved): the store this State is bound to (only compared with ==), how many history
+        # entries it has, and the last snapshot it has (to skip writing the same one again).
+        self._store: object | None = None
+        self._saved_len = 0
+        self._saved_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ yes/no questions
 
@@ -324,6 +388,11 @@ class State:
             return self._finished
 
     # ------------------------------------------------------------ values (read-only)
+
+    @property
+    def id(self) -> str:
+        """The name a store saves this State under. Given with ``State(task, id=...)``, or random."""
+        return self._id
 
     @property
     def task(self) -> str:
@@ -562,7 +631,7 @@ class State:
                     )
                 )
             stored = self._pending[index]
-            self._append("denied", reason, call=stored)
+            self._append("denied", reason, call=stored, is_error=True)
             self._resolve(index, reason, is_error=True)
             reporter = self._reporter
         if reporter is not None:
@@ -637,18 +706,6 @@ class State:
             self._append("context_change", change)
             reporter = self._reporter
         self._notify_context_change(reporter, change)
-
-    # ------------------------------------------------------------ saving (outside MVP)
-
-    def save(self, path: str) -> None:
-        """Not implemented yet. Raises ``NotImplementedError``, or ``ValueError`` while calls are pending."""
-        self._ensure_no_pending("save")
-        raise NotImplementedError("state.save() is not implemented yet")
-
-    @classmethod
-    def load(cls, path: str) -> State:
-        """Not implemented yet. Raises ``NotImplementedError``."""
-        raise NotImplementedError("State.load() is not implemented yet")
 
     # ------------------------------------------------------------ display
 
@@ -740,6 +797,217 @@ class State:
             summary, self._saved_agent = self._saved_agent, None
             return summary
 
+    # ------------------------------------------------------------ saving (Agent and Store only)
+
+    def _unsaved(self, store: object, agent_summary: dict[str, Any] | None) -> _Batch | None:
+        """What ``store`` does not have yet, as JSON values, or ``None`` if it has everything. Called by Agent at
+        its save points, outside any State method (the write happens after the lock is released).
+
+        - ``ValueError`` if another store saved this State first (a State is saved in one store only). Stores are
+          compared with ``==``, so two ``FileStore`` objects for the same folder are the same store.
+        - ``entries``: history from the first entry the store does not have, each with its index as ``seq``.
+        - ``snapshot``: the rest of the State (context, turn, usage, data, ...), only when no call is pending and
+          think is not waiting on the model, since the context is half a turn then. ``None`` if the store already
+          has the same one.
+        - ``create``: this State was never saved, so the store must refuse an id it already has.
+        - ``TypeError`` (from ``_serial``) if a value cannot be saved as JSON.
+        """
+        with self._lock:
+            if self._store is not None and self._store != store:
+                raise ValueError(
+                    fix_message(
+                        f"State {self._id!r} is saved in another store ({self._store!r}), and a State is saved "
+                        f"in one store only (this Agent's store is {store!r})",
+                        "run it with an Agent that has the store it was saved in, or start a new State",
+                        'state = store.load("task-1")\nAgent(model=..., store=store).run(state)',
+                    )
+                )
+            end = len(self._history)
+            entries = [_serial.entry_to_dict(self._history[i], i) for i in range(self._saved_len, end)]
+            snapshot = None
+            if not self._pending and not self._thinking and not self._deferred:
+                snapshot = self._snapshot(end, agent_summary)
+                if snapshot == self._saved_snapshot:
+                    snapshot = None
+            if not entries and snapshot is None:
+                return None
+            return _Batch(entries, snapshot, end, create=self._store is None)
+
+    def _mark_saved(self, store: object, batch: _Batch) -> None:
+        """``store`` now has ``batch``. Only called after the write succeeded, so a failed write is sent again at
+        the next save point (stores skip entries they already have by ``seq``)."""
+        with self._lock:
+            self._store = store
+            self._saved_len = max(self._saved_len, batch.end)
+            if batch.snapshot is not None:
+                self._saved_snapshot = batch.snapshot
+
+    def _snapshot(self, history_len: int, agent_summary: dict[str, Any] | None) -> dict[str, Any]:
+        """Everything but history, as JSON values. Inside the lock, with no calls pending."""
+        return {
+            "v": _serial.VERSION,
+            "id": self._id,
+            "task": self._task,
+            "history_len": history_len,
+            "created_at": _serial.time_to_str(self._history[0].at),
+            "updated_at": _serial.time_to_str(self._history[history_len - 1].at),
+            "context": [_serial.message_to_dict(message) for message in self._context],
+            "turn": self._turn,
+            "usage": _serial.usage_to_dict(self._usage),
+            "late_notices": list(self._late_notices),
+            "finished": self._finished,
+            "finish_answer": _serial.answer(self._finish_answer, "the finish() answer"),
+            "last_answer": self._last_answer,
+            "stopped_by": self._stopped_by,
+            "stopped_limit": self._stopped_limit_value,
+            "data": _serial.plain(self._data, "state.data"),
+            "agent": agent_summary,
+        }
+
+    @classmethod
+    def _from_record(
+        cls,
+        state_id: str,
+        entries: Sequence[Mapping[str, Any]],
+        snapshot: Mapping[str, Any] | None,
+        store: object,
+    ) -> State:
+        """Rebuilds a saved State (``Store.load``). The result is bound to ``store`` and has all of ``entries``.
+
+        The State is the snapshot, then the entries saved after it are replayed (``_replay``): replies go back
+        into the context, and calls whose results were never saved are closed with ``UNSAVED_RESULT``. If the
+        entries after the snapshot cannot be replayed (a compaction in them, for example), the State stays at the
+        snapshot with a ``UNSAVED_STEPS`` notice instead. History always has every saved entry.
+
+        ``ValueError`` if the record is damaged or was saved by a newer version.
+        """
+        if not entries:
+            raise ValueError(f"saved State {state_id!r} has no history entries")
+        for index, entry in enumerate(entries):
+            if entry.get("seq") != index:
+                raise ValueError(
+                    f"saved State {state_id!r} is damaged: history entry {index} has seq {entry.get('seq')!r}"
+                )
+        start = 1
+        if snapshot is not None:
+            version = snapshot.get("v")
+            if not isinstance(version, int) or version > _serial.VERSION:
+                raise ValueError(
+                    f"saved State {state_id!r} has format version {version!r}, and this alpineagents reads up to "
+                    f"{_serial.VERSION}. Upgrade alpineagents to load it"
+                )
+            start = snapshot["history_len"]
+            if not isinstance(start, int) or not 1 <= start <= len(entries):
+                raise ValueError(
+                    f"saved State {state_id!r} is damaged: its snapshot covers {start!r} history entries, "
+                    f"but only {len(entries)} were saved"
+                )
+        history = [_serial.entry_from_dict(entry) for entry in entries]
+        state = cls(history[0].content, id=state_id)
+        state._history = history
+        state._restore(snapshot)
+        tail = history[start:]
+        if state._replay(tail):
+            for call in list(state._pending):
+                state._record_tool_result(call, UNSAVED_RESULT, is_error=True)
+        else:
+            state._restore(snapshot)
+            state._note_unsaved(tail)
+        state._store = store
+        state._saved_len = len(entries)
+        state._saved_snapshot = dict(snapshot) if snapshot is not None else None
+        return state
+
+    def _restore(self, snapshot: Mapping[str, Any] | None) -> None:
+        """Sets everything but history from ``snapshot`` (a new State's values if ``None``)."""
+        if snapshot is None:
+            snapshot = {"context": [_serial.message_to_dict(Message.user(self._task))], "usage": {}}
+        self._context = [_serial.message_from_dict(message) for message in snapshot["context"]]
+        self._turn = snapshot.get("turn", 0)
+        self._usage = _serial.usage_from_dict(snapshot["usage"])
+        self._late_notices = list(snapshot.get("late_notices", ()))
+        self._finished = snapshot.get("finished", False)
+        self._finish_answer = snapshot.get("finish_answer")
+        self._last_answer = snapshot.get("last_answer")
+        self._stopped_by = snapshot.get("stopped_by")
+        self._stopped_limit_value = snapshot.get("stopped_limit")
+        self._data.clear()
+        self._data.update(snapshot.get("data") or {})
+        self._saved_agent = snapshot.get("agent")
+        self._turn_calls = ()
+        self._pending = []
+        self._results = {}
+        self._deferred = []
+        self._thinking = False
+
+    def _replay(self, tail: Sequence[HistoryEntry]) -> bool:
+        """Applies history entries saved after the snapshot to the context, the way the live methods did, without
+        adding history. Returns ``False`` for entries it cannot replay, leaving the State half done (the caller
+        restores the snapshot).
+
+        The snapshot is taken right before each think, so the tail is at most one think and its tools. A think
+        starts at the first entry whose turn is one more than the current turn. Messages recorded while it waited
+        on the model were deferred, so they go after the reply (or after the tool results). A think that raised
+        (an ``error`` entry while thinking) is rolled back, and so is one that has no reply (the process stopped
+        while waiting on the model). ``compact``, ``start_from`` and ``clear_tool_results`` cannot be replayed:
+        their entries do not say exactly what the context became.
+        """
+        checkpoint: Checkpoint | None = None
+        for entry in tail:
+            kind = entry.kind
+            if kind == "context_change":
+                if isinstance(entry.content, ContextChange) and entry.content.kind == "rollback":
+                    continue  # the error entry before it already rolled back
+                return False
+            if not self._thinking and entry.turn == self._turn + 1:
+                checkpoint = self._start_thinking()
+            elif entry.turn != self._turn:
+                return False
+            if kind in ("user", "notice"):
+                self._add_to_context(Message.user(entry.content))
+            elif kind == "reply":
+                if not self._thinking or not isinstance(entry.content, Reply):
+                    return False
+                self._apply_reply(entry.content)
+            elif kind in ("tool_result", "denied"):
+                if entry.late and entry.call is not None:
+                    self._late_notices.append(LATE_RESULT.format(call=format_call(entry.call), content=entry.content))
+                    continue
+                index = self._pending_index(entry.call)
+                if index is None:
+                    return False
+                self._resolve(index, entry.content, is_error=entry.is_error)
+            elif kind == "error" and self._thinking and entry.call is None and checkpoint is not None:
+                self._undo_think(checkpoint)
+                self._turn = checkpoint.turn
+                self._last_answer = checkpoint.last_answer
+            # model_event, ask, human and other errors are history only.
+        if self._thinking and checkpoint is not None:
+            self._undo_think(checkpoint)
+            self._turn = checkpoint.turn
+            self._last_answer = checkpoint.last_answer
+        return True
+
+    def _note_unsaved(self, tail: Sequence[HistoryEntry]) -> None:
+        """The State stays at the snapshot: adds the usage of the replies after it (the tokens were spent) and a
+        notice naming the tool calls that got no saved result."""
+        answered = {
+            entry.call.id
+            for entry in tail
+            if entry.kind in ("tool_result", "denied") and not entry.late and entry.call is not None
+        }
+        calls: list[ToolCall] = []
+        for entry in tail:
+            if entry.kind == "reply" and isinstance(entry.content, Reply):
+                self._usage = self._usage + entry.content.usage
+                calls.extend(call for call in entry.content.tool_calls if call.id not in answered)
+        self._turn = max([self._turn, *(entry.turn for entry in tail)])
+        text = UNSAVED_STEPS
+        if calls:
+            text += UNSAVED_CALLS.format(calls=", ".join(format_call(call) for call in calls))
+        self._append("notice", text)
+        self._context.append(Message.user(text))
+
     def _ensure_open(self, action: str) -> None:
         """``ValueError`` after ``finish()``: ``{action}`` cannot be called after ``finish()``.
         Fix: if a block called ``finish()``, ``return`` from the loop body. (Called by think, use_tools, ask)
@@ -804,13 +1072,7 @@ class State:
         with self._lock:
             self._ensure_open("think")
             self._ensure_no_pending("think")
-            for notice in self._late_notices:
-                self._context.append(Message.user(notice))
-            self._late_notices.clear()
-            checkpoint = Checkpoint(len(self._context), self._turn, self._last_answer)
-            self._turn += 1
-            self._thinking = True
-            return checkpoint
+            return self._start_thinking()
 
     def _record_reply(self, reply: Reply) -> None:
         """Record a model reply.
@@ -825,20 +1087,8 @@ class State:
           (``is_answered()`` false); otherwise they stay deferred and go after this turn's result message.
         """
         with self._lock:
-            self._thinking = False
             self._append("reply", reply)
-            self._context.append(
-                Message("assistant", reply.message.content, tokens=reply.context_tokens)
-            )
-            calls = reply.tool_calls
-            self._turn_calls = calls
-            self._pending = list(calls)
-            self._results = {}
-            if not calls:
-                self._last_answer = reply.text
-                self._context.extend(self._deferred)
-                self._deferred = []
-            self._usage = self._usage + reply.usage
+            self._apply_reply(reply)
 
     def _rollback(self, checkpoint: Checkpoint, error: BaseException) -> None:
         """Exception during ``think``: roll the context back to just before that ``think``.
@@ -855,23 +1105,7 @@ class State:
         """
         with self._lock:
             before = self.context_tokens
-            kept = self._context[: checkpoint.context_len]
-            dropped = 0
-            # Keep human messages and notices that came in during think (drop the reply and tool results).
-            for message in self._context[checkpoint.context_len :]:
-                if message.role == "user" and not any(
-                    isinstance(block, ToolResultBlock) for block in message.content
-                ):
-                    kept.append(message)
-                else:
-                    dropped += 1
-            kept.extend(self._deferred)
-            self._context = kept
-            self._thinking = False
-            self._turn_calls = ()
-            self._pending = []
-            self._results = {}
-            self._deferred = []
+            dropped = self._undo_think(checkpoint)
             # Record the error and rollback under the failed think's turn number, then restore the turn.
             self._record_error(error)
             change = None
@@ -883,6 +1117,53 @@ class State:
             reporter = self._reporter
         if change is not None:
             self._notify_context_change(reporter, change)
+
+    # The context steps of think, without history. _begin_think/_record_reply/_rollback add the history entries;
+    # _replay uses these alone, because a loaded State already has the entries.
+
+    def _start_thinking(self) -> Checkpoint:
+        """Steps 2-5 of ``_begin_think``. Inside the lock."""
+        for notice in self._late_notices:
+            self._context.append(Message.user(notice))
+        self._late_notices.clear()
+        checkpoint = Checkpoint(len(self._context), self._turn, self._last_answer)
+        self._turn += 1
+        self._thinking = True
+        return checkpoint
+
+    def _apply_reply(self, reply: Reply) -> None:
+        """The context part of ``_record_reply``. Inside the lock."""
+        self._thinking = False
+        self._context.append(Message("assistant", reply.message.content, tokens=reply.context_tokens))
+        calls = reply.tool_calls
+        self._turn_calls = calls
+        self._pending = list(calls)
+        self._results = {}
+        if not calls:
+            self._last_answer = reply.text
+            self._context.extend(self._deferred)
+            self._deferred = []
+        self._usage = self._usage + reply.usage
+
+    def _undo_think(self, checkpoint: Checkpoint) -> int:
+        """The context part of ``_rollback`` (turn and last_answer are not restored). Returns how many messages
+        were dropped. Inside the lock."""
+        kept = self._context[: checkpoint.context_len]
+        dropped = 0
+        # Keep human messages and notices that came in during think (drop the reply and tool results).
+        for message in self._context[checkpoint.context_len :]:
+            if message.role == "user" and not any(isinstance(block, ToolResultBlock) for block in message.content):
+                kept.append(message)
+            else:
+                dropped += 1
+        kept.extend(self._deferred)
+        self._context = kept
+        self._thinking = False
+        self._turn_calls = ()
+        self._pending = []
+        self._results = {}
+        self._deferred = []
+        return dropped
 
     def _record_tool_result(self, call: ToolCall, content: str, *, is_error: bool = False) -> None:
         """Record the result of one call. Safe to call from multiple threads.
@@ -899,7 +1180,7 @@ class State:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot record a result for a call that is not pending: {shown}")
             stored = self._pending[index]
-            self._append("tool_result", content, call=stored)
+            self._append("tool_result", content, call=stored, is_error=is_error)
             self._resolve(index, content, is_error=is_error)
 
     def _record_late_result(self, call: ToolCall, content: str, *, is_error: bool = False) -> None:
@@ -916,10 +1197,10 @@ class State:
         with self._lock:
             index = next((i for i, pending in enumerate(self._pending) if pending is call), None)
             if index is not None:
-                self._append("tool_result", content, call=call)
+                self._append("tool_result", content, call=call, is_error=is_error)
                 self._resolve(index, content, is_error=is_error)
                 return
-            self._append("tool_result", content, call=call, late=True)
+            self._append("tool_result", content, call=call, late=True, is_error=is_error)
             self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=content))
 
     def _close_pending(self, error: BaseException) -> list[ToolCall]:

@@ -37,6 +37,7 @@ reply and tool result. A `"reply"` entry holds the whole `Reply`, including `rep
 
 | Property | Value |
 | --- | --- |
+| `id` | The name a store saves the State under. `State(task, id=...)`, or random |
 | `task` | The task the State was created with |
 | `pending_calls` | Tool calls the model asked for that have no result yet |
 | `context` | See above |
@@ -105,8 +106,11 @@ Every tool call needs a result before the model is asked again. So while calls a
 `state.data` is a dict for your code and your tools. Use it to keep values across turns:
 
 ```python
-allowed = state.data.setdefault("allowed", set())
+allowed = state.data.setdefault("allowed", [])
 ```
+
+If the Agent has a [store](../guides/resume.md), keep values JSON can hold there: dicts with string keys, lists,
+strings, numbers, booleans and `None`. Saving a State whose `data` holds a set or another object raises `TypeError`.
 
 A single read or write is thread-safe. For an update in several steps, hold `state.lock`:
 
@@ -126,10 +130,11 @@ with state.lock:
 | Stopped by `limit` | Runs up to `limit` more turns. The loop counts turns from zero on every call |
 | Stopped by Ctrl+C or an exception | Continues. Pending calls were closed with a result such as `(interrupted by user)` |
 | Ended with `finish()` | Raises `ValueError` |
+| Loaded with `store.load(id)` | Continues where the saved steps end. It has no owner yet, so the Agent in your code today can run it. See [Save and resume](../guides/resume.md) |
 
 ### A State saved by another Agent
 
-Saving a State is not implemented yet. When it is, a saved State also records which Agent saved it: its name, model,
+A State saved with a [store](../guides/resume.md) also records which Agent saved it: its name, model,
 a hash of its system prompt, its tools and its MCP servers. The Agent's settings live in your code, so an Agent that
 resumes the State after a deploy may differ. The run still works, but it may behave differently: the model gets an
 error result when it calls a tool that was removed, and blocks only one provider understands are not sent to another

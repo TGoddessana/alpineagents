@@ -9,6 +9,7 @@ from __future__ import annotations
 import builtins
 import logging
 import re
+import signal
 import sys
 import types
 from pathlib import Path
@@ -184,6 +185,34 @@ def test_chat(models, answers, capsys):
         run("chat")
     out = capsys.readouterr().out
     assert "Hello!" in out and "More detail." in out
+
+
+def test_resume(models, answers, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["chat.py"])
+    models.append(FakeModel(["Hello!"]))
+    answers.extend(["Hi", EOFError()])
+    with pytest.raises(EOFError):
+        run("resume")
+
+    # Another process: --resume loads the conversation and continues it.
+    monkeypatch.setattr(sys, "argv", ["chat.py", "--resume"])
+    fake = FakeModel(["Welcome back."])
+    models.append(fake)
+    answers.extend(["Where were we?", EOFError()])
+    with pytest.raises(EOFError):
+        run("resume")
+    assert [m.text for m in fake.requests[0].messages] == ["Hi", "Hello!", "Where were we?"]
+    assert "Welcome back." in capsys.readouterr().out
+
+
+def test_sigterm(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: handlers.__setitem__(signum, handler))
+    run("sigterm")
+    with pytest.raises(SystemExit) as info:
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+    assert info.value.code == 128 + signal.SIGTERM
 
 
 def test_structured_output(models, monkeypatch, tmp_path, capsys):

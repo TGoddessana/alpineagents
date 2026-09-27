@@ -142,7 +142,6 @@ print(agent.run("Add a test for the add() function in calc.py"))
 - Subagents (`tools=[researcher]`). Passing an Agent in `tools=` raises `NotImplementedError` for now
 - Skills (`skills=`). Passing `skills=` raises `NotImplementedError` for now
 - `agent.run_tool`, `agent.load_skill`
-- `state.save()` / `State.load()`
 - Multimodal tool results (`Image`, `File`)
 - `alpineagents[prices]` (cost calculation with genai-prices; for now `usage.cost` is filled only when you pass
   `price=Price(...)`)

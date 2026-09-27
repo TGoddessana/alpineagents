@@ -401,6 +401,8 @@ class HistoryEntry:
     """The exception, for ``error`` entries."""
     late: bool = False
     """``True`` for a tool result that arrived after its call was already closed."""
+    is_error: bool = False
+    """``True`` for a ``tool_result`` or ``denied`` entry the model sees as an error result."""
     substate: Any = None
     """Reserved for subagents, which are not implemented yet. Always ``None``."""
     # A lambda rather than _now itself, so _now is looked up at call time (tests monkeypatch types._now).

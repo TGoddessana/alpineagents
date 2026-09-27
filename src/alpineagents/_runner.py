@@ -9,7 +9,7 @@ import asyncio
 import contextvars
 import inspect
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -255,9 +255,14 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
 
 
 def _collect(
-    state: State, reporter: Reporter | None, running: list[_Job], failures: list[_Job]
+    state: State,
+    reporter: Reporter | None,
+    running: list[_Job],
+    failures: list[_Job],
+    on_record: Callable[[], None] | None,
 ) -> None:
-    """Waits until everything in ``running`` finishes, recording each as it finishes (completion order).
+    """Waits until everything in ``running`` finishes, recording each as it finishes (completion order), and
+    calls ``on_record`` after each batch of finished calls is recorded.
 
     A job is removed from ``running`` **after** it is recorded: if an interrupt lands in between,
     ``_abandon`` still sees that call.
@@ -270,6 +275,8 @@ def _collect(
         for job in finished:
             _finish(state, reporter, job, failures)
             running.remove(job)
+        if on_record is not None:
+            on_record()
 
 
 def _abandon(
@@ -323,6 +330,7 @@ def run_calls(
     calls: Sequence[ToolCall],
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
+    on_record: Callable[[], None] | None = None,
 ) -> None:
     """Runs ``calls`` (a snapshot of ``state.pending_calls``) and records the results in State.
 
@@ -344,6 +352,9 @@ def run_calls(
        ``on_tool_end(state, call, closed_result(e), closed_outcome(e))``, and the first exception is remembered
        (no result is recorded, so the call stays in ``pending_calls``).
        Waiting repeats ``concurrent.futures.wait(..., timeout=0.1)`` so Ctrl+C gets through right away.
+       After each batch of calls that finished together is recorded, ``on_record()`` (the Agent saves them to
+       its store). An exception it raises propagates like an interrupt; the Agent's callback raises only
+       ``BaseException``s that are not ``Exception``s.
     4. After the whole parallel group finishes, if there was no exception, the serial group (``parallel=False``)
        runs one at a time in request order, the same way (one worker thread). If an exception happens during
        the serial group, the rest are not started.
@@ -373,12 +384,12 @@ def run_calls(
     try:
         for job in parallel:
             _start(state, reporter, executor, job, running)
-        _collect(state, reporter, running, failures)
+        _collect(state, reporter, running, failures, on_record)
 
         if not failures:
             for job in serial:
                 _start(state, reporter, executor, job, running)
-                _collect(state, reporter, running, failures)
+                _collect(state, reporter, running, failures, on_record)
                 if failures:
                     break
     except BaseException as e:
@@ -469,7 +480,11 @@ def _seen(future: asyncio.Future[str]) -> None:
 
 
 async def _acollect(
-    state: State, reporter: Reporter | None, running: list[_Job], failures: list[_Job]
+    state: State,
+    reporter: Reporter | None,
+    running: list[_Job],
+    failures: list[_Job],
+    on_record: Callable[[], Awaitable[None]] | None,
 ) -> None:
     """Like ``_collect``, awaiting instead of polling."""
     while running:
@@ -479,6 +494,8 @@ async def _acollect(
         for job in finished:
             _finish(state, reporter, job, failures)
             running.remove(job)
+        if on_record is not None:
+            await on_record()
 
 
 def _aabandon(
@@ -519,6 +536,7 @@ async def arun_calls(
     calls: Sequence[ToolCall],
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
+    on_record: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """The async version of ``run_calls``, run on the event loop thread. Same steps, records and notifications.
 
@@ -537,12 +555,12 @@ async def arun_calls(
     try:
         for job in parallel:
             _astart(state, reporter, executor, job, running)
-        await _acollect(state, reporter, running, failures)
+        await _acollect(state, reporter, running, failures, on_record)
 
         if not failures:
             for job in serial:
                 _astart(state, reporter, executor, job, running)
-                await _acollect(state, reporter, running, failures)
+                await _acollect(state, reporter, running, failures, on_record)
                 if failures:
                     break
     except BaseException as e:

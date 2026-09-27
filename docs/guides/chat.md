@@ -18,6 +18,10 @@ Without step 3, `run` would stop at once, because `State.is_answered` is still t
 The default loop compacts the context when it is more than 60% full. For your own loop, see
 [Context size](context-size.md).
 
+## Continue later
+
+To continue a conversation in another process, give the Agent a store. See [Save and resume](resume.md).
+
 ## Related
 
 - [State: run the same State again](../concepts/state.md#run-the-same-state-again)
