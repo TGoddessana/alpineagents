@@ -349,7 +349,8 @@ class Agent:
             ValueError: The State was already ended with ``state.finish()``.
 
         Warns:
-            ResumeWarning: The State was saved by an Agent with a different model, system prompt or tools.
+            ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
+                or MCP servers.
 
         Example:
             ```python
@@ -418,7 +419,8 @@ class Agent:
             ValueError: The State was already ended with ``state.finish()``.
 
         Warns:
-            ResumeWarning: The State was saved by an Agent with a different model, system prompt or tools.
+            ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
+                or MCP servers.
         """
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
@@ -1236,11 +1238,13 @@ def _resume_changes(saved: dict[str, Any], current: dict[str, Any]) -> dict[str,
     """``{key: (saved, current)}`` for each ``Agent._summary`` key that differs. A key missing from ``saved`` is
     not compared, so an older or partial summary does not warn."""
     changes: dict[str, tuple[Any, Any]] = {}
+    if not isinstance(saved, dict):
+        return changes
     for key, now in current.items():
         if key not in saved:
             continue
         before = saved[key]
-        if key in _SUMMARY_LISTS and isinstance(before, list):
+        if key in _SUMMARY_LISTS and _is_name_list(before):
             same = set(before) == set(now)
         else:
             same = before == now
@@ -1256,14 +1260,14 @@ def _describe_changes(changes: dict[str, tuple[Any, Any]]) -> str:
     for key, (before, now) in changes.items():
         if key == "system_sha256":
             parts.append("system prompt changed")
-        elif key in _SUMMARY_LISTS and isinstance(before, list):
+        elif key in _SUMMARY_LISTS and _is_name_list(before):
             moves = []
             removed = [name for name in before if name not in now]
             added = [name for name in now if name not in before]
             if removed:
                 moves.append(f"removed {', '.join(map(str, removed))}")
             if added:
-                moves.append(f"added {', '.join(added)}")
+                moves.append(f"added {', '.join(map(str, added))}")
             parts.append(f"{key}: {', '.join(moves)}")
         else:
             parts.append(f"{key}: {_or_none(before)} -> {_or_none(now)}")
@@ -1271,6 +1275,11 @@ def _describe_changes(changes: dict[str, tuple[Any, Any]]) -> str:
         f"This State was saved by a different Agent ({'; '.join(parts)}). "
         "The run continues, but may behave differently than before it was saved"
     )
+
+
+def _is_name_list(value: Any) -> bool:
+    """A saved summary comes from storage, so a list of names is checked before it is compared as a set."""
+    return isinstance(value, list) and all(isinstance(name, str) for name in value)
 
 
 def _or_none(value: Any) -> str:

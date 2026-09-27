@@ -68,8 +68,10 @@ class ResumeWarning(UserWarning):
     A State holds the conversation, while the Agent's settings live in code. If the tools, model or system prompt
     changed between saving and resuming, the run still works but may behave differently: the model gets an error
     result when it calls a removed tool, and provider-specific blocks are not sent to a model of another provider.
-    This may be what you want after a deploy, so it is a warning and not an error. It is given once per loaded
-    State, at the first ``run`` or ``arun``.
+    This may be what you want after a deploy, so it is a warning and not an error. Each loaded State is checked
+    once, at its first ``run`` or ``arun``. Python's default warnings filter shows the same message from the same
+    line only once per process; a server that resumes many States should use ``catch_warnings`` or the
+    ``"always"`` filter to see each one.
 
     To refuse such a resume, turn it into an exception with
     ``warnings.filterwarnings("error", category=ResumeWarning)``. To show a notice in your UI, catch it with
@@ -81,6 +83,10 @@ class ResumeWarning(UserWarning):
         self.changes = changes
         """What changed: ``{key: (saved_value, current_value)}`` for each differing key of the Agent summary
         (``name``, ``model``, ``system_sha256``, ``tools``, ``mcp_servers``)."""
+
+    def __reduce__(self) -> Any:
+        # args holds only the message, so the default would rebuild without changes (pickle, copy).
+        return (type(self), (str(self), self.changes))
 
 
 class ToolInputError(Exception):

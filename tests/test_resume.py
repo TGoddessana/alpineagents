@@ -136,6 +136,36 @@ def test_tool_order_is_not_a_change():
         agent.run(state)
 
 
+def test_malformed_saved_summary_does_not_break_the_run():
+    """A saved summary comes from storage: bad values are compared as plain values, never raise."""
+    agent = make_agent(tools=[search_web])
+    state = State("Find the bug")
+    state._set_saved_agent({**agent._summary(), "tools": [["search_web"]]})
+    with pytest.warns(ResumeWarning) as caught:
+        assert agent.run(state) == "Done"
+    (warning,) = resume_warnings(caught.list)
+    assert warning.changes == {"tools": ([["search_web"]], ["search_web"])}
+
+
+def test_saved_summary_that_is_not_a_dict_is_ignored():
+    agent = make_agent()
+    state = State("Find the bug")
+    state._set_saved_agent("not a summary")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert agent.run(state) == "Done"
+
+
+def test_warning_survives_pickle_and_copy():
+    import copy
+    import pickle
+
+    warning = ResumeWarning("tools changed", {"tools": (["a"], ["b"])})
+    for clone in (pickle.loads(pickle.dumps(warning)), copy.copy(warning)):
+        assert str(clone) == "tools changed"
+        assert clone.changes == {"tools": (["a"], ["b"])}
+
+
 # ================================================================ warnings
 
 

@@ -6,8 +6,9 @@ Internal rules (the user-facing contract is in the public docstrings):
   ``self.lock``, and Reporter notifications (``on_context_change``, ``on_tool_end`` for a deny) are sent after
   the lock is released.
 - ``history`` is append-only. Shrinking or rolling back the context never deletes from it.
-- Every entry gets its ``at`` when ``HistoryEntry`` is created inside the lock (``__init__`` or ``_append``),
-  so ``at`` does not go backwards in history order (unless the system clock does). There is no other clock.
+- Every entry gets its ``at`` when ``HistoryEntry`` is created: in ``__init__`` (before the State is shared) or
+  in ``_append`` (inside the lock), so ``at`` does not go backwards in history order (unless the system clock
+  does). There is no other clock.
 - Blocks of received messages (``Reply.message``) go into the context unchanged.
 - It never calls the model, runs tools or prints.
 - Methods starting with ``_`` are for Agent (and Loop) only. User code does not call them.
