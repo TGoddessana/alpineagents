@@ -38,6 +38,20 @@ def test_fake_model_text_reply():
     assert fake.remaining == 0
 
 
+def test_fake_model_reply_records_its_name_as_model():
+    assert FakeModel(["ok"]).respond(_request("x")).model == "fake"
+    assert FakeModel(["ok"], name="fake-large").respond(_request("x")).model == "fake-large"
+
+
+def test_fake_model_run_keeps_model_in_history():
+    from alpineagents import Agent, State
+
+    state = State("Find the bug")
+    Agent(model=FakeModel(["The bug is on line 3"], name="fake-large"), reporter=None).run(state)
+    replies = [entry.content for entry in state.history if entry.kind == "reply"]
+    assert [reply.model for reply in replies] == ["fake-large"]
+
+
 def test_fake_model_tool_call_reply():
     call = tool_call("read_file", path="main.py")
     fake = FakeModel([call])

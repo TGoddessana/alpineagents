@@ -453,6 +453,7 @@ class Anthropic(Model):
         - ``Usage(input_tokens, output_tokens, cache_read_tokens=cache_read_input_tokens or 0,
           cache_write_tokens=cache_creation_input_tokens or 0, requests=1)`` with ``cost=self._cost(...)``.
         - ``context_tokens`` = input + cache read + cache write + output; ``stop_reason`` as is.
+        - ``model`` = ``message.model`` (the model that answered), or ``self.name`` if it is missing.
         """
         content: list[Any] = []
         for block in message.content:
@@ -485,6 +486,7 @@ class Anthropic(Model):
             usage=usage,
             context_tokens=context_tokens,
             stop_reason=message.stop_reason,
+            model=getattr(message, "model", None) or self.name,
         )
 
     def _client(self) -> Any:

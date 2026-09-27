@@ -40,6 +40,10 @@ from alpineagents import Anthropic, Price
 model = Anthropic("claude-sonnet-5", price=Price(input=3, output=15, cache_read=0.3))
 ```
 
+Each `Reply` records the model that answered in `reply.model`, as the provider reported it. It can differ from the
+requested name: an alias resolved to a dated id, or a router that picked another model. The cost still uses the
+requested Model's price.
+
 ## Write a Model
 
 Subclass `Model` to add a provider. Implement `respond` and `context_window`:
@@ -51,6 +55,8 @@ Subclass `Model` to add a provider. Implement `respond` and `context_window`:
 Rules for a Model:
 
 - Return a `Reply`. Do not change the State. The Agent records the reply.
+- Put the model that actually answered in `Reply.model`: the name the provider reported, or the requested name
+  if it did not say. A Model that falls back to another model puts the fallback's name there.
 - Use no network and no credentials in `__init__`. Create the SDK client at the first request.
 - Call `on_text` with each piece of text as it streams in, if `on_text` is not `None`.
 - Wrap provider exceptions that finally fail as `RateLimitError`, `AuthError`, `ContextTooLongError` or

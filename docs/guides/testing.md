@@ -27,6 +27,8 @@ Each model request takes the next item: every `think`, every `ask` attempt and e
 | A `Reply` object | Used as is |
 | A function that takes the `Request` | Its return value, read by the rules above |
 
+The replies FakeModel builds have `model` set to the fake's name, `"fake"` by default.
+
 `fake.requests` holds every request the model received. Use it to check what the model saw:
 
 ```python

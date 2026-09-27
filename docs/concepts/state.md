@@ -22,7 +22,7 @@ A State keeps two lists.
 | Use it to | Inspect, log or debug | Know what the model knows right now |
 
 After compaction, for example, the context holds only the task and a summary. The history still holds every message,
-reply and tool result.
+reply and tool result. A `"reply"` entry holds the whole `Reply`, including `reply.model`, the model that answered.
 
 ## Read the result
 

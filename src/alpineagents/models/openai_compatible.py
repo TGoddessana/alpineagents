@@ -63,11 +63,15 @@ class _Collected:
         self.calls: dict[int, dict[str, Any]] = {}
         self.finish_reason: str | None = None
         self.usage: Any = None
+        #: The first model name a chunk reported (some servers send none).
+        self.model: str | None = None
 
     def add(self, chunk: Any) -> str | None:
         """Takes one chunk and returns its text delta (``None`` if there is none)."""
         if chunk.usage is not None:
             self.usage = chunk.usage
+        if self.model is None:
+            self.model = getattr(chunk, "model", None) or None
         if not chunk.choices:
             return None
         choice = chunk.choices[0]
@@ -313,7 +317,8 @@ class OpenAICompatible(Model):
         ``.cache_write_tokens`` (0 if missing) -> ``Usage(input_tokens=prompt - cached - cache_write,
         output_tokens=completion, cache_read_tokens=cached, cache_write_tokens=cache_write, requests=1)`` with
         ``cost=self._cost(...)``. Zeros if no usage arrives. ``context_tokens`` = prompt + completion (None
-        without usage). ``stop_reason`` = ``finish_reason``.
+        without usage). ``stop_reason`` = ``finish_reason``. ``model`` = the first ``chunk.model`` the server sent,
+        or ``self.name`` if none did.
         """
         message = self._reply_message(
             collected.text_parts, collected.reasoning_parts, collected.calls, collected.finish_reason
@@ -341,7 +346,13 @@ class OpenAICompatible(Model):
             context_tokens = None
         usage = replace(base_usage, cost=self._cost(base_usage))
 
-        return Reply(message=message, usage=usage, context_tokens=context_tokens, stop_reason=collected.finish_reason)
+        return Reply(
+            message=message,
+            usage=usage,
+            context_tokens=context_tokens,
+            stop_reason=collected.finish_reason,
+            model=collected.model or self.name,
+        )
 
     def _uses_max_completion_tokens(self) -> bool:
         """``True`` for OpenAI reasoning (o-series) models (``max_completion_tokens`` instead of ``max_tokens``)."""

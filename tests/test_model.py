@@ -123,13 +123,13 @@ def _install_openai_client(monkeypatch, model, chunks=(), error=None):
     return calls
 
 
-def _oai_chunk(content=None, tool_calls=None, finish_reason=None, usage=None, reasoning_content=None):
+def _oai_chunk(content=None, tool_calls=None, finish_reason=None, usage=None, reasoning_content=None, **extra):
     delta_kwargs = {"content": content, "tool_calls": tool_calls}
     if reasoning_content is not None:
         delta_kwargs["reasoning_content"] = reasoning_content
     delta = SimpleNamespace(**delta_kwargs)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
-    return SimpleNamespace(choices=[choice], usage=usage)
+    return SimpleNamespace(choices=[choice], usage=usage, **extra)
 
 
 def _oai_tool_delta(index, id=None, name=None, arguments=None):
@@ -627,6 +627,32 @@ def test_openai_compatible_respond_maps_usage_and_subtracts_cached_from_input(mo
     assert reply.usage.cache_read_tokens == 30
     assert reply.usage.input_tokens == 100 - 30
     assert reply.usage.output_tokens == 20
+
+
+def test_openai_compatible_respond_records_the_model_the_server_reported(monkeypatch):
+    """A router may answer with another model than the one requested: the reply records the one that answered."""
+    model = OpenAICompatible("openrouter/auto", base_url="https://openrouter.ai/api/v1", api_key="x")
+    chunks = [
+        _oai_chunk(content="o", model=""),
+        _oai_chunk(content="k", model="anthropic/claude-sonnet-5"),
+        _oai_chunk(finish_reason="stop", model="other/model"),
+    ]
+    _install_openai_client(monkeypatch, model, chunks=chunks)
+
+    reply = model.respond(Request(system=None, messages=(Message.user("hi"),)))
+
+    assert reply.model == "anthropic/claude-sonnet-5"
+
+
+def test_openai_compatible_respond_model_falls_back_to_requested_name(monkeypatch):
+    """Some servers send no ``model`` in their chunks: the requested name is used."""
+    model = OpenAICompatible("llama3", base_url="http://localhost:11434/v1", api_key="x")
+    chunks = [_oai_chunk(content="ok"), _oai_chunk(finish_reason="stop", model=None)]
+    _install_openai_client(monkeypatch, model, chunks=chunks)
+
+    reply = model.respond(Request(system=None, messages=(Message.user("hi"),)))
+
+    assert reply.model == "llama3"
 
 
 def test_openai_compatible_respond_cost_is_none_when_no_price_configured(monkeypatch):
