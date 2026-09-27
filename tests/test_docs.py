@@ -151,6 +151,15 @@ def test_approval_yes(models, answers, monkeypatch, tmp_path):
     assert Path("README.md").read_text() == "# Hi"
 
 
+def test_approval_read_only_runs_without_asking(models, answers, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("notes.md").write_text("hello")
+    fake = FakeModel([tool_call("read_file", path="notes.md"), tool_call("made_up"), "It says hello"])
+    models.append(fake)
+    run("approval")  # no answers queued: asking would fail
+    assert "hello" in last_request_text(fake)
+
+
 def test_approval_always(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     models.append(FakeModel([tool_call("write_file", path="a.md", content="a"), "Done"]))

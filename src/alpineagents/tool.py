@@ -14,7 +14,7 @@ import inspect
 import json
 import re
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints, overload
 
@@ -29,7 +29,7 @@ from .errors import ToolError, ToolInputError, fix_message
 from .state import State
 from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
 
-__all__ = ["tool", "Tool", "collect_tools", "SUPPORTED_TYPES_TEXT", "DONE"]
+__all__ = ["tool", "Tool", "ToolMap", "collect_tools", "hint_values", "SUPPORTED_TYPES_TEXT", "DONE"]
 
 #: Text sent to the model when a tool returns ``None``.
 DONE = "(done)"
@@ -218,6 +218,52 @@ def _check_stdlib_typeddict(tool_name: str, param: str, tp: Any) -> None:
             stack.extend(f.annotation for f in cur.model_fields.values())
 
 
+def hint_values(
+    read_only: bool | None,
+    destructive: bool | None,
+    idempotent: bool | None,
+    open_world: bool | None,
+) -> tuple[bool, bool, bool, bool]:
+    """The four hints, with the values not given filled in. Same rules as MCP tool annotations: a hint not given
+    assumes the worst (not read-only, destructive, not idempotent, open world), except that a read-only tool is
+    never destructive and always idempotent."""
+    read_only = bool(read_only)
+    if read_only:
+        destructive, idempotent = False, True
+    return (
+        read_only,
+        True if destructive is None else bool(destructive),
+        False if idempotent is None else bool(idempotent),
+        True if open_world is None else bool(open_world),
+    )
+
+
+def _check_hints(tool_name: str, **hints: Any) -> tuple[bool, bool, bool, bool]:
+    """``hint_values`` for ``@tool``: each hint must be a bool or left out, and a read-only tool cannot also be
+    destructive or not idempotent."""
+    for hint, value in hints.items():
+        if value is not None and not isinstance(value, bool):
+            raise TypeError(
+                fix_message(
+                    f"Tool {tool_name}: {hint}= takes True or False (got: {value!r})",
+                    "Pass a bool, or leave it out to assume the worst",
+                    "@tool(read_only=True, open_world=False)",
+                )
+            )
+    if hints["read_only"]:
+        for hint, contradiction in (("destructive", True), ("idempotent", False)):
+            if hints[hint] is contradiction:
+                raise ValueError(
+                    fix_message(
+                        f"Tool {tool_name}: read_only=True and {hint}={contradiction} contradict each other. "
+                        "A read-only tool changes nothing, so it is never destructive and always idempotent",
+                        f"Leave {hint} out (read_only=True sets it), or set read_only=False",
+                        "@tool(read_only=True)",
+                    )
+                )
+    return hint_values(**hints)
+
+
 _HANDLER_EXAMPLE = (
     "def http_errors(error: httpx.HTTPError) -> str:\n"
     '    return f"request failed: {error}"\n'
@@ -337,6 +383,16 @@ class Tool:
     exception_handler: Callable[[Any], str] | None
     """Turns the exceptions named in its parameter's type hint into error results the model sees. ``None`` if not
     given."""
+    read_only: bool
+    """The tool does not change its environment. ``False`` unless given. The model does not see the hints; they are
+    for your own code, such as a loop that asks before calls that are not read-only."""
+    destructive: bool
+    """The tool may delete or overwrite something. ``True`` unless given, and ``False`` for a read-only tool."""
+    idempotent: bool
+    """Calling it again with the same arguments has no further effect. ``False`` unless given, and ``True`` for a
+    read-only tool."""
+    open_world: bool
+    """The tool reaches outside its own domain, such as the web, a shell or another system. ``True`` unless given."""
     # Internal: the original function, whether it is a method in a class (first parameter is ``self`` with no
     # type hint), and the bound object (None if unbound).
     fn: Callable[..., Any]
@@ -351,6 +407,10 @@ class Tool:
         description: str | None = None,
         parallel: bool = True,
         exception_handler: Callable[[Any], str] | None = None,
+        read_only: bool | None = None,
+        destructive: bool | None = None,
+        idempotent: bool | None = None,
+        open_world: bool | None = None,
     ) -> None:
         """Usually created with ``@tool``. A bad tool raises here, before any model call.
 
@@ -360,11 +420,16 @@ class Tool:
             description: Defaults to the docstring's first paragraph.
             parallel: ``False`` runs the tool alone after the turn's other calls finish.
             exception_handler: See ``tool``.
+            read_only: See ``tool``.
+            destructive: See ``tool``.
+            idempotent: See ``tool``.
+            open_world: See ``tool``.
 
         Raises:
             TypeError: The name is invalid, a parameter has no type hint or an unsupported type, the function
-                takes ``*args``, ``**kwargs`` or positional-only parameters, or ``exception_handler`` is not a
-                function with one parameter whose type hint names ``Exception`` subclasses.
+                takes ``*args``, ``**kwargs`` or positional-only parameters, ``exception_handler`` is not a
+                function with one parameter whose type hint names ``Exception`` subclasses, or a hint is not a bool.
+            ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
         """
         # - If the first parameter is named ``self`` with no type hint, it is a method (``needs_self=True``, left
         #   out of the schema).
@@ -384,7 +449,11 @@ class Tool:
         # The options as given, for copy.
         self._options: dict[str, Any] = {
             "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
+            "read_only": read_only, "destructive": destructive, "idempotent": idempotent, "open_world": open_world,
         }
+        self.read_only, self.destructive, self.idempotent, self.open_world = _check_hints(
+            self.name, read_only=read_only, destructive=destructive, idempotent=idempotent, open_world=open_world
+        )
         self.exception_handler = exception_handler
         self._handles: tuple[type[Exception], ...] = (
             () if exception_handler is None else _handled_types(exception_handler, self.name)
@@ -576,13 +645,15 @@ class Tool:
         """Returns a new Tool with some options changed. The original does not change, and a bound tool stays bound.
 
         Args:
-            **changes: ``name``, ``description``, ``parallel`` or ``exception_handler``, as in ``@tool``.
+            **changes: Any ``@tool`` option: ``name``, ``description``, ``parallel``, ``exception_handler``,
+                ``read_only``, ``destructive``, ``idempotent`` or ``open_world``.
 
         Returns:
             The new Tool.
 
         Raises:
             TypeError: A name in ``changes`` is not an option, or a new value fails the same checks as ``@tool``.
+            ValueError: The new hints contradict each other, as in ``@tool``.
 
         Example:
             ```python
@@ -647,6 +718,10 @@ def tool(
     description: str | None = None,
     parallel: bool = True,
     exception_handler: Callable[[Any], str] | None = None,
+    read_only: bool | None = None,
+    destructive: bool | None = None,
+    idempotent: bool | None = None,
+    open_world: bool | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -658,6 +733,10 @@ def tool(
     description: str | None = None,
     parallel: bool = True,
     exception_handler: Callable[[Any], str] | None = None,
+    read_only: bool | None = None,
+    destructive: bool | None = None,
+    idempotent: bool | None = None,
+    open_world: bool | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Turns a function or method into a tool the model can call.
 
@@ -667,10 +746,16 @@ def tool(
     as JSON.
 
     Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...,
-    exception_handler=...)``).
+    exception_handler=..., read_only=..., destructive=..., idempotent=..., open_world=...)``).
 
     An exception from the tool stops the run, because it is usually a bug. For a failure the model should see and
     handle, raise ``ToolError("message")``, or name the exceptions in ``exception_handler``.
+
+    ``read_only``, ``destructive``, ``idempotent`` and ``open_world`` describe what the tool does, with the meaning of
+    MCP tool annotations. The model does not see them: they are for your code, such as a loop that asks before calls
+    that are not read-only, and it reads them through ``agent.tool_map``. A hint left out assumes the worst: not
+    read-only, destructive, not idempotent, open world. ``@tool(read_only=True, open_world=False)`` fits a tool that
+    reads local files.
 
     Example:
         ```python
@@ -702,15 +787,24 @@ def tool(
             def fetch_url(url: str) -> str:
                 return httpx.get(url).raise_for_status().text
             ```
+        read_only: The tool does not change its environment. Sets ``destructive=False`` and ``idempotent=True``.
+        destructive: The tool may delete or overwrite something (``False`` for one that only adds).
+        idempotent: Calling it again with the same arguments has no further effect.
+        open_world: The tool reaches outside its own domain, such as the web, a shell or another system.
 
     Returns:
         A ``Tool``, or a decorator that makes one when options are given.
 
     Raises:
         TypeError: ``@tool`` is applied twice or to something that is not a function, the function cannot be a
-            tool, or ``exception_handler`` is not a function with one parameter whose type hint names
-            ``Exception`` subclasses (see ``Tool``).
+            tool, ``exception_handler`` is not a function with one parameter whose type hint names
+            ``Exception`` subclasses, or a hint is not a bool (see ``Tool``).
+        ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
     """
+    options: dict[str, Any] = {
+        "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
+        "read_only": read_only, "destructive": destructive, "idempotent": idempotent, "open_world": open_world,
+    }
     if fn is not None:
         if isinstance(fn, Tool):
             raise TypeError(
@@ -726,12 +820,10 @@ def tool(
                     "Apply @tool to a plain function or method",
                 )
             )
-        return Tool(fn, name=name, description=description, parallel=parallel, exception_handler=exception_handler)
+        return Tool(fn, **options)
 
     def decorate(inner: Callable[..., Any]) -> Tool:
-        return tool(
-            inner, name=name, description=description, parallel=parallel, exception_handler=exception_handler
-        )
+        return tool(inner, **options)
 
     return decorate
 
@@ -813,3 +905,51 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             )
 
     return result
+
+
+class ToolMap(Mapping[str, Any]):
+    """``agent.tool_map``: a read-only name -> tool mapping. Looking up a missing name while MCP servers are not
+    connected raises a ``KeyError`` that says so."""
+
+    __slots__ = ("_tools", "_waiting")
+
+    def __init__(self, tools: Mapping[str, Any], waiting: tuple[str, ...]) -> None:
+        self._tools = dict(tools)
+        #: Names of the MCP servers that are not connected, so their tools are missing.
+        self._waiting = waiting
+
+    def __getitem__(self, name: str) -> Any:
+        try:
+            return self._tools[name]
+        except KeyError:
+            if not self._waiting:
+                raise
+        raise _MissingToolError(
+            fix_message(
+                f"No tool named {name!r}. This Agent's MCP servers ({', '.join(self._waiting)}) are not connected, "
+                "so their tools are not listed yet",
+                "Read tool_map during a run (in the loop, a block or a Reporter), or inside `with agent:`",
+                "with agent:\n    print(list(agent.tool_map))",
+            )
+        )
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._tools)
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __repr__(self) -> str:
+        return repr(self._tools)
+
+
+class _MissingToolError(KeyError):
+    """A ``KeyError`` whose message prints as written (``KeyError`` itself prints the repr of its argument)."""
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+# Tracebacks name the class by module and qualname: show it as the KeyError it is, not an internal class.
+_MissingToolError.__module__ = "builtins"
+_MissingToolError.__qualname__ = "KeyError"

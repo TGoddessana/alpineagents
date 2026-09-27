@@ -20,8 +20,19 @@ All notable changes to alpineagents are listed here. The format follows
   - The `tool_result` history entry of such a call has `is_error=True`, and its `error` holds the `ToolError`
     (with the handled exception in `__cause__`).
 
+- **Tool hints.** `@tool(read_only=..., destructive=..., idempotent=..., open_world=...)` says what a tool does, with
+  the meaning of MCP tool annotations. The model does not see them; your code reads them, for example to ask before
+  calls that are not read-only. A hint left out assumes the worst. MCP tools get them from the server's annotations.
+- `agent.tool_map`: every tool the model can call, by name (`@tool` functions, `@tool` methods of objects, and MCP
+  tools while connected). Look up a call's tool with `agent.tool_map.get(call.name)`.
+- `MCPTool`, the type of an MCP server's tool in `agent.tool_map`.
+- `think(tools=...)` accepts the values of `agent.tool_map`, including MCP tools, so
+  `[t for t in agent.tool_map.values() if t.read_only]` works.
+
 ### Changed
 
+- The [Ask before a tool runs](https://tgoddessana.github.io/alpineagents/guides/approval/) guide asks before calls
+  whose tool is not `read_only`, instead of before tools in a list of names.
 - `print(state)` shows error results as `tool_result fetch_url (error): HTTP 404: ...` instead of their size.
 
 ### Fixed

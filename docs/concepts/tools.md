@@ -40,7 +40,8 @@ The model sees the tool built from the function:
   `dict[str, T]`, `T | None`, dataclass, `TypedDict`, Pydantic model. On Python 3.11, import `TypedDict` from
   `typing_extensions`.
 - Options: `@tool(name="...", description="...", parallel=False, exception_handler=...)`. See
-  [When a call goes wrong](#when-a-call-goes-wrong).
+  [When a call goes wrong](#when-a-call-goes-wrong). The hints `read_only=`, `destructive=`, `idempotent=` and
+  `open_world=` are in [Describe what a tool does](#describe-what-a-tool-does).
 - A mistake in the function raises `TypeError` when `@tool` runs, before any model request.
 
 ## Return values
@@ -144,6 +145,64 @@ See [Tools that use the State](../guides/tool-state.md).
 ```
 
 Use an object when tools share settings, such as a root folder or a client.
+
+## Describe what a tool does
+
+Four hints say what a tool does. The model does not see them. They are for your code, such as a loop that asks the
+person before a call that changes something:
+
+```python
+@tool(read_only=True, open_world=False)
+def read_file(path: str) -> str:
+    """Read a file in the project"""
+    return Path(path).read_text()
+
+
+@tool(open_world=False)
+def write_file(path: str, content: str) -> None:
+    """Create a file, or replace its content"""
+    Path(path).write_text(content)
+```
+
+| Hint | The tool | Left out |
+| --- | --- | --- |
+| `read_only` | Changes nothing | `False` |
+| `destructive` | May delete or overwrite something | `True`, or `False` for a read-only tool |
+| `idempotent` | Has no further effect when called again with the same arguments | `False`, or `True` for a read-only tool |
+| `open_world` | Reaches outside its own domain: the web, a shell, another system | `True` |
+
+A hint left out assumes the worst, so a forgotten hint makes a rule stricter, never looser. `read_only=True` with
+`destructive=True` or `idempotent=False` raises `ValueError`. The hints have the meaning of MCP tool annotations.
+
+### Find the tool of a call
+
+`agent.tool_map` has every tool the model can call, by the name it calls it: `@tool` functions, the `@tool` methods of
+objects, and the tools of MCP servers. Look up a call's tool there to read its hints:
+
+```python
+for call in state.pending_calls:
+    found = agent.tool_map.get(call.name)  # None for a name the model made up
+    if found is not None and not found.read_only:
+        ...  # ask the person, see "Ask before a tool runs"
+```
+
+Pick tools by their hints for `think(tools=...)`:
+
+```python
+readers = [t for t in agent.tool_map.values() if t.read_only]
+agent.think(state, tools=readers)
+```
+
+- `agent.tool_map` is read-only. To change the tools, use `agent.copy(tools=...)`.
+- MCP servers' tools are in it only while the servers are connected: during a run, which covers the loop, blocks and
+  Reporters, or inside `with agent:`. Looking up one of their names before that raises a `KeyError` that says so.
+- An MCP tool (`MCPTool`) gets its hints from the server's annotations (`readOnlyHint` and so on), with the same
+  defaults. The server says them about itself, so do not trust them more than the server. `found.server` says which
+  server the tool is from.
+- A Reporter gets the State and the call, not the Agent. To read hints there, give it the Agent after creating both:
+  `reporter.agent = agent`.
+
+See [Ask before a tool runs](../guides/approval.md).
 
 ## Several calls in one reply
 

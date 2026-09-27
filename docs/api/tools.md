@@ -9,3 +9,7 @@ Concepts: [Tools](../concepts/tools.md). Guide: [MCP servers](../guides/mcp.md).
       filters: ["!^_", "!^(prepare|invoke|format_result|is_error_result|fn|needs_self|bound_to)$"]
 
 ::: alpineagents.MCP
+
+::: alpineagents.MCPTool
+    options:
+      filters: ["!^_", "!^(prepare|invoke|format_result|is_error_result|spec|parallel|is_async)$"]

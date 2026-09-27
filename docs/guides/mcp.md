@@ -30,6 +30,11 @@ Pass exactly one of `command`, `url=` and `server=`. `server=` takes an in-proce
 | `linear.list_issues` | One tool |
 | `linear["list-issues"]` | One tool, for a name that is not a Python identifier |
 
+During a run, `agent.tool_map["github__create_issue"]` is the connected tool (`MCPTool`). Its hints (`read_only`,
+`destructive`, `idempotent`, `open_world`) come from the server's tool annotations. They are what the server says
+about itself, so do not trust them more than the server. See
+[Describe what a tool does](../concepts/tools.md#describe-what-a-tool-does).
+
 ## Connections
 
 - `agent.run` connects the servers at the start and disconnects them at the end.

@@ -1,6 +1,7 @@
 # Ask before a tool runs
 
-The person approves risky tool calls before they run. Refused calls do not run, and the model is told why.
+The person approves tool calls that change something before they run. Refused calls do not run, and the model is
+told why.
 
 ## Yes or no
 
@@ -9,9 +10,16 @@ The person approves risky tool calls before they run. Refused calls do not run, 
 ```
 
 1. `agent.think(state)` gets the reply. Tool calls wait in `state.pending_calls`.
-2. For each risky call, `agent.ask_human` asks the person. `returns=Literal["yes", "no"]` accepts only those answers.
-3. `state.deny(call, reason)` refuses the call. The model gets `reason` as that call's result.
-4. `agent.use_tools(state)` runs the calls that are still pending. Denied calls are no longer pending.
+2. `agent.tool_map` finds the tool of each call. `read_file` says `read_only=True`, so its calls run without asking.
+   A name the model made up is not in the map; `use_tools` answers it with an input error.
+3. For every other call, `agent.ask_human` asks the person. `returns=Literal["yes", "no"]` accepts only those
+   answers.
+4. `state.deny(call, reason)` refuses the call. The model gets `reason` as that call's result.
+5. `agent.use_tools(state)` runs the calls that are still pending. Denied calls are no longer pending.
+
+The rule reads what the tool says about itself, not a list of names, so a new tool, or a tool of an
+[MCP server](mcp.md), follows it without changing the loop. `destructive`, `idempotent` and `open_world` work the same
+way, for example to warn before a `destructive` call. See [Tools: describe what a tool does](../concepts/tools.md#describe-what-a-tool-does).
 
 The default `human` is the terminal, which shows `yes/no` after the question and asks again on any other answer.
 

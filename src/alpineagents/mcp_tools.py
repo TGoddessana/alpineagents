@@ -24,7 +24,7 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from .errors import MCPConnectionError, ToolInputError, fix_message
-from .tool import DONE
+from .tool import DONE, hint_values
 from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
 
 __all__ = ["MCP", "MCPTool", "MCPToolRef", "SEPARATOR"]
@@ -344,20 +344,55 @@ class MCPToolRef:
 
 
 class MCPTool:
-    """A connected server's tool in an Agent's tool map. Same interface as ``Tool`` for the runner: ``spec``,
-    ``parallel``, ``is_async``, ``prepare``, ``invoke``, ``format_result``, ``is_error_result``."""
+    """A tool of a connected MCP server, as found in ``agent.tool_map`` under ``{server}__{tool}``.
 
+    It has the same ``name``, ``description``, ``input_schema`` and hints as a ``@tool`` tool. The hints come from the
+    server's tool annotations (``readOnlyHint`` and so on), with the same defaults as ``@tool`` for the ones it
+    leaves out. They are what the server says about itself, not a guarantee: do not trust them more than the server.
+    """
+
+    # The runner uses the same members as for Tool: spec, parallel, is_async, prepare, invoke, format_result,
+    # is_error_result.
     parallel = True
     is_async = True
 
+    server: MCP
+    """The MCP server the tool belongs to."""
+    remote_name: str
+    """The tool's name on the server (``name`` has the ``{server}__`` prefix)."""
+    name: str
+    """The name the model calls: ``{server}__{tool}``."""
+    description: str
+    """The server's description of the tool."""
+    input_schema: dict[str, Any]
+    """The server's JSON Schema for the arguments."""
+    read_only: bool
+    """From ``readOnlyHint``. ``False`` if the server does not say."""
+    destructive: bool
+    """From ``destructiveHint``. ``True`` if the server does not say, and ``False`` for a read-only tool."""
+    idempotent: bool
+    """From ``idempotentHint``. ``False`` if the server does not say, and ``True`` for a read-only tool."""
+    open_world: bool
+    """From ``openWorldHint``. ``True`` if the server does not say."""
+
     def __init__(self, server: MCP, remote: Any) -> None:
         self.server = server
-        self.remote_name: str = remote.name
+        self.remote_name = remote.name
         self.name = tool_name(server, remote.name)
-        self.description: str = remote.description or ""
+        self.description = remote.description or ""
         schema = dict(remote.input_schema or {})
         schema.setdefault("type", "object")
-        self.input_schema: dict[str, Any] = schema
+        self.input_schema = schema
+        # A server's hints are read leniently: a value that is not a bool counts as not given.
+        annotations = getattr(remote, "annotations", None)
+
+        def hint(field: str) -> bool | None:
+            value = getattr(annotations, field, None)
+            return value if isinstance(value, bool) else None
+
+        self.read_only, self.destructive, self.idempotent, self.open_world = hint_values(
+            hint("read_only_hint"), hint("destructive_hint"), hint("idempotent_hint"), hint("open_world_hint")
+        )
 
     @property
     def spec(self) -> ToolSpec:

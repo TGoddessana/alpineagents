@@ -15,6 +15,7 @@ Terms in the order you meet them.
 | Stop condition | A function from State to `bool` in `until=`. The loop stops when one returns `True` |
 | Tool call | A request in the model's reply to run one tool with arguments. A `ToolCall` object |
 | Pending call | A tool call that has no result yet. Listed in `state.pending_calls` |
+| Tool hint | What a tool does, for your code: `read_only`, `destructive`, `idempotent`, `open_world`. The model does not see it |
 | Tool result | The string the model gets for a tool call |
 | Error result | A tool result the model is told is a failure: from `ToolError`, an `exception_handler`, invalid arguments, `state.deny`, or a call closed by an exception. The run continues |
 | Notice | A message from your code to the model, added with `add_notice`. It starts with `[notice] ` |

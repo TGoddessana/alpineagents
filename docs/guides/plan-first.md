@@ -23,6 +23,14 @@ agent.think(state, tools=tools)
 
 `tools=None` shows all of the Agent's tools. A tool the Agent does not have raises `ValueError`.
 
+To pick them by what they do rather than by name, use the tools' hints. This also picks the read-only tools of
+[MCP servers](mcp.md):
+
+```python
+readers = [t for t in agent.tool_map.values() if t.read_only]
+agent.think(state, tools=readers if state.turn < 5 else None)
+```
+
 ## Related
 
 - [Agent: think and use_tools](../concepts/agent.md#think-and-use_tools)

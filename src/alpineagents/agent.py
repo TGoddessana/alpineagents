@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Generator, Iterable
+from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +27,7 @@ from .models.resolve import resolve_model
 from .reporter import Reporter
 from .state import State
 from .store import Store
-from .tool import Tool, collect_tools
+from .tool import Tool, ToolMap, collect_tools
 from .types import Message, ModelEvent, Request, TextBlock
 
 if TYPE_CHECKING:
@@ -302,8 +302,31 @@ class Agent:
 
     @property
     def tools(self) -> tuple[Any, ...]:
-        """The items passed in ``tools=``, as given."""
+        """The items passed in ``tools=``, as given. ``tool_map`` has the tools they stand for, by name."""
         return self._tools
+
+    @property
+    def tool_map(self) -> Mapping[str, Tool | MCPTool]:
+        """Every tool the model can call, by the name it calls it: ``@tool`` functions, the ``@tool`` methods of
+        objects in ``tools=``, and the tools of MCP servers (``MCPTool``, named ``{server}__{tool}``).
+
+        Use it to look up the tool of a call, and read what the tool does from its hints (``read_only``,
+        ``destructive``, ``idempotent``, ``open_world``). Read-only: to change the tools, use ``copy(tools=...)``.
+        MCP servers' tools are listed only while the servers are connected: during a run, or inside ``with agent:``.
+        Looking up a missing name before that raises a ``KeyError`` that says so.
+
+        Example:
+            ```python
+            for call in state.pending_calls:
+                tool = agent.tool_map.get(call.name)  # None for a name the model made up
+                if tool is not None and not tool.read_only and not confirm(call):
+                    state.deny(call, "The user declined")
+            ```
+        """
+        ready = self._mcp_ready
+        connected = ready is not None and ready.done() and not ready.cancelled() and ready.exception() is None
+        waiting = () if connected else tuple(use.server.name for use in self._mcp_uses)
+        return ToolMap(self._tool_map(), waiting)
 
     @property
     def skills(self) -> tuple[str, ...]:
@@ -498,7 +521,8 @@ class Agent:
         Args:
             state: The State to continue. The first Agent that thinks on a State owns it.
             tools: Which of this Agent's tools the model may see this turn. ``None`` shows all of them,
-                ``[]`` shows none.
+                ``[]`` shows none. Takes the items of ``tools=`` and the values of ``tool_map``, so
+                ``[t for t in agent.tool_map.values() if t.read_only]`` works.
 
         Raises:
             ValueError: The State is finished, still has tool calls waiting for results, belongs to another
@@ -1324,8 +1348,9 @@ class Agent:
         items = _as_tuple(tools, "think(tools", "agent.think(state, tools=[read_file])")
         if not items:
             return ()
-        mcp_specs = [t.spec for t in self._chosen_mcp_tools(i for i in items if isinstance(i, (MCP, MCPToolRef)))]
-        items = tuple(i for i in items if not isinstance(i, (MCP, MCPToolRef)))
+        mcp_items = (MCP, MCPToolRef, MCPTool)
+        mcp_specs = [t.spec for t in self._chosen_mcp_tools(i for i in items if isinstance(i, mcp_items))]
+        items = tuple(i for i in items if not isinstance(i, mcp_items))
         for item in items:
             if isinstance(item, Agent):
                 raise ValueError(
@@ -1351,11 +1376,13 @@ class Agent:
             specs.append(mine.spec)
         return tuple(specs + mcp_specs)
 
-    def _chosen_mcp_tools(self, items: Iterable[MCP | MCPToolRef]) -> list[MCPTool]:
-        """``think(tools=[gh, gh.search_code])``: the connected tools these stand for."""
+    def _chosen_mcp_tools(self, items: Iterable[MCP | MCPToolRef | MCPTool]) -> list[MCPTool]:
+        """``think(tools=[gh, gh.search_code, agent.tool_map["gh__x"]])``: the connected tools these stand for."""
         chosen: list[MCPTool] = []
         for item in items:
-            if isinstance(item, MCPToolRef):
+            if isinstance(item, MCPTool):
+                matches = [item] if self._mcp_tools.get(item.name) is item else []
+            elif isinstance(item, MCPToolRef):
                 found = self._mcp_tools.get(item.name)
                 matches = [found] if found is not None and found.server is item.server else []
             else:

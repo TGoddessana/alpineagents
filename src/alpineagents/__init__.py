@@ -16,7 +16,7 @@ from .errors import (
 )
 from .human import Human
 from .loop import Loop, adefault_loop, default_loop, loop
-from .mcp_tools import MCP
+from .mcp_tools import MCP, MCPTool
 from .models import Anthropic, Model, OpenAICompatible
 from .reporter import Reporter
 from .state import State
@@ -52,6 +52,7 @@ __all__ = [
     "compact_if_full",
     "acompact_if_full",
     "MCP",
+    "MCPTool",
     "CompactIfFull",
     # Roles and implementations
     "Model",
