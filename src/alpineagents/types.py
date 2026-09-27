@@ -398,7 +398,8 @@ class HistoryEntry:
     call: ToolCall | None = None
     """The tool call, for ``tool_result``, ``denied`` and errors raised by a tool."""
     error: BaseException | None = None
-    """The exception, for ``error`` entries."""
+    """The exception, for ``error`` entries. For a ``tool_result`` made from a ``ToolError``, that ``ToolError``
+    (its ``__cause__`` is the original exception when ``exception_handler`` made it). Not saved by a store."""
     late: bool = False
     """``True`` for a tool result that arrived after its call was already closed."""
     is_error: bool = False

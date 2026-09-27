@@ -72,6 +72,7 @@ nav:
       - Save and resume: guides/resume.md
       - Structured output: guides/structured-output.md
       - Tools that use the State: guides/tool-state.md
+      - Let the model handle tool failures: guides/tool-failures.md
       - Context size: guides/context-size.md
       - Models: guides/models.md
       - Progress and questions: guides/progress.md

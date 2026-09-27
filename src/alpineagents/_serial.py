@@ -6,7 +6,8 @@ Only State calls these. The formats are the saved formats, so a change here need
 - ``plain`` is strict: a value JSON cannot hold (a set, an object, a non-string key, NaN) is a ``TypeError`` that
   names where it was. ``answer`` also turns Pydantic models and dataclasses into dicts first (``ask`` and
   ``finish`` answers), so they come back as dicts.
-- ``HistoryEntry.error`` (the exception object) is not saved; the entry's text keeps its type and message.
+- ``HistoryEntry.error`` (the exception object) is not saved. An ``error`` entry's text keeps its type and message;
+  a ``tool_result`` from a ``ToolError`` keeps the message the model saw.
 """
 
 from __future__ import annotations

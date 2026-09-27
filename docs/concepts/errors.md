@@ -31,7 +31,8 @@ For `ProviderError` and `MCPConnectionError`, the original exception is in `__ca
 ## Nothing is swallowed
 
 Exceptions from tools, from the loop body and from `until` functions propagate as they are. alpineagents does not
-catch them or turn them into results. To let the model handle a failure, return it from the tool as a string. See
+catch them or turn them into results, with one exception you choose: to let the model handle a failure, raise
+`ToolError` in the tool, or name the exceptions in the tool's `exception_handler`. See
 [Tools](tools.md#when-a-call-goes-wrong).
 
 ## The State after an exception

@@ -25,7 +25,7 @@ from pydantic_core import to_jsonable_python
 # typing_extensions is a required dependency of pydantic.
 from typing_extensions import is_typeddict
 
-from .errors import ToolInputError, fix_message
+from .errors import ToolError, ToolInputError, fix_message
 from .state import State
 from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
 
@@ -218,6 +218,92 @@ def _check_stdlib_typeddict(tool_name: str, param: str, tp: Any) -> None:
             stack.extend(f.annotation for f in cur.model_fields.values())
 
 
+_HANDLER_EXAMPLE = (
+    "def http_errors(error: httpx.HTTPError) -> str:\n"
+    '    return f"request failed: {error}"\n'
+    "\n"
+    "@tool(exception_handler=http_errors)\n"
+    "def fetch_url(url: str) -> str: ..."
+)
+
+
+def _handled_types(handler: Any, tool_name: str) -> tuple[type[Exception], ...]:
+    """Checks an ``exception_handler`` and returns the exception types it takes, read from the type hint of its
+    one parameter (a class or a union of classes, each a subclass of ``Exception``)."""
+    where = f"Tool {tool_name}: exception_handler={handler!r}"
+    if not callable(handler) or isinstance(handler, type):
+        raise TypeError(
+            fix_message(
+                f"{where} is not a function",
+                "Pass a function that takes the exception and returns the message for the model",
+                _HANDLER_EXAMPLE,
+            )
+        )
+    if inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(getattr(handler, "__call__", None)):
+        raise TypeError(
+            fix_message(
+                f"{where} is async",
+                "Write it as a regular def. It only turns the exception into a message",
+                _HANDLER_EXAMPLE,
+            )
+        )
+    try:
+        params = list(inspect.signature(handler).parameters.values())
+    except (TypeError, ValueError):
+        params = []
+    required = [
+        p for p in params
+        if p.default is inspect.Parameter.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    if len(required) != 1 or required[0].kind is inspect.Parameter.KEYWORD_ONLY:
+        raise TypeError(
+            fix_message(
+                f"{where} must take exactly one argument, the exception",
+                "Give it one parameter, with a type hint naming the exceptions it handles",
+                _HANDLER_EXAMPLE,
+            )
+        )
+    param = required[0]
+    target = handler if inspect.isfunction(handler) or inspect.ismethod(handler) else type(handler).__call__
+    try:
+        hint = get_type_hints(target).get(param.name)
+    except NameError as e:
+        raise TypeError(
+            fix_message(
+                f"{where}: cannot resolve the type hint of {param.name}: {e}",
+                "Check that the exception types are imported in the handler's module",
+            )
+        ) from e
+    if hint is None:
+        raise TypeError(
+            fix_message(
+                f"{where} has no type hint on its parameter {param.name}",
+                "Annotate it with the exceptions it handles. Use Exception to handle every exception",
+                _HANDLER_EXAMPLE,
+            )
+        )
+    types_ = get_args(hint) if get_origin(hint) in (Union, UnionType) else (hint,)
+    for tp in types_:
+        if not (isinstance(tp, type) and issubclass(tp, BaseException)):
+            raise TypeError(
+                fix_message(
+                    f"{where}: the type hint of {param.name} must name exception classes (got: {hint!r})",
+                    "Use an exception class, or several joined with |",
+                    "def file_errors(error: FileNotFoundError | PermissionError) -> str: ...",
+                )
+            )
+        if not issubclass(tp, Exception):
+            raise TypeError(
+                fix_message(
+                    f"{where}: {tp.__name__} cannot be handled. KeyboardInterrupt, SystemExit and other "
+                    "exceptions that are not Exception subclasses always stop the run",
+                    "Handle subclasses of Exception only",
+                    _HANDLER_EXAMPLE,
+                )
+            )
+    return tuple(types_)
+
+
 _MISUSE_KIND_TEXT = {
     "missing": "required argument is missing",
     "extra_forbidden": "unknown argument",
@@ -248,6 +334,9 @@ class Tool:
     descriptions become property descriptions, and parameters with defaults are optional."""
     is_async: bool
     """``True`` if the original function is ``async def``."""
+    exception_handler: Callable[[Any], str] | None
+    """Turns the exceptions named in its parameter's type hint into error results the model sees. ``None`` if not
+    given."""
     # Internal: the original function, whether it is a method in a class (first parameter is ``self`` with no
     # type hint), and the bound object (None if unbound).
     fn: Callable[..., Any]
@@ -261,6 +350,7 @@ class Tool:
         name: str | None = None,
         description: str | None = None,
         parallel: bool = True,
+        exception_handler: Callable[[Any], str] | None = None,
     ) -> None:
         """Usually created with ``@tool``. A bad tool raises here, before any model call.
 
@@ -269,10 +359,12 @@ class Tool:
             name: The tool name. Must match ``[A-Za-z0-9_-]{1,64}``. Defaults to the function name.
             description: Defaults to the docstring's first paragraph.
             parallel: ``False`` runs the tool alone after the turn's other calls finish.
+            exception_handler: See ``tool``.
 
         Raises:
-            TypeError: The name is invalid, a parameter has no type hint or an unsupported type, or the function
-                takes ``*args``, ``**kwargs`` or positional-only parameters.
+            TypeError: The name is invalid, a parameter has no type hint or an unsupported type, the function
+                takes ``*args``, ``**kwargs`` or positional-only parameters, or ``exception_handler`` is not a
+                function with one parameter whose type hint names ``Exception`` subclasses.
         """
         # - If the first parameter is named ``self`` with no type hint, it is a method (``needs_self=True``, left
         #   out of the schema).
@@ -289,6 +381,14 @@ class Tool:
         self.parallel = parallel
         self.is_async = inspect.iscoroutinefunction(fn)
         self.bound_to = None
+        # The options as given, for copy.
+        self._options: dict[str, Any] = {
+            "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
+        }
+        self.exception_handler = exception_handler
+        self._handles: tuple[type[Exception], ...] = (
+            () if exception_handler is None else _handled_types(exception_handler, self.name)
+        )
 
         doc_description, arg_docs = _parse_docstring(fn.__doc__)
         self.description = description if description is not None else doc_description
@@ -429,14 +529,78 @@ class Tool:
         """Fills State parameters (``state``) into ``prepare``'s result and calls the original function.
 
         Also fills ``self`` if bound. Returns the return value for a sync function, or a coroutine for
-        ``async def`` (awaiting it is Agent's job). Exceptions the tool raises propagate as is.
+        ``async def`` (awaiting it is Agent's job). An exception that ``exception_handler`` takes becomes a
+        ``ToolError`` with the handler's message (the original in ``__cause__``); any other exception propagates
+        as is.
         """
         full_kwargs = dict(kwargs)
         for state_param in self._state_params:
             full_kwargs[state_param] = state
-        if self.needs_self:
-            return self.fn(self.bound_to, **full_kwargs)
-        return self.fn(**full_kwargs)
+        args = (self.bound_to,) if self.needs_self else ()
+        if self.is_async:
+            coroutine = self.fn(*args, **full_kwargs)
+            return self._handle_async(coroutine) if self._handles else coroutine
+        try:
+            return self.fn(*args, **full_kwargs)
+        except Exception as error:
+            self._handle(error)
+            raise
+
+    async def _handle_async(self, coroutine: Any) -> Any:
+        try:
+            return await coroutine
+        except Exception as error:
+            self._handle(error)
+            raise
+
+    def _handle(self, error: Exception) -> None:
+        """Called in an ``except`` block. Raises ``ToolError`` if ``exception_handler`` takes ``error``; returns
+        otherwise, and the caller re-raises ``error``. A ``ToolError`` is never passed to the handler."""
+        if isinstance(error, ToolError) or not isinstance(error, self._handles):
+            return
+        assert self.exception_handler is not None
+        message = self.exception_handler(error)
+        if not isinstance(message, str) or not message.strip():
+            raise TypeError(
+                fix_message(
+                    f"Tool {self.name}: exception_handler {self.exception_handler!r} returned {message!r} for "
+                    f"{type(error).__name__}, not a message",
+                    "Return a non-empty string, the message the model is told. To let the exception stop the run, "
+                    "raise it instead",
+                    _HANDLER_EXAMPLE,
+                )
+            ) from error
+        raise ToolError(message) from error
+
+    def copy(self, **changes: Any) -> Tool:
+        """Returns a new Tool with some options changed. The original does not change, and a bound tool stays bound.
+
+        Args:
+            **changes: ``name``, ``description``, ``parallel`` or ``exception_handler``, as in ``@tool``.
+
+        Returns:
+            The new Tool.
+
+        Raises:
+            TypeError: A name in ``changes`` is not an option, or a new value fails the same checks as ``@tool``.
+
+        Example:
+            ```python
+            strict_fetch = fetch_url.copy(exception_handler=None)  # every exception stops the run
+            ```
+        """
+        unknown = [key for key in changes if key not in self._options]
+        if unknown:
+            raise TypeError(
+                fix_message(
+                    f"copy() got unknown options: {', '.join(unknown)}",
+                    f"Options you can change: {', '.join(self._options)}",
+                    "fetch_url.copy(exception_handler=None)",
+                )
+            )
+        new = Tool(self.fn, **{**self._options, **changes})
+        new.bound_to = self.bound_to
+        return new
 
     @staticmethod
     def format_result(value: Any) -> str:
@@ -478,7 +642,11 @@ class Tool:
 def tool(fn: Callable[..., Any], /) -> Tool: ...
 @overload
 def tool(
-    *, name: str | None = None, description: str | None = None, parallel: bool = True
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    parallel: bool = True,
+    exception_handler: Callable[[Any], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -489,6 +657,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     parallel: bool = True,
+    exception_handler: Callable[[Any], str] | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Turns a function or method into a tool the model can call.
 
@@ -497,7 +666,11 @@ def tool(
     current State. The return value is sent to the model: a ``str`` as is, ``None`` as ``(done)``, anything else
     as JSON.
 
-    Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...)``).
+    Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...,
+    exception_handler=...)``).
+
+    An exception from the tool stops the run, because it is usually a bug. For a failure the model should see and
+    handle, raise ``ToolError("message")``, or name the exceptions in ``exception_handler``.
 
     Example:
         ```python
@@ -516,13 +689,27 @@ def tool(
         name: The tool name. Must match ``[A-Za-z0-9_-]{1,64}``. Defaults to the function name.
         description: Defaults to the docstring's first paragraph.
         parallel: ``False`` runs the tool alone after the turn's other calls finish.
+        exception_handler: A function that takes one exception and returns the message the model is told. The
+            type hint of its parameter names the exceptions it takes (``httpx.HTTPError``, or
+            ``FileNotFoundError | PermissionError``); those become error results and the run continues. Other
+            exceptions stop the run. To let one of them stop the run anyway, raise it in the handler.
+
+            ```python
+            def http_errors(error: httpx.HTTPError) -> str:
+                return f"request failed: {error}"
+
+            @tool(exception_handler=http_errors)
+            def fetch_url(url: str) -> str:
+                return httpx.get(url).raise_for_status().text
+            ```
 
     Returns:
         A ``Tool``, or a decorator that makes one when options are given.
 
     Raises:
-        TypeError: ``@tool`` is applied twice or to something that is not a function, or the function cannot be a
-            tool (see ``Tool``).
+        TypeError: ``@tool`` is applied twice or to something that is not a function, the function cannot be a
+            tool, or ``exception_handler`` is not a function with one parameter whose type hint names
+            ``Exception`` subclasses (see ``Tool``).
     """
     if fn is not None:
         if isinstance(fn, Tool):
@@ -539,10 +726,12 @@ def tool(
                     "Apply @tool to a plain function or method",
                 )
             )
-        return Tool(fn, name=name, description=description, parallel=parallel)
+        return Tool(fn, name=name, description=description, parallel=parallel, exception_handler=exception_handler)
 
     def decorate(inner: Callable[..., Any]) -> Tool:
-        return tool(inner, name=name, description=description, parallel=parallel)
+        return tool(
+            inner, name=name, description=description, parallel=parallel, exception_handler=exception_handler
+        )
 
     return decorate
 

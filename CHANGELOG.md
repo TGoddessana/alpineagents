@@ -4,6 +4,31 @@ All notable changes to alpineagents are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/)
 (while the version is 0.x, a minor release may change the API).
 
+## [Unreleased]
+
+### Added
+
+- **Error results from tools.** A tool can report a failure the model should see and handle, such as a missing file
+  or an HTTP 404, without stopping the run. Any other exception from a tool still stops the run. See the
+  [Let the model handle tool failures](https://tgoddessana.github.io/alpineagents/guides/tool-failures/) guide.
+  - `ToolError("message")`: raise it in a tool. The model gets the message as the call's error result.
+  - `@tool(exception_handler=...)`: a function that takes one exception and returns the message for the model. The
+    type hint of its parameter names the exceptions it takes (`httpx.HTTPError`,
+    `FileNotFoundError | PermissionError`), so one handler serves every tool that raises them.
+  - `Tool.copy(...)`: a tool with some `@tool` options changed, for example `fetch_url.copy(exception_handler=None)`
+    for an Agent where every failure should stop the run.
+  - The `tool_result` history entry of such a call has `is_error=True`, and its `error` holds the `ToolError`
+    (with the handled exception in `__cause__`).
+
+### Changed
+
+- `print(state)` shows error results as `tool_result fetch_url (error): HTTP 404: ...` instead of their size.
+
+### Fixed
+
+- `OpenAICompatible` now starts the text of an error result with `Error: `. Its tool message has no error flag, so the
+  model could not tell a denied, interrupted or failed call from an ordinary result.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added

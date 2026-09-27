@@ -713,7 +713,8 @@ class State:
         """Several lines summarizing history for humans. One line per entry; long content is shortened.
 
         E.g. ``[turn 0] user: Find the bug`` / ``[turn 1] reply: read_file(path="main.py")`` /
-        ``[turn 1] tool_result read_file: 1.2KB`` / ``done: is_answered (2 turns)``
+        ``[turn 1] tool_result read_file: 1.2KB`` / ``[turn 1] tool_result fetch_url (error): HTTP 404: …`` /
+        ``done: is_answered (2 turns)``
         """
         with self._lock:
             lines = [_describe_entry(entry) for entry in self._history]
@@ -1165,11 +1166,14 @@ class State:
         self._deferred = []
         return dropped
 
-    def _record_tool_result(self, call: ToolCall, content: str, *, is_error: bool = False) -> None:
+    def _record_tool_result(
+        self, call: ToolCall, content: str, *, is_error: bool = False, error: BaseException | None = None
+    ) -> None:
         """Record the result of one call. Safe to call from multiple threads.
 
         - ``ValueError`` if ``call`` is not in ``pending_calls`` (compared by id).
-        - ``"tool_result"`` in history (content, call=call). Removed from ``pending_calls``.
+        - ``"tool_result"`` in history (content, call=call, error=error: the ``ToolError`` behind an error result).
+          Removed from ``pending_calls``.
         - Results collect in this turn's buffer. When the last call closes (``pending_calls`` becomes empty),
           one user message (the ``ToolResultBlock``s, **in the order the model requested them**) goes into the
           context, followed by the deferred user messages and notices in arrival order.
@@ -1180,10 +1184,12 @@ class State:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot record a result for a call that is not pending: {shown}")
             stored = self._pending[index]
-            self._append("tool_result", content, call=stored, is_error=is_error)
+            self._append("tool_result", content, call=stored, is_error=is_error, error=error)
             self._resolve(index, content, is_error=is_error)
 
-    def _record_late_result(self, call: ToolCall, content: str, *, is_error: bool = False) -> None:
+    def _record_late_result(
+        self, call: ToolCall, content: str, *, is_error: bool = False, error: BaseException | None = None
+    ) -> None:
         """The result of a sync tool that was closed without waiting on interrupt arrives later (called from the
         worker thread).
 
@@ -1197,10 +1203,10 @@ class State:
         with self._lock:
             index = next((i for i, pending in enumerate(self._pending) if pending is call), None)
             if index is not None:
-                self._append("tool_result", content, call=call, is_error=is_error)
+                self._append("tool_result", content, call=call, is_error=is_error, error=error)
                 self._resolve(index, content, is_error=is_error)
                 return
-            self._append("tool_result", content, call=call, late=True, is_error=is_error)
+            self._append("tool_result", content, call=call, late=True, is_error=is_error, error=error)
             self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=content))
 
     def _close_pending(self, error: BaseException) -> list[ToolCall]:
@@ -1401,6 +1407,8 @@ def _describe_entry(entry: HistoryEntry) -> str:
     if kind == "tool_result":
         name = entry.call.name if entry.call else "?"
         late = " (late)" if entry.late else ""
+        if entry.is_error:
+            return f"{head} {name}{late} (error): {_short(content)}"
         return f"{head} {name}: {_size(str(content))}{late}"
     if kind == "denied":
         name = entry.call.name if entry.call else "?"

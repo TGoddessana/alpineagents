@@ -16,6 +16,7 @@ Terms in the order you meet them.
 | Tool call | A request in the model's reply to run one tool with arguments. A `ToolCall` object |
 | Pending call | A tool call that has no result yet. Listed in `state.pending_calls` |
 | Tool result | The string the model gets for a tool call |
+| Error result | A tool result the model is told is a failure: from `ToolError`, an `exception_handler`, invalid arguments, `state.deny`, or a call closed by an exception. The run continues |
 | Notice | A message from your code to the model, added with `add_notice`. It starts with `[notice] ` |
 | Compaction | Replacing the context with the task and a summary, to make it smaller. History keeps everything |
 | Block | A function that takes `(agent, state)` and does one step of a turn, such as `compact_if_full` |

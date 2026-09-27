@@ -19,3 +19,5 @@ Concepts: [Errors and interruptions](../concepts/errors.md).
 ::: alpineagents.MCPConnectionError
 
 ::: alpineagents.ResumeWarning
+
+::: alpineagents.ToolError

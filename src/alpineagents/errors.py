@@ -17,6 +17,7 @@ __all__ = [
     "AuthError",
     "OutputError",
     "NoHumanError",
+    "ToolError",
     "ToolInputError",
     "ResumeWarning",
     "fix_message",
@@ -87,6 +88,56 @@ class ResumeWarning(UserWarning):
     def __reduce__(self) -> Any:
         # args holds only the message, so the default would rebuild without changes (pickle, copy).
         return (type(self), (str(self), self.changes))
+
+
+class ToolError(Exception):
+    """Raised by a tool for a failure the model should see and handle, such as a missing file or an HTTP 404.
+
+    The model gets the message as the call's error result, and the run continues. Any other exception from a tool
+    stops the run, because it is usually a bug. To turn a library's exceptions into error results without
+    catching them in every tool, use ``@tool(exception_handler=...)``.
+
+    Does not inherit from ``AlpineAgentsError``: tools raise it, not alpineagents.
+
+    Example:
+        ```python
+        @tool
+        def fetch_url(url: str) -> str:
+            \"\"\"Fetch a web page\"\"\"
+            response = httpx.get(url)
+            if response.status_code >= 400:
+                raise ToolError(f"HTTP {response.status_code}: {url}")
+            return response.text
+        ```
+    """
+
+    def __init__(self, message: str) -> None:
+        """
+        Args:
+            message: What the model is told. Not empty.
+
+        Raises:
+            TypeError: ``message`` is not a string.
+            ValueError: ``message`` is empty or whitespace only.
+        """
+        example = 'raise ToolError(f"HTTP {status}: {url}")'
+        if not isinstance(message, str):
+            raise TypeError(
+                fix_message(
+                    f"ToolError takes a string, the message the model is told (got: {message!r})",
+                    "Pass the message as a string",
+                    example,
+                )
+            )
+        if not message.strip():
+            raise ValueError(
+                fix_message(
+                    "ToolError got an empty message. Providers reject empty tool results",
+                    "Say what went wrong, so the model can do something about it",
+                    example,
+                )
+            )
+        super().__init__(message)
 
 
 class ToolInputError(Exception):

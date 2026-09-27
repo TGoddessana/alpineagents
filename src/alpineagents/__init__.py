@@ -12,6 +12,7 @@ from .errors import (
     ProviderError,
     RateLimitError,
     ResumeWarning,
+    ToolError,
 )
 from .human import Human
 from .loop import Loop, adefault_loop, default_loop, loop
@@ -84,4 +85,5 @@ __all__ = [
     "NoHumanError",
     "MCPConnectionError",
     "ResumeWarning",
+    "ToolError",
 ]

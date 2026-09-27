@@ -40,6 +40,10 @@ __all__ = ["OpenAICompatible"]
 #: two).
 _EMPTY_CONTENT_PLACEHOLDER = "(empty reply)"
 
+#: Put before an error result's text. OpenAI's tool message has no error flag (Anthropic's ``is_error``), so without it
+#: the model could not tell a failure from an ordinary result.
+_ERROR_PREFIX = "Error: "
+
 #: Name pattern for OpenAI "reasoning" (o-series) models. These models reject ``max_tokens`` and
 #: require ``max_completion_tokens``.
 _REASONING_MODEL_NAME = re.compile(r"^o\d")
@@ -264,7 +268,8 @@ class OpenAICompatible(Model):
           ``RawBlock(provider="openai_compatible")`` is merged into that dict as is (e.g.
           ``{"reasoning_content": ...}``). RawBlocks of other providers are dropped.
         - user ``Message``: one ``{"role": "tool", "tool_call_id", "content"}`` per ``ToolResultBlock`` in block
-          order, then the remaining text as one ``{"role": "user", "content": text}``.
+          order (an error result's content starts with ``"Error: "``, since the tool message has no error flag),
+          then the remaining text as one ``{"role": "user", "content": text}``.
         - ``tools`` -> ``[{"type": "function", "function": {"name", "description", "parameters"}}]`` (omitted if
           empty). ``tool_choice="none"`` only when there are tools.
         - ``max_tokens`` and ``temperature`` only when not None. For o-series names, ``max_completion_tokens``
@@ -445,7 +450,8 @@ class OpenAICompatible(Model):
         text_parts: list[str] = []
         for block in message.content:
             if isinstance(block, ToolResultBlock):
-                out.append({"role": "tool", "tool_call_id": block.call_id, "content": block.content})
+                content = _ERROR_PREFIX + block.content if block.is_error else block.content
+                out.append({"role": "tool", "tool_call_id": block.call_id, "content": content})
             elif isinstance(block, TextBlock):
                 text_parts.append(block.text)
         text = "".join(text_parts)
