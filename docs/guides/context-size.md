@@ -9,7 +9,7 @@ A long run fills the model's context window. When a request is larger than the w
 | --- | --- | --- |
 | `compact_if_full(agent, state)` | Only when the context is more than 60% full | The task and a summary |
 | `agent.compact(state)` | Yes | The task and a summary |
-| `state.clear_tool_results(keep_last=5)` | No | Every message, with old tool results replaced by `(cleared: kept in history)` |
+| `state.clear_tool_results(keep_last=5)` | No | Every message, with old tool results (images included) replaced by `(cleared: kept in history)` |
 | `state.start_from(summary)` | No | The task and your summary |
 
 All four change only the context. `state.history` keeps everything.
@@ -30,7 +30,7 @@ All four change only the context. `state.history` keeps everything.
 
 | Property | Value |
 | --- | --- |
-| `state.context_tokens` | Estimated size of the context, in tokens |
+| `state.context_tokens` | Estimated size of the context, in tokens. Each image in a tool result counts as 1,600 |
 | `state.context_used` | `context_tokens` divided by the model's context window |
 
 The terminal shows each compaction under the next turn header:

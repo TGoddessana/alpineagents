@@ -17,12 +17,12 @@ Terms in the order you meet them.
 | Tool call | A request in the model's reply to run one tool with arguments. A `ToolCall` object |
 | Pending call | A tool call that has no result yet. Listed in `state.pending_calls` |
 | Tool hint | What a tool does, for your code: `read_only`, `destructive`, `idempotent`, `open_world`. The model does not see it |
-| Tool result | The string the model gets for a tool call |
+| Tool result | What the model gets for a tool call: a string, or text and images when the tool returned an `Image` |
 | Error result | A tool result the model is told is a failure: from `ToolError`, an `exception_handler`, invalid arguments, `state.deny`, or a call closed by an exception. The run continues |
 | Notice | A message from your code to the model, added with `add_notice`. It starts with `[notice] ` |
 | Compaction | Replacing the context with the task and a summary, to make it smaller. History keeps everything |
 | Block | A function that takes `(agent, state)` and does one step of a turn, such as `compact_if_full` |
-| Content block | A part of a message: text (`TextBlock`), a tool call (`ToolCall`) or a tool result. Not the same as a block |
+| Content block | A part of a message: text (`TextBlock`), a tool call (`ToolCall`) or a tool result. A tool result can hold `TextBlock`s and `Image`s. Not the same as a block |
 | Model | An adapter that sends a request to a provider and returns a `Reply`. See [Models](../guides/models.md) |
 | Reporter | An object that receives progress events. See [Progress and questions](../guides/progress.md) |
 | Human | An object that answers `ask_human`. See [Progress and questions](../guides/progress.md) |

@@ -95,6 +95,9 @@ Nothing that failed to save is lost from the State: the next save writes it.
   `FileStore` objects for the same folder count as the same store.
 - One process at a time runs a given State. Two processes running the same id at once are not supported.
 - `FileStore` files are readable only by their owner, because history holds tool results and messages.
+- Images in tool results are saved in the files as base64, so a run with many screenshots makes large files.
+- A State saved by a newer alpineagents may not load in an older one: `store.load` raises `ValueError` and says to
+  upgrade. States saved by older versions load.
 
 ## List and delete
 

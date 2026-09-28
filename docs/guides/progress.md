@@ -61,7 +61,7 @@ agent = Agent(model="claude-sonnet-5", reporter=LogReporter())
 | `on_text(state, chunk)` | Each piece of model text as it streams in |
 | `on_think_end(state, reply)` | Right after the reply ends |
 | `on_tool_start(state, call)` | Right before a tool runs |
-| `on_tool_end(state, call, result, outcome)` | Right after a tool call ends. `outcome.kind` says how: `"done"`, `"error"`, `"denied"`, ... |
+| `on_tool_end(state, call, result, outcome)` | Right after a tool call ends. `outcome.kind` says how: `"done"`, `"error"`, `"denied"`, ... `result` is a string, or a tuple of text and images for a tool that returned an [`Image`](../concepts/tools.md#images) (`result_text(result)` makes it one string) |
 | `on_context_change(state, change)` | The context was compacted, restarted with `start_from`, cleared or rolled back |
 | `on_model_event(state, event)` | The Model reported something outside the reply, such as a fallback |
 | `on_run_end(state, error)` | `run` ends, always. `error` is `None` on a normal finish |
