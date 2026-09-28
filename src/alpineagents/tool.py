@@ -1,7 +1,7 @@
 """Tools: the ``Tool`` base class, and ``@tool``, which makes a ``FunctionTool`` from a Python function or method.
 
 The contract is in ARCHITECTURE.md "Tool contract". This module does schema generation, argument validation,
-State injection and result-to-string conversion. Execution order, threads and exception handling belong to Agent
+State injection and result conversion. Execution order, threads and exception handling belong to Agent
 (``_runner.py``).
 """
 
@@ -27,7 +27,7 @@ from typing_extensions import is_typeddict
 
 from .errors import ToolError, ToolInputError, fix_message
 from .state import State
-from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, ToolSpec
+from .types import INVALID_ARGS_KEY, TRUNCATED_ARGS_MESSAGE, Image, TextBlock, ToolResultContent, ToolSpec
 
 __all__ = [
     "tool",
@@ -393,7 +393,8 @@ class Tool:
 
     A subclass calls ``super().__init__(...)`` with the name, description and input schema, and implements ``run``.
     ``run`` gets the model's arguments as a dict and returns the result, which the model gets as ``@tool`` results
-    are: a ``str`` as is, ``None`` as ``(done)``, anything else as JSON. It signals with exceptions:
+    are: a ``str`` as is, ``None`` as ``(done)``, an ``Image`` (or a list with one) as an image, anything else as
+    JSON. It signals with exceptions:
 
     - ``ToolInputError("...")``: the arguments are wrong. The model gets ``(input error: ...)``.
     - ``ToolError("...")``: a failure the model should handle. The model gets it as an error result.
@@ -518,7 +519,8 @@ class Tool:
             state: The State of the run.
 
         Returns:
-            The result: a ``str`` as is, ``None`` as ``(done)``, anything else as JSON.
+            The result: a ``str`` as is, ``None`` as ``(done)``, an ``Image`` or a list of text and ``Image``s as
+            they are, anything else as JSON.
 
         Raises:
             ToolInputError: The arguments are wrong. The model gets ``(input error: ...)``.
@@ -545,10 +547,13 @@ def _check_input_schema(tool_name: str, schema: Any) -> dict[str, Any]:
     return dict(schema)
 
 
-def format_result(value: Any) -> str:
-    """Converts what ``run`` returned into the string sent to the model.
+def format_result(value: Any) -> ToolResultContent:
+    """Converts what ``run`` returned into what is sent to the model.
 
     - ``str`` as is, ``None`` as ``"(done)"``
+    - ``Image`` as ``(image,)``. A list or tuple with an ``Image`` in it as a tuple of blocks in the same order:
+      each ``Image`` as is, each ``str`` as a ``TextBlock`` (empty ones dropped), anything else as a ``TextBlock``
+      of its JSON
     - Anything else (dict, list, numbers, bool, dataclass, Pydantic model, combinations of these) goes
       through ``pydantic_core.to_jsonable_python`` and then ``json.dumps(..., ensure_ascii=False)``
     - If it cannot become JSON, ``TypeError`` (fix: return a str, dict, list, dataclass or Pydantic model).
@@ -558,16 +563,45 @@ def format_result(value: Any) -> str:
         return DONE
     if isinstance(value, str):
         return value
+    if isinstance(value, Image):
+        return (value,)
+    if isinstance(value, (list, tuple)) and any(isinstance(item, Image) for item in value):
+        blocks: list[TextBlock | Image] = []
+        for item in value:
+            if isinstance(item, Image):
+                blocks.append(item)
+            elif item is None or item == "":
+                continue
+            else:
+                blocks.append(TextBlock(item if isinstance(item, str) else _to_json(item)))
+        return tuple(blocks)
+    return _to_json(value)
+
+
+def _to_json(value: Any) -> str:
     try:
         jsonable = to_jsonable_python(value)
         return json.dumps(jsonable, ensure_ascii=False)
     except Exception as e:
-        raise TypeError(
-            fix_message(
-                f"Cannot convert tool return value {value!r} to JSON",
-                "Return a str, dict, list, dataclass or Pydantic model",
-            )
-        ) from e
+        hint = (
+            "Return the Image itself, or a list of text and Images (not an Image inside a dict)"
+            if _has_image(value)
+            else "Return a str, dict, list, dataclass or Pydantic model"
+        )
+        raise TypeError(fix_message(f"Cannot convert tool return value {value!r} to JSON", hint)) from e
+
+
+def _has_image(value: Any, depth: int = 3) -> bool:
+    """Whether an ``Image`` is inside ``value`` (a few levels of dicts, lists and tuples), for the error hint."""
+    if isinstance(value, Image):
+        return True
+    if depth == 0:
+        return False
+    if isinstance(value, Mapping):
+        return any(_has_image(item, depth - 1) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_has_image(item, depth - 1) for item in value)
+    return False
 
 
 class FunctionTool(Tool):
@@ -922,8 +956,8 @@ def tool(
 
     Type hints become the input schema and the docstring becomes the description. The ``Args:`` section of the
     docstring describes each parameter. A parameter typed ``State`` is hidden from the model and receives the
-    current State. The return value is sent to the model: a ``str`` as is, ``None`` as ``(done)``, anything else
-    as JSON.
+    current State. The return value is sent to the model: a ``str`` as is, ``None`` as ``(done)``, an ``Image``
+    (or a list of text and ``Image``s, such as ``["Page loaded", Image(png)]``) as an image, anything else as JSON.
 
     Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...,
     exception_handler=..., read_only=..., destructive=..., idempotent=..., open_world=...)``).

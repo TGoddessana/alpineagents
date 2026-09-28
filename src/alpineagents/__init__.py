@@ -27,6 +27,7 @@ from .tool import FunctionTool, Tool, tool
 from .types import (
     ContextChange,
     HistoryEntry,
+    Image,
     Message,
     ModelEvent,
     Price,
@@ -78,6 +79,7 @@ __all__ = [
     "ModelEvent",
     "ToolOutcome",
     "SavedState",
+    "Image",
     # Errors
     "AlpineAgentsError",
     "ProviderError",

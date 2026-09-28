@@ -43,6 +43,12 @@ about itself, so do not trust them more than the server. See
 - A tool name that collides with another tool, or a picked tool the server does not have, raises `ValueError` when
   the server connects, before the first `think`.
 
+## Results
+
+The server's text comes to the model as text, and its PNG, JPEG, GIF and WebP images as images (see
+[Images](../concepts/tools.md#images)). Other content, such as audio or an SVG image, becomes a short note saying it
+was not shown.
+
 ## Errors
 
 | Situation | What happens |

@@ -25,6 +25,7 @@ from typing import Any
 
 from .errors import MCPConnectionError, ToolError, ToolInputError, fix_message
 from .tool import DONE, Tool, hint_values
+from .types import Image
 
 __all__ = ["MCP", "MCPTool", "MCPToolRef", "SEPARATOR"]
 
@@ -388,13 +389,14 @@ class MCPTool(Tool):
             open_world=open_world,
         )
 
-    async def run(self, args: dict[str, Any], state: Any) -> str:
+    async def run(self, args: dict[str, Any], state: Any) -> str | list[str | Image]:
         """Calls the tool on the server. Missing required arguments are an input error; the server checks the
         rest. An error the server reports (``isError``, or an error response) becomes an error result; a lost
         connection raises ``MCPConnectionError``.
 
-        Text blocks are joined by newlines, other blocks become short placeholders, ``structured_content`` is sent
-        as JSON when there are no blocks, and ``(done)`` when there is nothing."""
+        Text blocks are joined by newlines, image blocks become ``Image``s (the result is then a list of text and
+        images), other blocks become short placeholders, ``structured_content`` is sent as JSON when there are no
+        blocks, and ``(done)`` when there is nothing."""
         missing = [key for key in self.input_schema.get("required", ()) if key not in args]
         if missing:
             raise ToolInputError(f"missing required arguments: {', '.join(missing)}")
@@ -402,8 +404,11 @@ class MCPTool(Tool):
         result = await asyncio.wrap_future(_Loop.submit(self.server._call(self.remote_name, args)))
         if isinstance(result, _ErrorResult):
             raise ToolError(result.text)
-        parts = [_content_text(block) for block in (result.content or ())]
-        text = "\n".join(part for part in parts if part)
+        parts = [_content_part(block) for block in (result.content or ())]
+        if any(isinstance(part, Image) for part in parts) and not getattr(result, "is_error", False):
+            return _join_text(parts)
+        # An error result is text: its images become a note.
+        text = "\n".join(part if isinstance(part, str) else f"({part.media_type} image)" for part in parts if part)
         if not text and result.structured_content is not None:
             text = json.dumps(result.structured_content, ensure_ascii=False)
         if getattr(result, "is_error", False):
@@ -437,8 +442,14 @@ async def _list_tools(client: Any) -> tuple[Any, ...]:
             return tuple(tools)
 
 
-def _content_text(block: Any) -> str:
+def _content_part(block: Any) -> str | Image:
+    """A content block as text, or as an ``Image`` for an image the providers take."""
     kind = getattr(block, "type", None)
+    if kind == "image":
+        try:
+            return Image.from_base64(block.data, getattr(block, "mime_type", None))
+        except (ValueError, TypeError):
+            pass  # a type providers do not take (SVG, say), or data that is not base64: a placeholder
     if kind == "text":
         return block.text
     if kind == "resource":
@@ -448,8 +459,19 @@ def _content_text(block: Any) -> str:
     if kind == "resource_link":
         return f"(resource link: {block.uri})"
     if kind in ("image", "audio"):
-        return f"({kind} {getattr(block, 'mime_type', '')} not shown: {kind} results are not supported yet)"
+        return f"({kind} {getattr(block, 'mime_type', '')} not shown: this {kind} type is not supported)"
     return f"({kind} content)"
+
+
+def _join_text(parts: list[str | Image]) -> list[str | Image]:
+    """Joins neighboring text parts by newlines, as a result without images is joined."""
+    out: list[str | Image] = []
+    for part in parts:
+        if isinstance(part, str) and out and isinstance(out[-1], str):
+            out[-1] = f"{out[-1]}\n{part}" if part else out[-1]
+        elif part != "":
+            out.append(part)
+    return out
 
 
 def _is_transport_error(error: BaseException) -> bool:

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .errors import ToolError, ToolInputError
 from .state import closed_outcome, closed_result
 from .tool import format_result, invalid_args_message
-from .types import ToolOutcome, format_call
+from .types import ToolOutcome, ToolResultContent, format_call
 
 if TYPE_CHECKING:
     from .reporter import Reporter
@@ -66,9 +66,9 @@ class _Job:
         #: What ``tool.run`` gets: a copy of the model's arguments.
         self.args: dict[str, Any] = dict(call.args)
         #: The sync API's worker thread future. In the async API, the asyncio Task of an ``async def`` tool.
-        self.future: Future[str] | asyncio.Task[str] | None = None
+        self.future: Future[ToolResultContent] | asyncio.Task[ToolResultContent] | None = None
         #: Async API only: what the event loop awaits (the Task itself, or the wrapped thread future).
-        self.waiter: asyncio.Future[str] | None = None
+        self.waiter: asyncio.Future[ToolResultContent] | None = None
         self.seq: float = float("inf")
         self.lock = threading.Lock()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -127,8 +127,8 @@ def _run_awaitable(job: _Job, awaitable: Any) -> Any:
             loop.close()
 
 
-def _work(job: _Job, state: State) -> str:
-    """Worker thread: calls the tool and builds the result string. Does no State recording or Reporter notification.
+def _work(job: _Job, state: State) -> ToolResultContent:
+    """Worker thread: calls the tool and builds the result. Does no State recording or Reporter notification.
     A ``ToolError`` or ``ToolInputError`` becomes an error result."""
     try:
         try:
@@ -172,7 +172,7 @@ class _Executor:
         self._slots = threading.Semaphore(max_workers)
 
     def submit(self, job: _Job, state: State) -> None:
-        future: Future[str] = Future()
+        future: Future[ToolResultContent] = Future()
         job.future = future
         # Tools see the caller's context variables (as with asyncio.to_thread).
         context = contextvars.copy_context()
@@ -181,7 +181,7 @@ class _Executor:
         )
         thread.start()
 
-    def _run(self, job: _Job, future: Future[str], state: State) -> None:
+    def _run(self, job: _Job, future: Future[ToolResultContent], state: State) -> None:
         with self._slots:
             if not future.set_running_or_notify_cancel():
                 return  # cancelled before it started
@@ -193,7 +193,7 @@ class _Executor:
                 future.set_result(text)
 
 
-def _late(state: State, job: _Job, future: Future[str] | asyncio.Task[str]) -> None:
+def _late(state: State, job: _Job, future: Future[ToolResultContent] | asyncio.Task[ToolResultContent]) -> None:
     """A call not waited for on interrupt finished later (the done callback of a worker thread's future, or of an
     abandoned ``async def`` tool Task)."""
     if future.cancelled():
@@ -219,7 +219,7 @@ def _is_pending(state: State, call: ToolCall) -> bool:
 
 
 def _record_if_pending(
-    state: State, call: ToolCall, text: str, is_error: bool = False, error: ToolError | None = None
+    state: State, call: ToolCall, text: ToolResultContent, is_error: bool = False, error: ToolError | None = None
 ) -> bool:
     """If ``call`` is still a pending call, records the result and returns true. The check and the record
     happen under one ``state.lock`` (so a tool in the same turn cannot close it with ``state.deny`` in between)."""
@@ -242,7 +242,7 @@ def _exception(job: _Job) -> BaseException | None:
 
 
 def _end(
-    state: State, reporter: Reporter | None, job: _Job, text: str | None, outcome: ToolOutcome
+    state: State, reporter: Reporter | None, job: _Job, text: ToolResultContent | None, outcome: ToolOutcome
 ) -> None:
     """Marks the call as finished and, if there is a result to report, calls ``on_tool_end``."""
     job.ended = True
@@ -269,7 +269,7 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
     if error is None:
         text = job.future.result()
         recorded = _record_if_pending(state, job.call, text, job.is_error, job.tool_error)
-        shown: str | None = text if recorded else None
+        shown: ToolResultContent | None = text if recorded else None
         outcome = ToolOutcome("input_error" if job.input_error else "error" if job.is_error else "done")
     else:
         state._record_error(error, job.call)
@@ -462,11 +462,11 @@ def _raise_first(failures: list[_Job]) -> None:
 
 #: Tasks of ``async def`` tools that were cancelled and not waited for. Kept here until they finish, so they are
 #: not garbage collected midway (the event loop holds tasks only weakly).
-_abandoned: set[asyncio.Task[str]] = set()
+_abandoned: set[asyncio.Task[ToolResultContent]] = set()
 
 
-async def _awork(job: _Job, state: State) -> str:
-    """An ``async def`` tool as a Task on the running event loop: calls it and builds the result string. A
+async def _awork(job: _Job, state: State) -> ToolResultContent:
+    """An ``async def`` tool as a Task on the running event loop: calls it and builds the result. A
     ``ToolError`` or ``ToolInputError`` becomes an error result."""
     try:
         try:
@@ -503,7 +503,7 @@ def _astart(
         job.waiter.add_done_callback(_seen)
 
 
-def _seen(future: asyncio.Future[str]) -> None:
+def _seen(future: asyncio.Future[ToolResultContent]) -> None:
     if not future.cancelled():
         future.exception()
 

@@ -6,6 +6,7 @@ Provider-neutral message representation (ARCHITECTURE.md "Message representation
   The system prompt lives separately in ``Request.system``.
 - ``content`` is a tuple of blocks: ``TextBlock``, ``ToolCall`` (assistant only), ``ToolResultBlock`` (user only),
   ``RawBlock`` (provider-specific data, e.g. thinking blocks).
+- A tool result's ``content`` is a string, or a tuple of ``TextBlock`` and ``Image`` when the tool returned an image.
 - ``RawBlock.data`` is exactly what the provider gave, and nobody modifies it. Only the adapter for the same
   ``provider`` sends it back as is; other adapters drop it.
 - Messages with the same role may come in a row. The adapter merges them to fit the provider's rules.
@@ -13,16 +14,23 @@ Provider-neutral message representation (ARCHITECTURE.md "Message representation
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cached_property
 from typing import Any, Literal, TypeAlias
+
+from .errors import fix_message
 
 __all__ = [
     "TextBlock",
+    "Image",
     "ToolCall",
     "ToolResultBlock",
+    "ToolResultContent",
     "RawBlock",
     "Block",
     "Message",
@@ -42,6 +50,8 @@ __all__ = [
     "INVALID_ARGS_KEY",
     "TRUNCATED_ARGS_MESSAGE",
     "format_call",
+    "result_text",
+    "IMAGE_TYPES",
 ]
 
 #: The only key the adapter puts in ``ToolCall.args`` when it cannot read the tool argument JSON the model gave.
@@ -69,6 +79,93 @@ class TextBlock:
     text: str
 
 
+#: The image types every provider accepts, as media types.
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+
+# The first bytes of each type in IMAGE_TYPES. WebP is "RIFF", 4 size bytes, then "WEBP".
+_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _sniff(data: bytes) -> str | None:
+    """The media type ``data`` starts like, or ``None``."""
+    for signature, media_type in _SIGNATURES:
+        if data.startswith(signature):
+            return media_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@dataclass(frozen=True, repr=False)
+class Image:
+    """An image, as a tool result the model sees. Return it from a tool, alone or in a list with text:
+
+    ``return Image.from_path("chart.png")`` or ``return ["Page loaded in 1.2s", Image(png_bytes)]``
+
+    ``data`` is the file's bytes. The adapters encode it (base64) when they send it, and a Store saves it the
+    same way. PNG, JPEG, GIF and WebP are supported.
+    """
+
+    data: bytes
+    """The image file's bytes, not encoded."""
+    media_type: str | None = None
+    """``"image/png"``, ``"image/jpeg"``, ``"image/gif"`` or ``"image/webp"``. Read from ``data`` when not
+    given."""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                fix_message(
+                    f"Image needs the image file's bytes (got: {type(self.data).__name__})",
+                    "Pass bytes, or use Image.from_path(path) or Image.from_base64(text, media_type)",
+                    'Image(open("chart.png", "rb").read())',
+                )
+            )
+        if not isinstance(self.data, bytes):
+            object.__setattr__(self, "data", bytes(self.data))
+        if self.media_type is None:
+            media_type = _sniff(self.data)
+            if media_type is None:
+                raise ValueError(
+                    fix_message(
+                        f"Image data is not a PNG, JPEG, GIF or WebP image (it starts with {self.data[:8]!r})",
+                        "Pass the bytes of one of those formats, or convert the image first",
+                    )
+                )
+            object.__setattr__(self, "media_type", media_type)
+        elif self.media_type not in IMAGE_TYPES:
+            raise ValueError(
+                fix_message(
+                    f"Image media_type {self.media_type!r} is not supported",
+                    f"Use one of {', '.join(IMAGE_TYPES)}, or leave media_type out to read it from the data",
+                )
+            )
+
+    @classmethod
+    def from_path(cls, path: str | os.PathLike[str]) -> Image:
+        """Reads an image file. The type is read from the file's bytes, not its name."""
+        with open(path, "rb") as file:
+            return cls(file.read())
+
+    @classmethod
+    def from_base64(cls, data: str, media_type: str | None = None) -> Image:
+        """An image from base64 text, such as an MCP server's image content."""
+        return cls(base64.b64decode(data, validate=True), media_type)
+
+    @cached_property
+    def base64(self) -> str:
+        """``data`` as base64 text, the form providers take."""
+        return base64.b64encode(self.data).decode("ascii")
+
+    def __repr__(self) -> str:
+        return f"Image({self.media_type}, {_byte_size(len(self.data))})"
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """One tool call the model requested. Also a block of an assistant message.
@@ -88,16 +185,22 @@ class ToolCall:
         return hash(self.id)
 
 
+ToolResultContent: TypeAlias = str | tuple[TextBlock | Image, ...]
+"""What the model gets as a tool result: a string, or text and images in order when the tool returned an
+image. ``result_text`` turns either into one string for display."""
+
+
 @dataclass(frozen=True)
 class ToolResultBlock:
     """The result of one tool call. Goes in user messages only.
 
-    ``content`` is exactly the string sent to the model (e.g. ``"(done)"``, ``"(input error: ...)"``,
-    ``"(aborted: TimeoutError)"``, ``"(cleared: kept in history)"``, a denial reason).
+    ``content`` is exactly what is sent to the model: a string (e.g. ``"(done)"``, ``"(input error: ...)"``,
+    ``"(aborted: TimeoutError)"``, ``"(cleared: kept in history)"``, a denial reason), or a tuple of
+    ``TextBlock`` and ``Image`` when the tool returned an image.
     """
 
     call_id: str
-    content: str
+    content: ToolResultContent
     name: str = ""
     is_error: bool = False
 
@@ -346,9 +449,9 @@ ToolOutcomeKind: TypeAlias = Literal["done", "error", "input_error", "aborted", 
 
 @dataclass(frozen=True)
 class ToolOutcome:
-    """How a tool call ended, passed to ``Reporter.on_tool_end`` next to the result string.
+    """How a tool call ended, passed to ``Reporter.on_tool_end`` next to the result.
 
-    The result string is written for the model and may change. Branch on ``kind`` instead of reading it.
+    The result is written for the model and may change. Branch on ``kind`` instead of reading it.
     """
 
     kind: ToolOutcomeKind
@@ -382,7 +485,7 @@ class HistoryEntry:
     | --- | --- |
     | ``user`` | ``str``, what the person said. The first entry is the task |
     | ``reply`` | ``Reply`` |
-    | ``tool_result`` | ``str``, the result sent to the model. Has ``call`` |
+    | ``tool_result`` | the result sent to the model: ``str``, or a tuple of ``TextBlock`` and ``Image``. Has ``call`` |
     | ``notice`` | ``str`` starting with ``"[notice] "`` |
     | ``denied`` | ``str``, the denial reason. Has ``call`` |
     | ``ask`` | an object with ``question`` and ``answer`` (``answer`` is ``None`` if no answer came) |
@@ -429,3 +532,30 @@ def format_call(call: ToolCall) -> str:
             shown = repr(value)
         parts.append(f"{key}={shown}")
     return f"{call.name}({', '.join(parts)})"
+
+
+def result_text(content: ToolResultContent) -> str:
+    """A tool result as one string for display: the string itself, or the text blocks joined by newlines with
+    each image as ``(image/png, 34.2KB)``."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        f"({block.media_type}, {_byte_size(len(block.data))})" if isinstance(block, Image) else block.text
+        for block in content
+    )
+
+
+def _content_bytes(content: ToolResultContent) -> int:
+    """The size of a tool result: its text in UTF-8 plus each image's bytes."""
+    if isinstance(content, str):
+        return len(content.encode("utf-8"))
+    return sum(len(b.data) if isinstance(b, Image) else len(b.text.encode("utf-8")) for b in content)
+
+
+def _byte_size(n: int) -> str:
+    """``512B``, ``1.2KB``, ``3.4MB``."""
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n / (1024 * 1024):.1f}MB"

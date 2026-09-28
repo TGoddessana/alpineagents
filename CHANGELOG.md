@@ -35,6 +35,15 @@ All notable changes to alpineagents are listed here. The format follows
   signals with `ToolInputError` (wrong arguments) and `ToolError` (a failure the model should handle).
 - `ToolInputError` is public: raise it from a tool for arguments it cannot use. The model gets `(input error: ...)`.
 
+- **Images from tools.** A tool can `return Image(png_bytes)`, or a list of text and images such as
+  `["Screenshot of the page", Image.from_path("shot.png")]`, and the model sees the image. PNG, JPEG, GIF and WebP.
+  See [Images](https://tgoddessana.github.io/alpineagents/concepts/tools/#images).
+  - `Anthropic` sends images in the tool result. `OpenAICompatible` sends them in a user message right after the
+    tool messages, between `<tool_result>` tags, since Chat Completions tool messages take only text.
+  - MCP servers' image content reaches the model as images instead of a note that images are not supported.
+  - Stores save images (base64 in the JSON), and `clear_tool_results` clears them.
+- `result_text(result)` in `alpineagents.types`: a tool result as one string, for display.
+
 ### Changed
 
 - `Tool` is now the base class of every tool. `@tool` makes a `FunctionTool` (a `Tool` subclass), and an MCP server's
@@ -46,6 +55,10 @@ All notable changes to alpineagents are listed here. The format follows
   the model would have taken as an ordinary result. The [Testing](https://tgoddessana.github.io/alpineagents/guides/testing/)
   guide shows how to test a tool that fails.
 - `print(state)` shows error results as `tool_result fetch_url (error): HTTP 404: ...` instead of their size.
+- `ToolResultBlock.content`, the `content` of a `tool_result` history entry and the `result` of `Reporter.on_tool_end`
+  are a tuple of `TextBlock` and `Image` when the tool returned an image; they stay a `str` otherwise.
+- Stores save in format version 2. Earlier versions of alpineagents cannot load States saved from now on; this
+  version still loads States they saved.
 
 ### Fixed
 

@@ -22,6 +22,7 @@ from ..errors import AuthError, ContextTooLongError, ProviderError, RateLimitErr
 from ..types import (
     INVALID_ARGS_KEY,
     TRUNCATED_ARGS_MESSAGE,
+    Image,
     Message,
     Price,
     RawBlock,
@@ -43,6 +44,8 @@ _EMPTY_CONTENT_PLACEHOLDER = "(empty reply)"
 #: Put before an error result's text. OpenAI's tool message has no error flag (Anthropic's ``is_error``), so without it
 #: the model could not tell a failure from an ordinary result.
 _ERROR_PREFIX = "Error: "
+#: Put in a tool message whose result has images, which tool messages cannot hold. ``.format("1 image")``.
+_IMAGES_MOVED = "({} in the next user message, inside <tool_result> tags)"
 
 #: Name pattern for OpenAI "reasoning" (o-series) models. These models reject ``max_tokens`` and
 #: require ``max_completion_tokens``.
@@ -269,7 +272,10 @@ class OpenAICompatible(Model):
           ``{"reasoning_content": ...}``). RawBlocks of other providers are dropped.
         - user ``Message``: one ``{"role": "tool", "tool_call_id", "content"}`` per ``ToolResultBlock`` in block
           order (an error result's content starts with ``"Error: "``, since the tool message has no error flag),
-          then the remaining text as one ``{"role": "user", "content": text}``.
+          then the remaining text as one ``{"role": "user", "content": text}``. Tool messages take text only, so
+          a result's images go at the start of that user message instead, each result's between
+          ``<tool_result tool_name=... tool_call_id=...>`` and ``</tool_result>`` text parts (so the model does not
+          take them for images the user sent) as ``image_url`` data URLs; the tool message says they are there.
         - ``tools`` -> ``[{"type": "function", "function": {"name", "description", "parameters"}}]`` (omitted if
           empty). ``tool_choice="none"`` only when there are tools.
         - ``max_tokens`` and ``temperature`` only when not None. For o-series names, ``max_completion_tokens``
@@ -447,15 +453,20 @@ class OpenAICompatible(Model):
 
     def _user_messages(self, message: Message) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
+        images: list[dict[str, Any]] = []
         text_parts: list[str] = []
         for block in message.content:
             if isinstance(block, ToolResultBlock):
-                content = _ERROR_PREFIX + block.content if block.is_error else block.content
+                text = _tool_result_text(block)
+                content = _ERROR_PREFIX + text if block.is_error else text
                 out.append({"role": "tool", "tool_call_id": block.call_id, "content": content})
+                images.extend(_tool_result_images(block))
             elif isinstance(block, TextBlock):
                 text_parts.append(block.text)
         text = "".join(text_parts)
-        if text:
+        if images:
+            out.append({"role": "user", "content": images + ([{"type": "text", "text": text}] if text else [])})
+        elif text:
             out.append({"role": "user", "content": text})
         return out
 
@@ -508,3 +519,27 @@ class OpenAICompatible(Model):
         if self.timeout is not None:
             kwargs["timeout"] = self.timeout
         return kwargs
+
+
+def _tool_result_text(block: ToolResultBlock) -> str:
+    """A tool message's text: the result, or its text blocks and a line saying where its images went."""
+    if isinstance(block.content, str):
+        return block.content
+    texts = [b.text for b in block.content if isinstance(b, TextBlock)]
+    count = sum(isinstance(b, Image) for b in block.content)
+    return "\n".join([*texts, _IMAGES_MOVED.format("1 image" if count == 1 else f"{count} images")])
+
+
+def _tool_result_images(block: ToolResultBlock) -> list[dict[str, Any]]:
+    """The user message parts for a result's images, between ``<tool_result>`` tags. Empty with no images."""
+    if isinstance(block.content, str):
+        return []
+    images = [b for b in block.content if isinstance(b, Image)]
+    if not images:
+        return []
+    opening = f'<tool_result tool_name="{block.name}" tool_call_id="{block.call_id}">'
+    return [
+        {"type": "text", "text": opening},
+        *({"type": "image_url", "image_url": {"url": f"data:{i.media_type};base64,{i.base64}"}} for i in images),
+        {"type": "text", "text": "</tool_result>"},
+    ]

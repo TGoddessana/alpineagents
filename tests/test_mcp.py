@@ -12,12 +12,14 @@ import time
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver import Image as ServerImage
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import CallToolResult, ImageContent, TextContent
 
-from alpineagents import MCP, Agent, MCPConnectionError, Reporter, State, tool
+from alpineagents import MCP, Agent, Image, MCPConnectionError, Reporter, State, tool
 from alpineagents.testing import FakeModel, tool_call
-from alpineagents.types import ToolResultBlock
+from alpineagents.types import TextBlock, ToolResultBlock
 
 logging.getLogger("mcp").setLevel(logging.CRITICAL)
 
@@ -159,6 +161,62 @@ def test_missing_required_argument_is_an_input_error(demo):
     assert results(state) == [("demo__add", "(input error: missing required arguments: b)")]
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(100))
+
+
+def image_server() -> MCP:
+    server = MCPServer("shots")
+
+    @server.tool()
+    def shot() -> list:
+        """A caption and a screenshot"""
+        return ["Loaded", "in 1.2s", ServerImage(data=PNG, format="png")]
+
+    @server.tool()
+    def vector() -> CallToolResult:
+        """An image type providers do not take"""
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text="Logo"),
+                ImageContent(type="image", data="PHN2Zy8+", mime_type="image/svg+xml"),
+            ]
+        )
+
+    @server.tool()
+    def broken() -> CallToolResult:
+        """An error result with an image"""
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text="render failed"),
+                ServerImage(data=PNG, format="png").to_image_content(),
+            ],
+            is_error=True,
+        )
+
+    return MCP(server=server, name="shots")
+
+
+def test_image_content_reaches_the_model_as_an_image():
+    state = State("Task")
+    make_agent([tool_call("shots__shot"), "done"], [image_server()]).run(state)
+    ((_, content),) = results(state)
+    assert content == (TextBlock("Loaded\nin 1.2s"), Image(PNG))
+
+
+def test_an_image_type_providers_do_not_take_becomes_a_placeholder():
+    state = State("Task")
+    make_agent([tool_call("shots__vector"), "done"], [image_server()]).run(state)
+    assert results(state) == [
+        ("shots__vector", "Logo\n(image image/svg+xml not shown: this image type is not supported)")
+    ]
+
+
+def test_an_error_result_with_an_image_is_text():
+    state = State("Task")
+    make_agent([tool_call("shots__broken"), "done"], [image_server()]).run(state)
+    assert results(state) == [("shots__broken", "render failed\n(image/png image)")]
+
+
 def test_mixed_with_regular_tools(demo):
     @tool
     def double(n: int) -> int:
@@ -278,8 +336,6 @@ async def test_cancelling_one_agent_s_connect_does_not_break_another_sharing_the
 
 
 def test_a_result_the_sdk_rejects_goes_to_the_model_and_keeps_the_connection():
-    from mcp_types import CallToolResult, TextContent
-
     server = MCPServer("strict")
 
     @server.tool()

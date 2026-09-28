@@ -51,9 +51,41 @@ The model sees the tool built from the function:
 | --- | --- |
 | `str` | The string |
 | `None` | `(done)` |
+| `Image` | The image |
+| A list with an `Image` in it | Its text and images, in order |
 | Anything else | JSON |
 
 A value that cannot become JSON raises `TypeError`, which stops the run like any exception from a tool.
+
+### Images
+
+Return an `Image` for a tool whose result the model should look at, such as a screenshot or a chart. Put it in a list
+to send text with it:
+
+```python
+from alpineagents import Image, tool
+
+
+@tool
+def screenshot(url: str) -> list:
+    """Take a screenshot of a web page"""
+    png = browser.screenshot(url)  # bytes
+    return [f"Screenshot of {url}", Image(png)]
+```
+
+- `Image(data)` takes the image file's bytes. `Image.from_path("chart.png")` reads a file, and
+  `Image.from_base64(text)` decodes base64 text. PNG, JPEG, GIF and WebP are supported; the type is read from the
+  bytes (or pass `media_type="image/png"`).
+- In the list, a `str` is text, and anything else that is not an `Image` is sent as JSON text.
+- The result is the tuple of blocks the model gets: `(TextBlock("Screenshot of ..."), Image(image/png, 34.2KB))`. It
+  is the `content` of the call's `ToolResultBlock` and `tool_result` history entry, and the `result` a Reporter's
+  `on_tool_end` gets. `result_text(result)` from `alpineagents.types` turns it into one line of text, with each image
+  as `(image/png, 34.2KB)`.
+- Anthropic takes images in the tool result. Chat Completions APIs (`OpenAICompatible`) take only text there, so the
+  adapter sends the images in a user message right after, marked as the call's result. The model must accept images.
+- The context size estimate counts each image as 1,600 tokens. Images are large: `state.clear_tool_results()` clears
+  them with the rest of old results, and a compaction summary keeps only what the model wrote about them. History
+  and the store keep them.
 
 ## When a call goes wrong
 
@@ -180,7 +212,7 @@ agent = Agent(model="claude-sonnet-5", tools=[Webhook(**row) for row in rows])
   `parallel` and the [hints](#describe-what-a-tool-does).
 - `run(args, state)` gets the model's arguments as a dict, not checked against `input_schema`. Check what you rely
   on and raise `ToolInputError` when it is wrong.
-- What `run` returns and raises works as for `@tool`: see [Return values](#return-values) and
+- What `run` returns (an `Image` included) and raises works as for `@tool`: see [Return values](#return-values) and
   [When a call goes wrong](#when-a-call-goes-wrong). Arguments that are not valid JSON never reach `run`.
 - `run` can be `async def`.
 - A subclass that does not call `super().__init__` or does not define `run`, or passing the class instead of an

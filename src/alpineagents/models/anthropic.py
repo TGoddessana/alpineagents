@@ -17,6 +17,7 @@ from ..errors import AuthError, ContextTooLongError, ProviderError, RateLimitErr
 from ..types import (
     INVALID_ARGS_KEY,
     TRUNCATED_ARGS_MESSAGE,
+    Image,
     Message,
     Price,
     RawBlock,
@@ -25,6 +26,7 @@ from ..types import (
     TextBlock,
     ToolCall,
     ToolResultBlock,
+    ToolResultContent,
     Usage,
 )
 from .base import Model, OnEvent, OnText
@@ -62,6 +64,21 @@ def _looks_like_context_overflow(message: str) -> bool:
 def _looks_like_missing_credentials(message: str) -> bool:
     lowered = message.lower()
     return any(hint in lowered for hint in _MISSING_CREDENTIALS_HINTS)
+
+
+def _result_content(content: ToolResultContent) -> str | list[dict[str, Any]]:
+    """A tool result's ``content``: the string, or text and image blocks (whitespace-only text dropped)."""
+    if isinstance(content, str):
+        return content
+    out: list[dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, Image):
+            out.append(
+                {"type": "image", "source": {"type": "base64", "media_type": block.media_type, "data": block.base64}}
+            )
+        elif block.text.strip():
+            out.append({"type": "text", "text": block.text})
+    return out
 
 
 def _referenced_tool_names(messages: Iterable[Message]) -> set[str]:
@@ -376,7 +393,9 @@ class Anthropic(Model):
           ends up empty (e.g. an assistant reply that ended without tools), one placeholder text
           (``"(empty reply)"``) is added: Anthropic rejects empty content in any message but the last.
         - ``ToolCall`` -> ``{"type": "tool_use", "id", "name", "input": args}``
-        - ``ToolResultBlock`` -> ``{"type": "tool_result", "tool_use_id", "content", "is_error"}``
+        - ``ToolResultBlock`` -> ``{"type": "tool_result", "tool_use_id", "content", "is_error"}``. With images,
+          ``content`` is a list of ``{"type": "text"}`` and ``{"type": "image", "source": {"type": "base64",
+          "media_type", "data"}}`` blocks.
         - ``RawBlock(provider="anthropic")`` -> ``data`` as is; RawBlocks of other providers are dropped.
         """
         blocks = list(message.content)
@@ -397,7 +416,7 @@ class Anthropic(Model):
                     {
                         "type": "tool_result",
                         "tool_use_id": block.call_id,
-                        "content": block.content,
+                        "content": _result_content(block.content),
                         "is_error": block.is_error,
                     }
                 )

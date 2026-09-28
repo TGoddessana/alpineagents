@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .state import State
-    from .types import ContextChange, ModelEvent, Reply, ToolCall, ToolOutcome
+    from .types import ContextChange, ModelEvent, Reply, ToolCall, ToolOutcome, ToolResultContent
 
 __all__ = ["Reporter"]
 
@@ -61,13 +61,15 @@ class Reporter:
     def on_tool_start(self, state: State, call: ToolCall) -> None:
         """Right before a tool runs. Every call that gets this gets exactly one ``on_tool_end``."""
 
-    def on_tool_end(self, state: State, call: ToolCall, result: str, outcome: ToolOutcome) -> None:
+    def on_tool_end(self, state: State, call: ToolCall, result: ToolResultContent, outcome: ToolOutcome) -> None:
         """Right after a tool call ends. A call closed by ``state.deny`` gets this without ``on_tool_start``.
 
         Args:
             state: The State.
             call: The tool call.
-            result: The string sent to the model. For a denied call, the denial reason.
+            result: What was sent to the model: a string, or a tuple of ``TextBlock`` and ``Image`` when the tool
+                returned an image (``result_text(result)`` makes it one string). For a denied call, the denial
+                reason.
             outcome: How the call ended. Branch on ``outcome.kind`` instead of reading ``result``, because result
                 strings are written for the model and may change.
         """

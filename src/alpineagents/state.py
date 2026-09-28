@@ -41,8 +41,12 @@ from .types import (
     ToolCall,
     ToolOutcome,
     ToolResultBlock,
+    ToolResultContent,
     Usage,
+    _byte_size,
+    _content_bytes,
     format_call,
+    result_text,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +69,7 @@ SUMMARY_PREFIX = "[notice] Summary so far:\n"
 
 #: Text put in place of a pending call's result in the context for ``ask``.
 NOT_RUN_YET = "(not run yet)"
-#: Notice that puts a late result into the context.
+#: Notice that puts a late result into the context. Images in the result appear as ``(image/png, 34.2KB)``.
 LATE_RESULT = NOTICE_PREFIX + "interrupted {call} finished later: {content}"
 
 #: Result a loaded State gives a call whose result was never saved (the process stopped while it ran).
@@ -257,14 +261,9 @@ def _short(text: Any, limit: int = 60) -> str:
     return one_line if len(one_line) <= limit else one_line[: limit - 1] + "…"
 
 
-def _size(text: str) -> str:
-    """Display of UTF-8 byte size (``512B``, ``1.2KB``, ``3.4MB``)."""
-    n = len(text.encode("utf-8"))
-    if n < 1024:
-        return f"{n}B"
-    if n < 1024 * 1024:
-        return f"{n / 1024:.1f}KB"
-    return f"{n / (1024 * 1024):.1f}MB"
+def _size(content: ToolResultContent) -> str:
+    """Display of a result's byte size, text in UTF-8 plus images (``512B``, ``1.2KB``, ``3.4MB``)."""
+    return _byte_size(_content_bytes(content))
 
 
 def _error_text(error: BaseException) -> str:
@@ -972,7 +971,8 @@ class State:
                 self._apply_reply(entry.content)
             elif kind in ("tool_result", "denied"):
                 if entry.late and entry.call is not None:
-                    self._late_notices.append(LATE_RESULT.format(call=format_call(entry.call), content=entry.content))
+                    notice = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
+                    self._late_notices.append(notice)
                     continue
                 index = self._pending_index(entry.call)
                 if index is None:
@@ -1167,7 +1167,7 @@ class State:
         return dropped
 
     def _record_tool_result(
-        self, call: ToolCall, content: str, *, is_error: bool = False, error: BaseException | None = None
+        self, call: ToolCall, content: ToolResultContent, *, is_error: bool = False, error: BaseException | None = None
     ) -> None:
         """Record the result of one call. Safe to call from multiple threads.
 
@@ -1188,7 +1188,7 @@ class State:
             self._resolve(index, content, is_error=is_error)
 
     def _record_late_result(
-        self, call: ToolCall, content: str, *, is_error: bool = False, error: BaseException | None = None
+        self, call: ToolCall, content: ToolResultContent, *, is_error: bool = False, error: BaseException | None = None
     ) -> None:
         """The result of a sync tool that was closed without waiting on interrupt arrives later (called from the
         worker thread).
@@ -1207,7 +1207,7 @@ class State:
                 self._resolve(index, content, is_error=is_error)
                 return
             self._append("tool_result", content, call=call, late=True, is_error=is_error, error=error)
-            self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=content))
+            self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=result_text(content)))
 
     def _close_pending(self, error: BaseException) -> list[ToolCall]:
         """Close all pending calls when an exception leaves ``run()``.
@@ -1342,7 +1342,7 @@ class State:
                 return index
         return None
 
-    def _resolve(self, index: int, content: str, *, is_error: bool) -> None:
+    def _resolve(self, index: int, content: ToolResultContent, *, is_error: bool) -> None:
         """Put the result in the turn buffer; on the last call, add the result message and deferred messages."""
         call = self._pending.pop(index)
         self._results[call.id] = ToolResultBlock(call.id, content, name=call.name, is_error=is_error)
@@ -1408,8 +1408,8 @@ def _describe_entry(entry: HistoryEntry) -> str:
         name = entry.call.name if entry.call else "?"
         late = " (late)" if entry.late else ""
         if entry.is_error:
-            return f"{head} {name}{late} (error): {_short(content)}"
-        return f"{head} {name}: {_size(str(content))}{late}"
+            return f"{head} {name}{late} (error): {_short(result_text(content))}"
+        return f"{head} {name}: {_size(content)}{late}"
     if kind == "denied":
         name = entry.call.name if entry.call else "?"
         return f"{head} {name}: {_short(content)}"

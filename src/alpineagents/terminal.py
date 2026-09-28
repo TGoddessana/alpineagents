@@ -15,11 +15,11 @@ from typing import TYPE_CHECKING, Any, TextIO
 
 from .human import Human, describe_choices, parse_answer
 from .reporter import Reporter
-from .types import format_call
+from .types import Image, _byte_size, _content_bytes, format_call, result_text
 
 if TYPE_CHECKING:
     from .state import State
-    from .types import ContextChange, ModelEvent, Reply, ToolCall, ToolOutcome
+    from .types import ContextChange, ModelEvent, Reply, ToolCall, ToolOutcome, ToolResultContent
 
 __all__ = ["Terminal", "default_terminal"]
 
@@ -41,14 +41,12 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
-def _format_size(text: str) -> str:
-    """UTF-8 byte size: ``512B``, ``1.2KB``, ``3.4MB``."""
-    size = len(text.encode("utf-8"))
-    if size < 1024:
-        return f"{size}B"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.1f}KB"
-    return f"{size / (1024 * 1024):.1f}MB"
+def _format_size(content: ToolResultContent) -> str:
+    """Byte size, text in UTF-8 plus images: ``512B``, ``1.2KB``, ``3.4MB``. ``(2 images)`` after it when there
+    are images."""
+    images = 0 if isinstance(content, str) else sum(isinstance(block, Image) for block in content)
+    tail = "" if images == 0 else " (1 image)" if images == 1 else f" ({images} images)"
+    return _byte_size(_content_bytes(content)) + tail
 
 
 def _turns(n: int) -> str:
@@ -176,14 +174,17 @@ class Terminal(Reporter, Human):
         """Writes ``tool read_file(path="main.py")``."""
         self._write_line(state, f"  tool {format_call(call)}")
 
-    def on_tool_end(self, state: State, call: ToolCall, result: str, outcome: ToolOutcome) -> None:
-        """Writes one line by ``outcome.kind``: ``done 1.2KB`` (the result size), ``error {name}: ...``,
+    def on_tool_end(self, state: State, call: ToolCall, result: ToolResultContent, outcome: ToolOutcome) -> None:
+        """Writes one line by ``outcome.kind``: ``done 1.2KB`` (the result size, ``done 35.1KB (1 image)`` with
+        images), ``error {name}: ...``,
         ``aborted {name}: ...``, ``denied {name}: ...``, or the input error itself."""
         # input_error "  {result}"; aborted or interrupted "  aborted {call.name}: {result}" (e.g.
         # "(aborted: TimeoutError)", "(interrupted by user)"); denied "  denied {call.name}: {result}";
         # error "  error {call.name}: {first line of result, at most 100 characters}";
         # done "  done {size}" (UTF-8 bytes: 512B, 1.2KB, 3.4MB).
         kind = outcome.kind
+        if kind != "done":
+            result = result_text(result)
         if kind == "input_error":
             text = f"  {result}"
         elif kind == "error":

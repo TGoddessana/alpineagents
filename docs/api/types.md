@@ -34,4 +34,10 @@ The parts of a `Message`. `ToolCall` above is also one.
 
 ::: alpineagents.types.ToolResultBlock
 
+::: alpineagents.Image
+    options:
+      filters: ["!^_"]
+
+::: alpineagents.types.result_text
+
 ::: alpineagents.types.RawBlock
