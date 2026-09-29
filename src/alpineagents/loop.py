@@ -19,6 +19,7 @@ from ._async import ASYNC_RUN, is_async_callable
 from .blocks import acompact_if_full, compact_if_full
 from .errors import fix_message
 from .state import State
+from .types import Stopped, StoppedByFinish, StoppedByLimit, StoppedByPermission, StoppedByUntil
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -27,8 +28,9 @@ __all__ = ["loop", "Loop", "default_loop", "adefault_loop"]
 
 Condition = Callable[[State], bool]
 
-#: Reserved stopped_by names. Cannot be used as until function names.
-_RESERVED_NAMES = ("finish", "limit")
+#: Stops decided outside the loop's own checks (state.finish(), a permission's stop=True): every loop stops on
+#: them, an outer loop too. An until/limit stop in state.stopped is a nested loop's, and ends only that loop.
+_DECIDED_BY_THE_RUN = (StoppedByFinish, StoppedByPermission)
 
 _LOOP_EXAMPLE = "@loop(until=State.is_answered, limit=50)"
 
@@ -58,11 +60,13 @@ class Loop:
 
     Before every turn it checks, in order:
 
-    1. ``state.is_finished()``: stops with ``state.stopped_by == "finish"``
-    2. each ``until`` function: stops with that function's name
-    3. the turn count against ``limit``: stops with ``"limit"``
+    1. ``state.stopped`` already set by ``state.finish()`` (``StoppedByFinish()``) or by a permission's
+       ``Denied(..., stop=True)`` (``StoppedByPermission(call, ...)``): stops and keeps it
+    2. each ``until`` function: stops with ``state.stopped == StoppedByUntil(name)``, the function's name
+    3. the turn count against ``limit``: stops with ``state.stopped == StoppedByLimit(limit)``
 
-    Each call counts turns from zero. Exceptions from the body or the ``until`` functions propagate as is.
+    Each call counts turns from zero. A nested loop's ``until``/``limit`` stop ends only that loop: the outer loop
+    checks its own ``until`` and ``limit`` and, if it goes on, ``state.stopped`` goes back to ``None``. Exceptions from the body or the ``until`` functions propagate as is.
     An async loop (``async def`` body) returns a coroutine that does the same; its ``until`` functions stay
     plain functions.
     """
@@ -84,15 +88,14 @@ class Loop:
         Args:
             body: The one-turn function ``(agent, state) -> None``, or an ``async def`` one.
             until: A ``State -> bool`` function or a list of them. Pass the function itself, e.g.
-                ``State.is_answered``. A lambda works but leaves no useful name in ``stopped_by``, so it warns.
+                ``State.is_answered``. A lambda works but leaves no useful name in ``state.stopped``, so it warns.
             limit: The most turns, an integer of 1 or more.
 
         Raises:
             TypeError: ``until`` or ``limit`` is missing, ``until`` got a call result (``state.is_answered()``)
                 or a bound method (``state.is_answered``), an ``until`` item is not callable, or ``limit`` is not
                 an integer.
-            ValueError: ``limit`` is less than 1, or an ``until`` function is named ``finish`` or ``limit``
-                (reserved names).
+            ValueError: ``limit`` is less than 1.
         """
         if until is None or limit is None:
             raise _needs_until_and_limit()
@@ -124,20 +127,12 @@ class Loop:
                         _LOOP_EXAMPLE,
                     )
                 )
-            name = _condition_name(item)
-            if name == "<lambda>":
+            if _condition_name(item) == "<lambda>":
                 warnings.warn(
-                    "an unnamed function (lambda) in until leaves no name in stopped_by. "
-                    "Use a named function.",
+                    "an unnamed function (lambda) in until leaves no useful name in state.stopped "
+                    '(StoppedByUntil("<lambda>")). Use a named function.',
                     UserWarning,
                     stacklevel=3,
-                )
-            elif name in _RESERVED_NAMES:
-                raise ValueError(
-                    fix_message(
-                        f"until function name {name!r} is reserved and cannot be used",
-                        "use a function with a different name",
-                    )
                 )
             checked.append(item)
 
@@ -171,12 +166,13 @@ class Loop:
 
             count = 0
             while True:
-                if state.is_finished():   stop("finish")
-                for f in until:           if f(state): stop(f.__name__)
-                if count >= limit:        stop("limit", limit=limit)
+                if state.stopped is StoppedByFinish/StoppedByPermission (or state.is_finished()):  stop(it)
+                for f in until:           if f(state): stop(StoppedByUntil(f.__name__))
+                if count >= limit:        stop(StoppedByLimit(limit))
+                if state.stopped is set (a nested loop's until/limit): state._clear_stop()
                 result = body(agent, state); count += 1
                 if result is not None:    TypeError (return value is ignored; set the answer with state.finish(answer))
-            stop(reason) = state._set_stopped_by(reason, ...), then return state.answer
+            stop(stopped) = state._set_stopped(stopped), then return state.answer
 
         An async loop returns a coroutine doing the same with ``await body(agent, state)`` (``until`` functions
         stay plain functions). Exceptions raised by the body or condition functions propagate as is.
@@ -185,9 +181,9 @@ class Loop:
             return self._acall(agent, state)
         count = 0
         while True:
-            reason = self._stop_reason(state, count)
-            if reason is not None:
-                return self._stop(state, reason)
+            stopped = self._stop_reason(state, count)
+            if stopped is not None:
+                return self._stop(state, stopped)
             result = self.body(agent, state)
             count += 1
             if inspect.isawaitable(result):
@@ -207,24 +203,32 @@ class Loop:
         try:
             count = 0
             while True:
-                reason = self._stop_reason(state, count)
-                if reason is not None:
-                    return self._stop(state, reason)
+                stopped = self._stop_reason(state, count)
+                if stopped is not None:
+                    return self._stop(state, stopped)
                 result = await self.body(agent, state)
                 count += 1
                 self._check_result(result)
         finally:
             ASYNC_RUN.reset(token)
 
-    def _stop_reason(self, state: State, count: int) -> str | None:
-        """Checked before every turn: ``"finish"``, the name of the first true ``until`` function, ``"limit"``."""
+    def _stop_reason(self, state: State, count: int) -> Stopped | None:
+        """Checked before every turn, in order: a stop already decided (``finish()`` or a permission's
+        ``stop=True``, both set ``state.stopped`` right away), the first true ``until`` function, the limit.
+        Going on after a nested loop stopped on its own ``until``/limit clears that stale reason."""
+        stopped = state.stopped
+        if isinstance(stopped, _DECIDED_BY_THE_RUN):
+            return stopped
         if state.is_finished():
-            return "finish"
+            # finish() sets stopped, but a run that raised cleared it (the State stays finished).
+            return StoppedByFinish()
         for condition in self.until:
             if condition(state):
-                return _condition_name(condition)
+                return StoppedByUntil(_condition_name(condition))
         if count >= self.limit:
-            return "limit"
+            return StoppedByLimit(self.limit)
+        if stopped is not None:
+            state._clear_stop()
         return None
 
     def _check_result(self, result: Any) -> None:
@@ -239,8 +243,8 @@ class Loop:
     def _body_name(self) -> str:
         return getattr(self.body, "__name__", repr(self.body))
 
-    def _stop(self, state: State, reason: str) -> Any:
-        state._set_stopped_by(reason, limit=self.limit if reason == "limit" else None)
+    def _stop(self, state: State, stopped: Stopped) -> Any:
+        state._set_stopped(stopped)
         return state.answer
 
     def copy(self, *, until: Any = ..., limit: Any = ...) -> Loop:
@@ -285,7 +289,8 @@ def loop(fn: Any = None, /, *, until: Any = None, limit: Any = None) -> Any:
 
     Args:
         until: A ``State -> bool`` function or a list of them, checked before every turn.
-        limit: The most turns one run takes. Reaching it stops quietly with ``state.stopped_by == "limit"``.
+        limit: The most turns one run takes. Reaching it stops quietly with
+            ``state.stopped == StoppedByLimit(limit)``.
 
     Returns:
         A decorator that turns the body into a ``Loop``.
@@ -310,7 +315,7 @@ def _close(awaitable: Any) -> None:
 
 
 def _condition_name(condition: Any) -> str:
-    """The name recorded in stopped_by. A callable object without ``__name__`` uses its class name."""
+    """The name recorded in ``StoppedByUntil``. A callable object without ``__name__`` uses its class name."""
     return getattr(condition, "__name__", None) or type(condition).__name__
 
 

@@ -83,5 +83,5 @@ def test_terminal_shows_the_event_on_its_own_line():
         "[turn 1] thinking",
         "  model: a rate limited → switched to b",
         "Answer",
-        "done: is_answered (1 turn)",
+        "done: stopped by is_answered (1 turn)",
     ]

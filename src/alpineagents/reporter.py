@@ -7,8 +7,8 @@ Who calls what, and when (ARCHITECTURE.md "Reporter notifications: who and when"
 
 - ``on_run_start``/``on_run_end``: ``Agent.run``
 - ``on_think_start``/``on_text``/``on_think_end``: ``Agent.think``, ``Agent.ask``
-- ``on_tool_start``/``on_tool_end``: ``Agent.use_tools`` (on the main thread). For a denied call,
-  ``State.deny`` calls ``on_tool_end`` (without ``on_tool_start``).
+- ``on_tool_start``/``on_tool_end``: ``Agent.use_tools`` (on the main thread). A call a permission denied or
+  cancelled gets ``on_tool_end`` without ``on_tool_start``.
 - ``on_context_change``: called inside the State method that changed the context, after releasing the lock.
 - ``on_model_event``: when the Model reports via ``on_event`` during ``respond``/``compact``, right after the
   Agent records it.
@@ -62,7 +62,8 @@ class Reporter:
         """Right before a tool runs. Every call that gets this gets exactly one ``on_tool_end``."""
 
     def on_tool_end(self, state: State, call: ToolCall, result: ToolResultContent, outcome: ToolOutcome) -> None:
-        """Right after a tool call ends. A call closed by ``state.deny`` gets this without ``on_tool_start``.
+        """Right after a tool call ends. A call a permission denied or cancelled did not run, so it gets this
+        without ``on_tool_start``.
 
         Args:
             state: The State.
@@ -71,7 +72,8 @@ class Reporter:
                 returned an image (``result_text(result)`` makes it one string). For a denied call, the denial
                 reason.
             outcome: How the call ended. Branch on ``outcome.kind`` instead of reading ``result``, because result
-                strings are written for the model and may change.
+                strings are written for the model and may change. For a denied or cancelled call,
+                ``outcome.decided_by`` names the permission that decided.
         """
 
     def on_context_change(self, state: State, change: ContextChange) -> None:
@@ -86,6 +88,7 @@ class Reporter:
         """When ``run()`` ends, always, even after an exception.
 
         Args:
-            state: The State. ``state.stopped_by`` says why the loop stopped.
+            state: The State. ``state.stopped`` says why the run stopped (``None`` after an exception, or when
+                a loop written without ``@loop`` ended on its own check).
             error: The exception that ended the run, or ``None`` on a normal finish.
         """

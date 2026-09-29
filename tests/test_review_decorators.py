@@ -11,6 +11,7 @@ import warnings
 import pytest
 import typing_extensions
 
+from alpineagents import StoppedByLimit
 from alpineagents.loop import Loop, default_loop, loop
 from alpineagents.state import State
 from alpineagents.tool import _parse_docstring, tool
@@ -154,7 +155,7 @@ def test_nested_loop_runs_with_outer_limit():
     outer(None, state)
     # 2 outer turns x 5 inner turns
     assert len(turns) == 10
-    assert state.stopped_by == "limit"
+    assert state.stopped == StoppedByLimit(2)
 
 
 # --- State injection: TYPE_CHECKING-only import, State subclass ---

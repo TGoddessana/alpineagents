@@ -12,6 +12,8 @@ Concepts: [Tools](../concepts/tools.md). Guide: [MCP servers](../guides/mcp.md).
     options:
       filters: ["!^_", "!^(prepare|invoke|fn|needs_self|bound_to)$"]
 
+::: alpineagents.Hints
+
 ::: alpineagents.MCP
 
 ::: alpineagents.MCPTool

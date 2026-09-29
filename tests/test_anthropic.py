@@ -1,6 +1,7 @@
 """``models.anthropic.Anthropic`` tests. No network: the SDK client is replaced with a fake by monkeypatching
 ``_client``."""
 
+import asyncio
 from types import SimpleNamespace
 
 import httpx2
@@ -467,3 +468,265 @@ def test_client_is_built_lazily_and_reused():
     client = model._client()
     assert isinstance(client, sdk.Anthropic)
     assert model._client() is client
+
+
+# ---------------------------------------------------------------- errors while the stream is read
+#
+# The SDK wraps a failure to send the request (APIConnectionError/APITimeoutError) and an ``error`` event in the stream
+# (APIStatusError), but not a failure while reading the body: a dropped connection or a read timeout mid-stream
+# reaches the adapter as a raw httpx2 exception. The adapter wraps those as ProviderError too.
+
+
+class FailingStreamCM(FakeStreamCM):
+    """A stream that yields ``text_chunks`` and then raises ``fail`` (as if the connection broke mid-reply)."""
+
+    def __init__(self, text_chunks, fail):
+        super().__init__(text_chunks=text_chunks)
+        self.fail = fail
+        self.exited = False
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited = True
+        return False
+
+    @property
+    def text_stream(self):
+        def chunks():
+            yield from self.text_chunks
+            raise self.fail
+
+        return chunks()
+
+
+class FailingAsyncStreamCM:
+    """The async version of ``FailingStreamCM`` (``async with client.messages.stream(...)``)."""
+
+    def __init__(self, text_chunks, fail):
+        self.text_chunks = list(text_chunks)
+        self.fail = fail
+        self.exited = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        return False
+
+    @property
+    def text_stream(self):
+        async def chunks():
+            for chunk in self.text_chunks:
+                yield chunk
+            raise self.fail
+
+        return chunks()
+
+
+def install_fake_async_client(monkeypatch, model, cm):
+    fake = FakeClient(cm)
+    monkeypatch.setattr(model, "_async_client", lambda: fake)
+    return fake
+
+
+def _transport_errors():
+    import ssl
+
+    import anyio
+
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return [
+        httpx2.RemoteProtocolError("peer closed connection without sending complete message body", request=request),
+        httpx2.ReadError("connection reset by peer", request=request),
+        httpx2.ReadTimeout("The read operation timed out", request=request),
+        ssl.SSLError("bad record mac"),
+        anyio.EndOfStream(),
+    ]
+
+
+@pytest.mark.parametrize("fail", _transport_errors(), ids=lambda e: type(e).__name__)
+def test_respond_wraps_a_transport_error_mid_stream_as_provider_error(monkeypatch, fail):
+    model = Anthropic("claude-sonnet-5")
+    cm = FailingStreamCM(["Hel", "lo"], fail)
+    install_fake_client(monkeypatch, model, cm)
+    seen = []
+    with pytest.raises(ProviderError) as exc_info:
+        model.respond(Request(system=None, messages=()), on_text=seen.append)
+    assert type(exc_info.value) is ProviderError
+    assert exc_info.value.__cause__ is fail
+    assert type(fail).__name__ in str(exc_info.value)
+    assert seen == ["Hel", "lo"]  # the text that arrived before the failure was still streamed
+    assert cm.exited  # the stream is closed on the way out
+
+
+@pytest.mark.parametrize("fail", _transport_errors(), ids=lambda e: type(e).__name__)
+async def test_arespond_wraps_a_transport_error_mid_stream_as_provider_error(monkeypatch, fail):
+    model = Anthropic("claude-sonnet-5")
+    cm = FailingAsyncStreamCM(["Hel", "lo"], fail)
+    install_fake_async_client(monkeypatch, model, cm)
+    seen = []
+    with pytest.raises(ProviderError) as exc_info:
+        await model.arespond(Request(system=None, messages=()), on_text=seen.append)
+    assert type(exc_info.value) is ProviderError
+    assert exc_info.value.__cause__ is fail
+    assert type(fail).__name__ in str(exc_info.value)
+    assert seen == ["Hel", "lo"]
+    assert cm.exited
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_transport_error_raised_by_on_text_propagates_unwrapped(monkeypatch, use_async):
+    model = Anthropic("claude-sonnet-5")
+    mine = httpx2.ReadError("my own webhook failed")
+
+    def on_text(_chunk):
+        raise mine
+
+    with pytest.raises(httpx2.ReadError) as exc_info:
+        if use_async:
+            install_fake_async_client(monkeypatch, model, FailingAsyncStreamCM(["x"], AssertionError("not reached")))
+            await model.arespond(Request(system=None, messages=()), on_text=on_text)
+        else:
+            install_fake_client(monkeypatch, model, FailingStreamCM(["x"], AssertionError("not reached")))
+            model.respond(Request(system=None, messages=()), on_text=on_text)
+    assert exc_info.value is mine
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("fail_type", [KeyboardInterrupt, asyncio.CancelledError])
+async def test_interrupt_or_cancel_mid_stream_propagates_unwrapped(monkeypatch, use_async, fail_type):
+    model = Anthropic("claude-sonnet-5")
+    fail = fail_type()
+    with pytest.raises(fail_type) as exc_info:
+        if use_async:
+            install_fake_async_client(monkeypatch, model, FailingAsyncStreamCM(["x"], fail))
+            await model.arespond(Request(system=None, messages=()))
+        else:
+            install_fake_client(monkeypatch, model, FailingStreamCM(["x"], fail))
+            model.respond(Request(system=None, messages=()))
+    assert exc_info.value is fail
+
+
+# The real SDK over a fake HTTP transport (no network): checks the facts above against the installed SDK.
+
+_SSE_START = (
+    b"event: message_start\n"
+    b'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant",'
+    b'"model":"claude-sonnet-5","content":[],"stop_reason":null,"stop_sequence":null,'
+    b'"usage":{"input_tokens":5,"output_tokens":1}}}\n\n'
+    b"event: content_block_start\n"
+    b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+    b"event: content_block_delta\n"
+    b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}\n\n'
+)
+
+_SSE_ERROR = b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n'
+
+
+class _SyncBody(httpx2.SyncByteStream):
+    """A response body: yields the bytes parts and raises the exception parts."""
+
+    def __init__(self, parts):
+        self.parts = parts
+
+    def __iter__(self):
+        for part in self.parts:
+            if isinstance(part, BaseException):
+                raise part
+            yield part
+
+
+class _AsyncBody(httpx2.AsyncByteStream):
+    def __init__(self, parts):
+        self.parts = parts
+
+    async def __aiter__(self):
+        for part in self.parts:
+            if isinstance(part, BaseException):
+                raise part
+            yield part
+
+
+def _install_sdk_over_transport(monkeypatch, model, parts, *, use_async):
+    import anthropic as sdk
+
+    def respond(body_cls):
+        def handler(request):
+            return httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=body_cls(parts), request=request
+            )
+
+        return httpx2.MockTransport(handler)
+
+    if use_async:
+        http_client = httpx2.AsyncClient(transport=respond(_AsyncBody))
+        client = sdk.AsyncAnthropic(api_key="test-key", max_retries=0, http_client=http_client)
+        monkeypatch.setattr(model, "_async_client", lambda: client)
+    else:
+        http_client = httpx2.Client(transport=respond(_SyncBody))
+        client = sdk.Anthropic(api_key="test-key", max_retries=0, http_client=http_client)
+        monkeypatch.setattr(model, "_client", lambda: client)
+
+
+async def _respond(model, use_async, on_text):
+    request = Request(system=None, messages=(Message("user", (TextBlock("hi"),)),))
+    if use_async:
+        return await model.arespond(request, on_text=on_text)
+    return model.respond(request, on_text=on_text)
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "fail",
+    [
+        httpx2.RemoteProtocolError("peer closed connection without sending complete message body"),
+        httpx2.ReadError("connection reset by peer"),
+        httpx2.ReadTimeout("The read operation timed out"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_real_sdk_transport_error_mid_stream_becomes_provider_error(monkeypatch, fail, use_async):
+    model = Anthropic("claude-sonnet-5")
+    _install_sdk_over_transport(monkeypatch, model, [_SSE_START, fail], use_async=use_async)
+    seen = []
+    with pytest.raises(ProviderError) as exc_info:
+        await _respond(model, use_async, seen.append)
+    assert type(exc_info.value) is ProviderError
+    # The SDK lets the raw httpx2 error through (it is not an AnthropicError); the adapter wraps it.
+    assert exc_info.value.__cause__ is fail
+    assert seen == ["Hel"]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_real_sdk_error_event_mid_stream_becomes_provider_error(monkeypatch, use_async):
+    import anthropic as sdk
+
+    model = Anthropic("claude-sonnet-5")
+    _install_sdk_over_transport(monkeypatch, model, [_SSE_START, _SSE_ERROR], use_async=use_async)
+    seen = []
+    with pytest.raises(ProviderError) as exc_info:
+        await _respond(model, use_async, seen.append)
+    # The SDK raises an APIStatusError for the error event (the HTTP status is still 200, so it is not mapped to
+    # RateLimitError or another subclass).
+    assert type(exc_info.value) is ProviderError
+    assert isinstance(exc_info.value.__cause__, sdk.APIStatusError)
+    assert "overloaded_error" in str(exc_info.value)
+    assert seen == ["Hel"]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_real_sdk_complete_stream_still_works(monkeypatch, use_async):
+    end = (
+        b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'
+        b"event: message_delta\n"
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},'
+        b'"usage":{"output_tokens":2}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    model = Anthropic("claude-sonnet-5")
+    _install_sdk_over_transport(monkeypatch, model, [_SSE_START, end], use_async=use_async)
+    seen = []
+    reply = await _respond(model, use_async, seen.append)
+    assert seen == ["Hel"]
+    assert reply.message.content == (TextBlock("Hel"),)
+    assert reply.stop_reason == "end_turn"

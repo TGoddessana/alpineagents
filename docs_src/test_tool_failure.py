@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, ToolError, tool
+from alpineagents import Agent, State, StoppedByUntil, ToolError, tool
 from alpineagents.testing import FakeModel, tool_call
 
 
@@ -28,4 +28,4 @@ def test_a_missing_file_is_an_error_result(tmp_path, monkeypatch):
 
     result = next(h for h in state.history if h.kind == "tool_result")
     assert (result.content, result.is_error) == ("No such file: missing.py", True)
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")

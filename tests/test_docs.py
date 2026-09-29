@@ -17,7 +17,20 @@ from pathlib import Path
 import pytest
 
 import alpineagents.agent as agent_module
-from alpineagents import Agent, Message, Model, Reply, State, Usage, tool
+from alpineagents import (
+    Agent,
+    AuthError,
+    ContextTooLongError,
+    Message,
+    Model,
+    ProviderError,
+    Reply,
+    State,
+    StoppedByPermission,
+    StoppedByUntil,
+    Usage,
+    tool,
+)
 from alpineagents.testing import FakeModel, tool_call
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -116,6 +129,18 @@ def _without_last_line(name: str) -> str:
 # ---------------------------------------------------------------- guides
 
 
+def test_stop_conditions_guide_lists_every_way_a_loop_stops():
+    from typing import get_args
+
+    from alpineagents.types import Stopped
+
+    guide = (ROOT / "docs" / "guides" / "stop-conditions.md").read_text()
+    ways = get_args(Stopped)
+    assert f"one of {['zero', 'one', 'two', 'three', 'four', 'five'][len(ways)]} ways" in guide
+    for way in ways:
+        assert f"`{way.__name__}(" in guide, way.__name__
+
+
 def test_stop_conditions():
     ns = run("stop_conditions")
     big = Reply(
@@ -124,7 +149,7 @@ def test_stop_conditions():
     )
     state = State("Work")
     Agent(model=FakeModel([big]), loop=ns["careful"], reporter=None).run(state)
-    assert state.stopped_by == "spent_too_much"
+    assert state.stopped == StoppedByUntil("spent_too_much")
 
 
 def test_submit_tool(models, capsys):
@@ -133,14 +158,34 @@ def test_submit_tool(models, capsys):
     assert "'files_changed': ['utils.py']" in capsys.readouterr().out
 
 
-def test_approval_no(models, answers, monkeypatch, tmp_path):
+def test_approval_no(models, answers, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     fake = FakeModel([tool_call("write_file", path="README.md", content="# Hi"), "I did not write it"])
     models.append(fake)
     answers.append("no")
     run("approval")
     assert not Path("README.md").exists()
-    assert "The user declined this call" in last_request_text(fake)
+    assert len(fake.requests) == 1  # the run stopped instead of asking the model again
+    assert capsys.readouterr().out.splitlines()[-1] == "None"
+
+
+def test_approval_stop(models, answers, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeModel([
+        tool_call("write_file", path="README.md", content="# Hi"),
+        tool_call("write_file", path="README.txt", content="Hi"),
+        "Wrote README.txt",
+    ])
+    models.append(FakeModel(["Nothing to write"]))  # the run at the end of approval.py
+    ns = run("approval")
+    ns["agent"] = ns["agent"].copy(model=fake)
+    answers.extend(["no", "Use README.txt instead", "yes"])
+    run("approval_stop", ns=ns)
+    assert Path("README.txt").read_text() == "Hi" and not Path("README.md").exists()
+    assert "The user declined this call. Wait for their next message." in last_request_text(fake)
+    assert "Use README.txt instead" in last_request_text(fake)
+    assert capsys.readouterr().out.splitlines()[-1] == "Wrote README.txt"
+    assert answers == []
 
 
 def test_approval_yes(models, answers, monkeypatch, tmp_path):
@@ -164,16 +209,69 @@ def test_approval_always(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     models.append(FakeModel([tool_call("write_file", path="a.md", content="a"), "Done"]))
     answers.append("yes")
-    ns = run("approval", "approval_always")
     fake = FakeModel([
         tool_call("write_file", path="b.md", content="b"),
         tool_call("write_file", path="c.md", content="c"),
         "Done",
     ])
+    models.append(fake)  # for the agent.copy(...) in approval_always.py
+    ns = run("approval", "approval_always")
     answers.append("always")
-    ns["agent"].copy(model=fake, loop=ns["careful"], reporter=None).run("Write two files")
+    state = State("Write two files")
+    ns["agent"].run(state)
     assert Path("b.md").exists() and Path("c.md").exists()
     assert answers == []
+    assert state.root.data["always"] == ["write_file"]
+
+
+def test_approval_hints(models, answers, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    models.append(FakeModel([
+        tool_call("bash", command="mkdir build"),
+        tool_call("bash", command="ls"),
+        tool_call("bash", command="rm -rf build"),
+        "unused",
+    ]))
+    ns = run("approval_hints")
+    answers.append("no")  # only rm -rf build is asked about
+    state = State("Clean up")
+    ns["agent"].run(state)
+    assert Path("build").is_dir()
+    assert answers == []
+    assert state.stopped == StoppedByPermission(state.history[-1].call, "DecideByHuman()")
+    bash = ns["bash"]
+    assert bash.hints_for({"command": "ls -la"}).read_only
+    assert not bash.hints_for({"command": "mkdir build"}).destructive
+    assert bash.hints_for({"command": "ls; rm -rf build"}).destructive
+    assert bash.hints_for({"command": 5}).destructive
+
+
+def test_tool_hints():
+    bash = run("tool_hints")["bash"]
+    assert bash.hints_for({"command": "ls"}).read_only
+    assert not bash.hints_for({"command": "rm -rf build"}).read_only
+    assert not bash.read_only
+
+
+def test_approval_deny(models, answers, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("notes.md").write_text("hello")
+    models.append(FakeModel(["Nothing to write"]))  # the run at the end of approval.py
+    fake = FakeModel([
+        tool_call("read_file", path="../secret.txt"),
+        tool_call("read_file", path="notes.md"),
+        tool_call("write_file", path="/tmp/out.md", content="x"),
+        "It says hello",
+    ])
+    models.append(fake)  # for the agent.copy(...) in approval_deny.py
+    ns = run("approval", "approval_deny")
+    state = State("Read the notes")
+    ns["agent"].run(state)  # no answers queued: asking would fail
+    denied = [h for h in state.history if h.kind == "denied"]
+    assert [h.call.args["path"] for h in denied] == ["../secret.txt", "/tmp/out.md"]
+    assert "is outside" in denied[0].content and "Use a path inside it." in denied[0].content
+    assert "hello" in last_request_text(fake)
+    assert repr(ns["agent"].permissions[0]) == f"DenyOutsideFolder({str(tmp_path.resolve())!r})"
 
 
 def test_verify():
@@ -246,7 +344,41 @@ def test_plan_first():
     agent.run(state)
     assert seen == [0]
     assert state.turn == 3
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
+
+
+def test_nested_plain_loop_goes_on_after_the_inner_loop_reaches_its_limit():
+    ns = run("nested_plain_loop")
+
+    @tool
+    def look() -> str:
+        """Look."""
+        return "seen"
+
+    replies = [tool_call("look")] * 6 + ["Done"]
+    state = State("Research")
+    Agent(model=FakeModel(replies), tools=[look], loop=ns["three_rounds"], reporter=None).run(state)
+    assert state.answer == "Done"
+    assert state.stopped == StoppedByUntil("is_answered")
+
+
+def test_nested_plain_loop_stops_on_a_permission_stop(answers):
+    from alpineagents.permissions import DecideByHuman
+
+    ns = run("nested_plain_loop")
+
+    @tool
+    def look() -> str:
+        """Look."""
+        return "seen"
+
+    answers.append("no")
+    state = State("Research")
+    fake = FakeModel([tool_call("look"), "Done"])
+    agent = Agent(model=fake, tools=[look], loop=ns["three_rounds"], permissions=[DecideByHuman()], reporter=None)
+    agent.run(state)
+    assert isinstance(state.stopped, StoppedByPermission)
+    assert len(fake.requests) == 1
 
 
 def test_tool_state():
@@ -296,8 +428,122 @@ def test_human(models, monkeypatch, tmp_path):
     ns = run("approval", "human")
     fake = FakeModel([tool_call("write_file", path="x.md", content="x"), "Skipped"])
     agent = ns["agent"].copy(model=fake, human=ns["Unattended"](), reporter=None)
-    assert agent.run("Write x.md") == "Skipped"
+    state = State("Write x.md")
+    agent.run(state)
     assert not Path("x.md").exists()
+    assert isinstance(state.stopped, StoppedByPermission)
+    assert state.stopped.permission == "DecideByHuman()"
+
+
+class _Drops(Model):
+    """Wraps a FakeModel. The first requests fail with the given errors, after streaming "partial " if asked."""
+
+    name = "drops"
+    provider = "fake"
+
+    def __init__(self, fake: FakeModel, errors: list[Exception], *, after_text: bool = True):
+        self.fake = fake
+        self.errors = list(errors)
+        self.after_text = after_text
+        self.calls = 0
+
+    @property
+    def context_window(self) -> int:
+        return self.fake.context_window
+
+    def respond(self, request, on_text=None, on_event=None):
+        self.calls += 1
+        if self.errors:
+            if self.after_text and on_text:
+                on_text("partial ")
+            raise self.errors.pop(0)
+        return self.fake.respond(request, on_text, on_event)
+
+
+def test_retry_stream():
+    ns = run("retry_stream", "retry_reporter")
+    assert ns["agent"].model.name == "claude-sonnet-5"
+    inner = _Drops(FakeModel(["The answer"]), [ProviderError("connection reset")])
+    wrapped = ns["RetryDroppedStream"](inner)
+    assert (wrapped.name, wrapped.provider, wrapped.context_window) == ("drops", "fake", 200_000)
+    reporter = ns["LiveText"]()
+    state = State("Question")
+    assert Agent(model=wrapped, reporter=reporter).run(state) == "The answer"
+    assert inner.calls == 2
+    assert reporter.text == "The answer"
+    events = [h.content for h in state.history if h.kind == "model_event"]
+    assert [e.kind for e in events] == ["retry"]
+    assert "connection reset" in events[0].message
+
+
+def test_retry_stream_async():
+    import asyncio
+
+    ns = run("retry_stream")
+    inner = _Drops(FakeModel(["The answer"]), [ProviderError("dropped"), ProviderError("dropped")])
+    agent = Agent(model=ns["RetryDroppedStream"](inner), reporter=None)
+    assert asyncio.run(agent.arun("Question")) == "The answer"
+    assert inner.calls == 3
+
+
+@pytest.mark.parametrize(
+    ("errors", "after_text", "calls"),
+    [
+        ([ProviderError("down")], False, 1),  # before the stream: the SDK already retried
+        ([AuthError("bad key")], True, 1),
+        ([ContextTooLongError("too long")], True, 1),
+        ([ProviderError("dropped")] * 3, True, 3),  # every attempt used
+    ],
+)
+def test_retry_stream_raises(errors, after_text, calls):
+    ns = run("retry_stream")
+    inner = _Drops(FakeModel(["The answer"]), errors, after_text=after_text)
+    with pytest.raises(type(errors[-1])):
+        Agent(model=ns["RetryDroppedStream"](inner), reporter=None).run("Question")
+    assert inner.calls == calls
+
+
+def test_nudge():
+    ns = run("nudge")
+
+    @tool
+    def look() -> str:
+        """Look around"""
+        return "a file"
+
+    fake = FakeModel(["I will look now", tool_call("look"), "Done", "Done", "Done"])
+    state = State("Look")
+    Agent(model=fake, tools=[look], loop=ns["nudging"], reporter=None).run(state)
+    assert state.answer == "Done"
+    assert fake.remaining == 0
+    notices = [h.content for h in state.history if h.kind == "notice"]
+    assert len(notices) == 3 and notices[0] == "[notice] " + ns["NUDGE"]
+    assert state.stopped == StoppedByUntil("is_answered")
+
+
+def test_nudge_gives_up():
+    ns = run("nudge")
+    fake = FakeModel(["Maybe", "Maybe", "Maybe", "unused"])
+    state = State("Look")
+    Agent(model=fake, loop=ns["nudging"], reporter=None).run(state)
+    assert fake.remaining == 1
+    assert len([h for h in state.history if h.kind == "notice"]) == ns["NUDGES"]
+
+
+def test_repeating():
+    ns = run("repeating")
+
+    @tool
+    def look(path: str) -> str:
+        """Look at a path"""
+        return "nothing"
+
+    same = [tool_call("look", path="a") for _ in range(3)]
+    fake = FakeModel([tool_call("look", path="b"), *same, "unused"])
+    state = State("Look")
+    Agent(model=fake, tools=[look], loop=ns["watched"], reporter=None).run(state)
+    assert state.stopped == StoppedByUntil("repeating")
+    assert fake.remaining == 1
 
 
 def test_custom_model():

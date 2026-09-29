@@ -254,18 +254,12 @@ def test_add_user_message_rejects_empty_text(text):
     assert len(state.context) == 1
 
 
-def test_add_notice_deny_and_start_from_reject_empty_text():
+def test_add_notice_and_start_from_reject_empty_text():
     state = State("do something")
     with pytest.raises(ValueError):
         state.add_notice(" ")
     with pytest.raises(ValueError):
         state.start_from("")
-    call = ToolCall(name="bash", args={}, id="c1")
-    state._begin_think()
-    state._record_reply(_reply_with_call(call))
-    with pytest.raises(ValueError):
-        state.deny(call, "")
-    assert state.pending_calls == (call,)
 
 
 # ---------------------------------------------------------------- single reads of state.data

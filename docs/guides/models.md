@@ -14,6 +14,60 @@
 
 Any other string raises `ValueError` with the strings you can use instead.
 
+## Options with a model string
+
+`resolve_model` turns a model string into a Model, the same way `Agent(model=...)` does. Keyword options go to
+the Model it picks:
+
+```python
+from alpineagents import Agent
+from alpineagents.models import resolve_model
+
+model = resolve_model("anthropic/claude-sonnet-5", max_tokens=16_000, thinking=True)
+# the same as Anthropic("claude-sonnet-5", max_tokens=16_000, thinking=True)
+
+agent = Agent(model=model)
+```
+
+- `"ollama/<name>"` uses `http://localhost:11434/v1` unless you pass `base_url=`, for an Ollama server on
+  another machine.
+- An option the picked Model does not take raises `TypeError` that lists the options it takes. For example,
+  `thinking=` with an `"openai/..."` string.
+- Passing a Model object together with options raises `TypeError`. Set the options when you create the Model.
+
+### `base_url` sends the whole string to an OpenAI-compatible server
+
+With `base_url=`, the string is not split into a provider and a name. The model is always `OpenAICompatible`,
+and the whole string is the model name the server receives. Routers such as OpenRouter name their models this
+way:
+
+```python
+import os
+
+from alpineagents.models import resolve_model
+
+model = resolve_model(
+    "anthropic/claude-sonnet-5",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+# the same as OpenAICompatible("anthropic/claude-sonnet-5", base_url=..., api_key=...)
+```
+
+`"ollama/<name>"` is the one exception: the `ollama/` prefix is still removed.
+
+A proxy that speaks the Anthropic API rather than the OpenAI one needs `Anthropic` itself. Create it directly:
+`Anthropic("claude-sonnet-5", base_url="https://my-proxy/anthropic")`.
+
+### When to create the Model directly
+
+A model string with options is enough for the usual cases. Create `Anthropic(...)` or `OpenAICompatible(...)`
+yourself when:
+
+- the server speaks the Anthropic API at another URL (see above),
+- you want the Model class to be obvious to the reader, or type checkers to check its settings,
+- you [subclass or wrap a Model](#write-a-model).
+
 ## Model settings
 
 Pass a Model object to change its settings:

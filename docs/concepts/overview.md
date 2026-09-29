@@ -28,7 +28,10 @@ answer = agent.run("Find the bug in main.py")
     1. `compact_if_full(agent, state)`: if the context is more than 60% of the model's context window, it replaces
        the context with the task and a summary.
     2. `agent.think(state)`: sends the context to the model and records the reply in the State.
-    3. `agent.use_tools(state)`: if the reply asked for tool calls, runs them and records the results.
+    3. `agent.use_tools(state)`: if the reply asked for tool calls, runs them and records the results. With
+       `Agent(permissions=[...])`, it first asks the permissions about every call of the turn, before any tool runs.
+       A refused call does not run, and the model gets the reason as its result. See
+       [Ask before a tool runs](../guides/approval.md).
 5. When the loop stops, `run` returns `state.answer`.
 
 ## The default loop
@@ -60,11 +63,11 @@ from alpineagents import State
 state = State("Find the bug in main.py")
 agent.run(state)
 
-state.answer      # the answer
-state.stopped_by  # why the loop stopped, for example "is_answered"
-state.turn        # how many turns it took
-state.usage       # tokens, requests and cost
-print(state)      # one line per history entry
+state.answer   # the answer
+state.stopped  # why the loop stopped, for example StoppedByUntil("is_answered")
+state.turn     # how many turns it took
+state.usage    # tokens, requests and cost
+print(state)   # one line per history entry
 ```
 
 `print(state)` shows what happened, in order:
@@ -74,7 +77,7 @@ print(state)      # one line per history entry
 [turn 1] reply: read_file(path="main.py")
 [turn 1] tool_result read_file: 8B
 [turn 2] reply: Line 1 is fine.
-done: is_answered (2 turns)
+done: stopped by is_answered (2 turns)
 ```
 
 To keep a State after the process ends, and continue it later, give the Agent a store. See

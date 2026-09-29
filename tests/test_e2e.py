@@ -29,6 +29,9 @@ from alpineagents import (
     Reply,
     Reporter,
     State,
+    StoppedByFinish,
+    StoppedByLimit,
+    StoppedByUntil,
     Terminal,
     Usage,
     compact_if_full,
@@ -36,6 +39,7 @@ from alpineagents import (
     loop,
     tool,
 )
+from alpineagents.permissions import Allowed, DecidePermission, Denied, DenyByName
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.types import Message, Request, TextBlock
 
@@ -364,31 +368,24 @@ def test_on_tool_start_and_on_tool_end_wrap_execution_in_order():
 
 
 def test_on_tool_end_for_denied_call_has_no_matching_on_tool_start():
-    """"on_tool_end (denied) | State.deny | right after recording (outside the lock)`` -- without ``on_tool_start``.
-
-    (ARCHITECTURE.md "Reporter notifications: who and when": State.deny calls on_tool_end for a denied call,
-    without on_tool_start.)
-    """
+    """"on_tool_end (denied)": a call a permission denied gets on_tool_end without on_tool_start (the tool did not
+    run)."""
 
     @tool
     def write_file(path: str, content: str) -> str:
         """Writes to a file."""
         return "written"
 
-    @loop(until=State.is_answered, limit=5)
-    def coding_with_permission(agent, state):
-        agent.think(state)
-        if state.wants_tools():
-            for call in state.pending_calls:
-                state.deny(call, "The user denied it")
-            agent.use_tools(state)
-
     reporter = RecordingReporter()
     human = FakeHuman([])
     call = tool_call("write_file", path="a.txt", content="x")
     fake = FakeModel([call, "Gave up"])
     agent = Agent(
-        model=fake, tools=[write_file], loop=coding_with_permission, reporter=reporter, human=human
+        model=fake,
+        tools=[write_file],
+        reporter=reporter,
+        human=human,
+        permissions=[DenyByName(["write_file"], reason="The user denied it")],
     )
     state = State("Write the file")
     agent.run(state)
@@ -436,7 +433,7 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
 
     assert state_silent.answer == state_with_reporter.answer == "Answer"
     assert state_silent.turn == state_with_reporter.turn
-    assert state_silent.stopped_by == state_with_reporter.stopped_by == "is_answered"
+    assert state_silent.stopped == state_with_reporter.stopped == StoppedByUntil("is_answered")
     assert len(reporter.events) > 0  # control: with a reporter, notifications really pile up
 
 
@@ -497,7 +494,7 @@ def test_terminal_end_to_end_output_shape_for_tool_then_answer():
         f"  done {_byte_size('hello')}\n"
         "[turn 2] thinking\n"
         "The bug is on line 3\n"
-        "done: is_answered (2 turns)\n"
+        "done: stopped by is_answered (2 turns)\n"
     )
     assert out.getvalue() == expected
 
@@ -524,7 +521,7 @@ def test_terminal_shows_limit_warning_line_end_to_end():
     state = State("A task that never ends")
     agent.run(state)
 
-    assert state.stopped_by == "limit"
+    assert state.stopped == StoppedByLimit(1)
     assert "done: reached limit(1), the task may be unfinished (1 turn)\n" in out.getvalue()
     assert out.getvalue().splitlines()[-1] == "done: reached limit(1), the task may be unfinished (1 turn)"
 
@@ -545,38 +542,32 @@ def write_file(path: str, content: str) -> str:
     return "written"
 
 
-def ask_permission(agent: Agent, state: State) -> None:
-    """The "permission check" block as is. The 'always allow' list lives on ``state.root``."""
-    root = state.root
-    for call in state.pending_calls:
+class AskPermission(DecidePermission):
+    """The "permission check" example with an "always" answer. The 'always allow' list lives on ``state.root``."""
+
+    def __init__(self, human: FakeHuman) -> None:
+        self.human = human
+
+    def check(self, state, call, tool):
+        root = state.root
         if call.name not in DANGEROUS or call.name in root.data.get("always_allow", []):
-            continue
-        answer = agent.ask_human(
-            state, f"Run {call.name}({call.args})?", returns=Literal["yes", "no", "always"]
-        )
+            return Allowed()
+        answer = self.human.ask(state, f"Run {call.name}({call.args})?", Literal["yes", "no", "always"])
         if answer == "always":
             with root.lock:
                 root.data.setdefault("always_allow", []).append(call.name)
         elif answer == "no":
-            state.deny(call, "The user denied it")
-
-
-@loop(until=State.is_answered, limit=10)
-def coding(agent: Agent, state: State):
-    """The ``coding`` loop from the overview. Several "complex example code" examples reuse this loop."""
-    agent.think(state)
-    if state.wants_tools():
-        ask_permission(agent, state)
-        agent.use_tools(state)
+            return Denied("The user denied it")
+        return Allowed()
 
 
 def test_permission_block_denies_dangerous_call():
-    """"A denied call has a result, so use_tools skips it."""
+    """"A denied call has a result, so use_tools does not run it."""
     _write_calls.clear()
     call = tool_call("write_file", path="a.txt", content="x")
     fake = FakeModel([call, "Gave up"])
     human = FakeHuman(["no"])
-    agent = Agent(model=fake, tools=[write_file], loop=coding, human=human, reporter=None)
+    agent = Agent(model=fake, tools=[write_file], permissions=[AskPermission(human)], human=human, reporter=None)
     state = State("Write the file")
     agent.run(state)
 
@@ -598,7 +589,7 @@ def test_permission_block_always_allow_skips_asking_again_same_turn():
     ]
     fake = FakeModel([calls, "All done"])  # request two calls together in one turn
     human = FakeHuman(["always"])
-    agent = Agent(model=fake, tools=[write_file], loop=coding, human=human, reporter=None)
+    agent = Agent(model=fake, tools=[write_file], permissions=[AskPermission(human)], human=human, reporter=None)
     state = State("Write two files")
     agent.run(state)
 
@@ -660,7 +651,7 @@ def test_chat_loop_answers_then_quits_on_command():
     state = State("Hi")
     agent.run(state)
 
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
     assert state.answer == "Yes, there is"
     assert human.questions == [">", ">"]
     assert len([e for e in state.history if e.kind == "human"]) == 2
@@ -698,7 +689,7 @@ def test_coder_and_reviewer_pair_finishes_once_approved():
     state = State("Implement the feature")
     coder.run(state)
 
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
     assert state.answer == "Tests added"
     ask_entries = [e for e in state.history if e.kind == "ask"]
     assert len(ask_entries) == 2
@@ -729,7 +720,7 @@ def test_reads_file_then_answers():
 
     assert state.answer == "The bug is on line 3"
     assert state.turn == 2
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
 
 
 # ======================================================================
@@ -762,7 +753,7 @@ def test_overview_example_two_full_loop_with_filesystem(tmp_path):
     """"Everything in use" example, run end to end without the subagent (researcher)/MCP/skills.
 
     The ``FileSystem`` tool object, a custom ``coding`` loop (with ``compact_if_full``),
-    ``state.stopped_by`` and ``state.usage.cost`` are all checked as is.
+    ``state.stopped`` and ``state.usage.cost`` are all checked as is.
     """
     (tmp_path / "main.py").write_text("def main():\n    return None  # bug: no null check\n")
 
@@ -803,6 +794,6 @@ def test_overview_example_two_full_loop_with_filesystem(tmp_path):
     answer = agent.run(state)
 
     assert answer == "Found the bug: missing null check"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     # An unknown price is None (unknown and 0 are kept apart)
     assert state.usage.cost is None

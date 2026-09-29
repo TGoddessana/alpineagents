@@ -20,6 +20,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from functools import cached_property
 from typing import Any, Literal, TypeAlias
 
@@ -47,6 +48,11 @@ __all__ = [
     "ModelEvent",
     "ToolOutcomeKind",
     "ToolOutcome",
+    "StoppedByUntil",
+    "StoppedByLimit",
+    "StoppedByFinish",
+    "StoppedByPermission",
+    "Stopped",
     "INVALID_ARGS_KEY",
     "TRUNCATED_ARGS_MESSAGE",
     "format_call",
@@ -398,7 +404,17 @@ class Usage:
 
 
 HistoryKind: TypeAlias = Literal[
-    "user", "reply", "tool_result", "notice", "denied", "ask", "human", "context_change", "model_event", "error"
+    "user",
+    "reply",
+    "tool_result",
+    "notice",
+    "denied",
+    "cancelled",
+    "ask",
+    "human",
+    "context_change",
+    "model_event",
+    "error",
 ]
 
 
@@ -444,7 +460,24 @@ class ModelEvent:
     """Extra values the Model adds."""
 
 
-ToolOutcomeKind: TypeAlias = Literal["done", "error", "input_error", "aborted", "interrupted", "denied"]
+class ToolOutcomeKind(StrEnum):
+    """How a tool call ended (``ToolOutcome.kind``). A ``StrEnum``, so ``outcome.kind == "denied"`` works too."""
+
+    DONE = "done"
+    """The tool returned, and the result is its output."""
+    ERROR = "error"
+    """The tool returned an error result, which the model sees as an error (an MCP server's ``isError``)."""
+    INPUT_ERROR = "input_error"
+    """The tool was not called because the tool is unknown or the arguments failed validation."""
+    ABORTED = "aborted"
+    """The tool raised."""
+    INTERRUPTED = "interrupted"
+    """Closed by ``KeyboardInterrupt`` or ``CancelledError``."""
+    DENIED = "denied"
+    """Not run because a permission denied it, and the result is the reason."""
+    CANCELLED = "cancelled"
+    """Not run because a permission stopped the turn (another call of the same turn was denied with
+    ``stop=True``)."""
 
 
 @dataclass(frozen=True)
@@ -457,16 +490,81 @@ class ToolOutcome:
     kind: ToolOutcomeKind
     """One of:
 
-    - ``"done"``: the tool returned, and the result is its output
-    - ``"error"``: the tool returned an error result, which the model sees as an error (an MCP server's
+    - ``DONE``: the tool returned, and the result is its output
+    - ``ERROR``: the tool returned an error result, which the model sees as an error (an MCP server's
       ``isError``)
-    - ``"input_error"``: the tool was not called because the tool is unknown or the arguments failed validation
-    - ``"aborted"``: the tool raised
-    - ``"interrupted"``: closed by ``KeyboardInterrupt`` or ``CancelledError``
-    - ``"denied"``: closed by ``state.deny``, and the result is the reason
+    - ``INPUT_ERROR``: the tool was not called because the tool is unknown or the arguments failed validation
+    - ``ABORTED``: the tool raised
+    - ``INTERRUPTED``: closed by ``KeyboardInterrupt`` or ``CancelledError``
+    - ``DENIED``: not run because a permission denied it, and the result is the reason
+    - ``CANCELLED``: not run because a permission stopped the turn (another call of the same turn was denied
+      with ``stop=True``)
+
+    A plain string such as ``"denied"`` given here becomes the matching ``ToolOutcomeKind``.
     """
     error: BaseException | None = None
-    """The exception for ``"aborted"`` and ``"interrupted"``, otherwise ``None``."""
+    """The exception for ``ABORTED`` and ``INTERRUPTED``, and the ``ToolError`` a permission raised for a
+    ``DENIED`` call. Otherwise ``None``."""
+    decided_by: str | None = None
+    """The ``repr()`` of the permission that decided a ``DENIED`` or ``CANCELLED`` outcome. ``None`` for other
+    kinds, and when no permission decided."""
+
+    def __post_init__(self) -> None:
+        # ValueError for a string that is not a kind.
+        object.__setattr__(self, "kind", ToolOutcomeKind(self.kind))
+
+
+# ---------------------------------------------------------------- why a loop stopped
+
+
+@dataclass(frozen=True)
+class StoppedByUntil:
+    """``state.stopped`` when an ``until`` function of ``@loop`` returned true. ``str()`` gives
+    ``stopped by is_answered``."""
+
+    name: str
+    """The function's ``__name__``, e.g. ``"is_answered"`` (``"<lambda>"`` for a lambda)."""
+
+    def __str__(self) -> str:
+        return f"stopped by {self.name}"
+
+
+@dataclass(frozen=True)
+class StoppedByLimit:
+    """``state.stopped`` when the loop ran ``limit`` turns in this call. ``str()`` gives ``stopped at limit 30``."""
+
+    turns: int
+    """The loop's ``limit``."""
+
+    def __str__(self) -> str:
+        return f"stopped at limit {self.turns}"
+
+
+@dataclass(frozen=True)
+class StoppedByFinish:
+    """``state.stopped`` when ``state.finish()`` was called. ``str()`` gives ``stopped by finish``."""
+
+    def __str__(self) -> str:
+        return "stopped by finish"
+
+
+@dataclass(frozen=True)
+class StoppedByPermission:
+    """``state.stopped`` when a permission denied a tool call with ``stop=True``. The run ended normally and the
+    State is not finished: add a user message and run again to continue. ``str()`` gives
+    ``stopped by permission DecideByHuman()``."""
+
+    call: ToolCall
+    """The tool call that was denied."""
+    permission: str
+    """The ``repr()`` of the permission that denied it."""
+
+    def __str__(self) -> str:
+        return f"stopped by permission {self.permission}"
+
+
+#: Why a loop stopped: the type of ``state.stopped`` (without ``None``).
+Stopped: TypeAlias = StoppedByUntil | StoppedByLimit | StoppedByFinish | StoppedByPermission
 
 
 def _now() -> datetime:
@@ -487,7 +585,8 @@ class HistoryEntry:
     | ``reply`` | ``Reply`` |
     | ``tool_result`` | the result sent to the model: ``str``, or a tuple of ``TextBlock`` and ``Image``. Has ``call`` |
     | ``notice`` | ``str`` starting with ``"[notice] "`` |
-    | ``denied`` | ``str``, the denial reason. Has ``call`` |
+    | ``denied`` | ``str``, what the model was told: the reason a permission denied the call. Has ``call`` |
+    | ``cancelled`` | ``str``, what the model was told: a permission stopped the turn, so the call did not run. Has ``call`` |
     | ``ask`` | an object with ``question`` and ``answer`` (``answer`` is ``None`` if no answer came) |
     | ``human`` | same as ``ask`` |
     | ``context_change`` | ``ContextChange`` |
@@ -499,14 +598,15 @@ class HistoryEntry:
     turn: int
     """``state.turn`` when the entry was recorded."""
     call: ToolCall | None = None
-    """The tool call, for ``tool_result``, ``denied`` and errors raised by a tool."""
+    """The tool call, for ``tool_result``, ``denied``, ``cancelled`` and errors raised by a tool or a permission."""
     error: BaseException | None = None
     """The exception, for ``error`` entries. For a ``tool_result`` made from a ``ToolError``, that ``ToolError``
-    (its ``__cause__`` is the original exception when ``exception_handler`` made it). Not saved by a store."""
+    (its ``__cause__`` is the original exception when ``exception_handler`` made it), and for a ``denied`` entry
+    made from a ``ToolError`` a permission raised, that one. Not saved by a store."""
     late: bool = False
     """``True`` for a tool result that arrived after its call was already closed."""
     is_error: bool = False
-    """``True`` for a ``tool_result`` or ``denied`` entry the model sees as an error result."""
+    """``True`` for a ``tool_result``, ``denied`` or ``cancelled`` entry the model sees as an error result."""
     substate: Any = None
     """Reserved for subagents, which are not implemented yet. Always ``None``."""
     # A lambda rather than _now itself, so _now is looked up at call time (tests monkeypatch types._now).

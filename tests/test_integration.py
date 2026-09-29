@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from alpineagents import Agent, Reporter, State, loop, tool
+from alpineagents import Agent, Reporter, State, StoppedByFinish, StoppedByUntil, loop, tool
 from alpineagents._tokens import context_tokens, estimate_overhead_tokens
 from alpineagents.testing import FakeModel, tool_call
 from alpineagents.types import Message, Reply, ToolResultBlock, Usage
@@ -95,8 +95,8 @@ def test_tool_exception_waits_for_other_calls_and_keeps_type_and_message_with_no
 
 def test_serial_tools_do_not_start_after_a_parallel_call_failed():
     """"parallel=False tools run one at a time after the rest finish." If the parallel group raises, the serial
-    tools do not start and their calls stay in pending_calls (a loop that catches it can close them with
-    state.deny)."""
+    tools do not start and their calls stay in pending_calls (a loop that catches it can run them again with
+    use_tools)."""
     ran: list[str] = []
 
     @tool(parallel=False)
@@ -181,13 +181,13 @@ def test_exception_after_reply_recorded_rolls_back_reply_and_its_calls():
     assert not any(h.kind == "tool_result" for h in state.history)
 
 
-# ================================================================ finish and stopped_by
+# ================================================================ finish and stopped
 
 
 def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
     """"E.g. a submit(answer: str, state: State) tool, which the model calls when it finishes the task, calls
     state.finish(answer)." / "state.finish() was called → stop when that turn ends and return state.answer"
-    (stopped_by="finish")."""
+    (stopped == StoppedByFinish())."""
 
     @tool
     def submit(answer: str, state: State) -> None:
@@ -199,30 +199,30 @@ def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
     result = Agent(fake, tools=[submit], reporter=None).run(state)
     assert result == "42"
     assert state.answer == "42"
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
     assert _result_texts(state) == ["(done)"]
     with pytest.raises(ValueError):
         Agent(fake, reporter=None).run(state)
 
 
-def test_stopped_by_is_cleared_when_a_later_run_raises():
-    """"stopped_by: why the last loop stopped." A run that ended with an exception has no stopped loop, so the
+def test_stopped_is_cleared_when_a_later_run_raises():
+    """"stopped: why the last loop stopped." A run that ended with an exception has no stopped loop, so the
     reason from the previous run does not linger."""
     fake = FakeModel(["First answer", RuntimeError("API broken")])
     agent = Agent(fake, reporter=None)
     state = State("Question")
     agent.run(state)
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
 
     state.add_user_message("One more")
     with pytest.raises(RuntimeError):
         agent.run(state)
-    assert state.stopped_by is None
+    assert state.stopped is None
 
 
-def test_until_callable_object_without_name_uses_class_name_for_stopped_by():
+def test_until_callable_object_without_name_uses_class_name_for_stopped():
     """"until takes one State -> bool function, or a list of functions." A callable object without a name must
-    also be able to stop the loop, and stopped_by holds its class name."""
+    also be able to stop the loop, and stopped holds its class name."""
 
     class OverBudget:
         def __call__(self, state: State) -> bool:
@@ -242,7 +242,7 @@ def test_until_callable_object_without_name_uses_class_name_for_stopped_by():
     fake = FakeModel([tool_call("noop"), "Done"])
     state = State("Do it")
     Agent(fake, tools=[noop], loop=body, reporter=None).run(state)
-    assert state.stopped_by == "OverBudget"
+    assert state.stopped == StoppedByUntil("OverBudget")
     assert state.turn == 1
 
 
@@ -334,7 +334,7 @@ def test_interrupt_caught_inside_the_loop_keeps_calls_pending_for_deny():
             except KeyboardInterrupt:
                 assert [c.name for c in state.pending_calls] == ["long_job"]
                 for call in state.pending_calls:
-                    state.deny(call, "stopped by the user")
+                    state._deny(call, "stopped by the user")  # what a permission's denial records
 
     class InterruptOnStart(Reporter):
         def on_tool_start(self, state, call):

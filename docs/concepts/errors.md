@@ -44,7 +44,7 @@ catch them or turn them into results, with the exceptions you choose: to let the
 | `use_tools` | Results of the calls that finished are recorded. The other calls stay pending |
 | Anything, and leaves `run` | The error is recorded in `state.history`. Pending calls are closed with a result such as `(aborted: TimeoutError)` |
 
-After `run` raises, `state.stopped_by` is `None`, and you can call `run` with the same State again. `agent` is the
+After `run` raises, `state.stopped` is `None`, and you can call `run` with the same State again. `agent` is the
 Agent from the [quick start](../index.md#quick-start):
 
 ```python
@@ -66,14 +66,14 @@ exception is raised with a note about the failed save, so `except RateLimitError
 ## Catch an exception inside the loop body
 
 If the loop body catches an exception from `use_tools`, the calls that did not finish stay pending, and the next
-`think` raises `ValueError`. Close them with `state.deny` first:
+`think` raises `ValueError`. Run them again with `use_tools` first (calls that already have a result do not run
+again), or let the exception leave the run, which closes them:
 
 ```python
 try:
     agent.use_tools(state)
 except TimeoutError:
-    for call in state.pending_calls:
-        state.deny(call, "The tool timed out")
+    agent.use_tools(state)  # one more try for the calls that did not finish
 ```
 
 ## Ctrl+C and cancellation

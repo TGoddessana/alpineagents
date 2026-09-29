@@ -18,13 +18,13 @@ Let me look at main.py first.
   done 1.2KB
 [turn 2] thinking
 The bug is on line 3.
-done: is_answered (2 turns)
+done: stopped by is_answered (2 turns)
 ```
 
 - `[turn N] thinking` starts each model request. The model's text follows as it streams in.
 - Indented lines are tool calls and their results.
 - The last line says why the run stopped and how many turns it took. When the Model has prices, it also shows the
-  cost, for example `done: is_answered (5 turns, ~$0.42)`.
+  cost, for example `done: stopped by is_answered (5 turns, ~$0.42)`.
 
 Other last lines:
 
@@ -66,8 +66,10 @@ agent = Agent(model="claude-sonnet-5", reporter=LogReporter())
 | `on_model_event(state, event)` | The Model reported something outside the reply, such as a fallback |
 | `on_run_end(state, error)` | `run` ends, always. `error` is `None` on a normal finish |
 
-- Events can come from several threads. For example, a tool that calls `state.deny` runs on a worker thread, and
-  Agents in different threads share the default Terminal. Make the Reporter thread-safe.
+- Events can come from several threads. For example, Agents in different threads share the default Terminal. Make
+  the Reporter thread-safe.
+- A call a [permission](approval.md) refused gets `on_tool_end` without `on_tool_start`, with `outcome.kind`
+  `"denied"`, or `"cancelled"` for the other calls of a turn it stopped. `outcome.decided_by` names the permission.
 - Exceptions raised in a Reporter propagate.
 
 ## Write a Human
@@ -78,13 +80,13 @@ Subclass `Human` and implement `ask`:
 --8<-- "docs_src/human.py"
 ```
 
-`write_file` and `careful` are from [Ask before a tool runs](approval.md):
+`write_file` is from [Ask before a tool runs](approval.md):
 
 ```python
 agent = Agent(
     model="claude-sonnet-5",
     tools=[write_file],
-    loop=careful,
+    permissions=[DecideByHuman()],
     human=Unattended(),
 )
 ```

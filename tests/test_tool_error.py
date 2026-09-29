@@ -6,7 +6,7 @@ functions can use exception classes defined there in their type hints.
 
 import pytest
 
-from alpineagents import Agent, FileStore, Reporter, State, ToolError, tool
+from alpineagents import Agent, FileStore, Reporter, State, StoppedByUntil, ToolError, tool
 from alpineagents.models.openai_compatible import OpenAICompatible
 from alpineagents.testing import FakeModel, tool_call
 from alpineagents.types import Message, Request, ToolCall, ToolResultBlock
@@ -63,7 +63,7 @@ def test_tool_error_becomes_an_error_result_and_the_run_continues():
 
     block = result_block(state)
     assert (block.content, block.is_error) == ("HTTP 404: https://x.dev/missing", True)
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     assert state.answer == "done"
     assert not [entry for entry in state.history if entry.kind == "error"]
 
@@ -88,7 +88,7 @@ async def test_tool_error_from_an_async_tool():
     state = State("Task")
     await make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch]).arun(state)
     assert (result_block(state).content, result_block(state).is_error) == ("HTTP 500", True)
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
 
 
 async def test_tool_error_from_a_sync_tool_in_arun():
@@ -162,7 +162,7 @@ def test_handler_turns_its_exceptions_into_error_results():
 
     state = run_once(fetch, url="u")
     assert (result_block(state).content, result_block(state).is_error) == ("request failed: 404 u", True)
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     entry = result_entry(state)
     assert isinstance(entry.error, ToolError) and isinstance(entry.error.__cause__, NotFound)
 

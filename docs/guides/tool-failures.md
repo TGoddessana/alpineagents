@@ -71,7 +71,7 @@ When the handler takes a failure, the terminal shows `error` and the run goes on
   done 25B
 [turn 4] thinking
 User 42 is Ana. The orders could not be fetched because the server failed.
-done: is_answered (4 turns)
+done: stopped by is_answered (4 turns)
 ```
 
 When an exception gets through, the terminal shows `aborted` and `run` raises it:

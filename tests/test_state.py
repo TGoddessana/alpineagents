@@ -16,7 +16,8 @@ import time
 
 import pytest
 
-from alpineagents import Agent, Reporter, State, tool
+from alpineagents import Agent, Reporter, State, StoppedByLimit, StoppedByUntil, tool
+from alpineagents.permissions import DenyByName
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.types import HistoryEntry, RawBlock, ToolOutcome, Usage
 
@@ -56,7 +57,7 @@ def test_task_must_be_a_string():
 
 def test_initial_values_match_construction_contract():
     # State(task) -> history=[user(task)], context=[user(task)], turn=0, usage=Usage(),
-    # pending_calls=(), stopped_by=None.
+    # pending_calls=(), stopped=None.
     state = State("Find the bug")
 
     assert state.history == (HistoryEntry("user", "Find the bug", turn=0),)
@@ -64,7 +65,7 @@ def test_initial_values_match_construction_contract():
     assert state.turn == 0
     assert state.usage == Usage()
     assert state.pending_calls == ()
-    assert state.stopped_by is None
+    assert state.stopped is None
     assert state.answer is None
     assert state.is_finished() is False
     assert state.wants_tools() is False
@@ -211,16 +212,16 @@ def test_context_used_is_zero_before_first_claim():
     assert State("Task").context_used == 0.0
 
 
-def test_stopped_by_is_until_function_name_when_condition_true():
-    # "stopped_by: ... the name of the until condition function"
+def test_stopped_is_until_function_name_when_condition_true():
+    # "stopped: ... StoppedByUntil with the name of the until condition function"
     agent = make_agent(["final answer"])
     state = State("Task")
     answer = agent.run(state)
     assert answer == "final answer"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
 
 
-def test_stopped_by_is_limit_when_turn_limit_reached():
+def test_stopped_is_limit_when_turn_limit_reached():
     # "limit reached: stop without an exception and return state.answer (None if no answer yet)"
     from alpineagents import loop as loop_decorator
 
@@ -241,7 +242,7 @@ def test_stopped_by_is_limit_when_turn_limit_reached():
     answer = agent.run(state)
 
     assert answer is None
-    assert state.stopped_by == "limit"
+    assert state.stopped == StoppedByLimit(2)
     assert state.turn == 2
 
 
@@ -317,7 +318,7 @@ def test_history_denied_kind_on_deny():
     state = State("Task")
     agent.think(state)
 
-    state.deny(state.pending_calls[0], "This is a dangerous command")
+    state._deny(state.pending_calls[0], "This is a dangerous command")
 
     entry = state.history[-1]
     assert entry.kind == "denied"
@@ -517,7 +518,7 @@ def test_deny_ask_and_ask_human_allowed_while_pending_calls_remain():
     human_agent = Agent(model=FakeModel([]), human=FakeHuman(["yes"]), reporter=None)
     assert human_agent.ask_human(state, "Proceed?") == "yes"
 
-    state.deny(state.pending_calls[0], "the user denied it")  # no error
+    state._deny(state.pending_calls[0], "the user denied it")  # no error
     assert state.pending_calls == ()
 
 
@@ -534,7 +535,7 @@ def test_deny_unknown_call_raises_valueerror():
     state = State("Task")
     unknown = tool_call("nonexistent")
     with pytest.raises(ValueError):
-        state.deny(unknown, "reason")
+        state._deny(unknown, "reason")
 
 
 def test_ask_uses_not_run_yet_placeholder_for_unresolved_call():
@@ -764,20 +765,31 @@ def test_context_change_notifies_reporter_on_start_from():
 
 
 def test_deny_notifies_reporter_on_tool_end_with_reason_as_result():
-    # "on_tool_end (denied) | State.deny | right after recording (outside the lock)"
+    # "on_tool_end (denied)": the runner notifies after State._deny recorded it (outside the lock)
+    @tool
+    def bash(command: str) -> str:
+        """Run a command"""
+        return "ran"
+
     spy = SpyReporter()
     call = tool_call("bash", command="rm -rf /")
-    agent = Agent(model=FakeModel([call]), reporter=spy, human=None)
+    agent = Agent(
+        model=FakeModel([call]),
+        tools=[bash],
+        reporter=spy,
+        human=None,
+        permissions=[DenyByName(["bash"], "dangerous command")],
+    )
     state = State("Task")
     agent.think(state)
 
-    state.deny(state.pending_calls[0], "dangerous command")
+    agent.use_tools(state)
 
     assert len(spy.tool_ends) == 1
     denied_call, result, outcome = spy.tool_ends[0]
     assert denied_call.id == call.id
     assert result == "dangerous command"
-    assert outcome == ToolOutcome("denied")
+    assert outcome == ToolOutcome("denied", decided_by="DenyByName(['bash'], reason='dangerous command')")
 
 
 # ---------------------------------------------------------------------------
@@ -884,4 +896,4 @@ def test_str_summarizes_history_one_line_per_entry():
     assert "Find the bug" in lines[0]
     assert "read_file" in text
     assert "The bug is on line 3" in text
-    assert lines[-1] == "done: is_answered (2 turns)"
+    assert lines[-1] == "done: stopped by is_answered (2 turns)"

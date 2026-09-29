@@ -7,6 +7,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from alpineagents import MCP, Agent, MCPTool, State, loop, tool
+from alpineagents.permissions import Allowed, DecidePermission, Denied
 from alpineagents.testing import FakeModel, tool_call
 
 
@@ -160,27 +161,24 @@ def test_a_missing_name_is_a_plain_key_error_without_mcp():
         agent.tool_map["made_up"]
 
 
-def test_approval_loop_reads_the_hints():
+def test_approval_permission_reads_the_hints():
     asked = []
 
-    @loop(until=State.is_answered, limit=10)
-    def careful(agent: Agent, state: State):
-        agent.think(state)
-        for call in state.pending_calls:
-            tool_ = agent.tool_map.get(call.name)
-            if tool_ is not None and not tool_.read_only:
-                asked.append(call.name)
-                state.deny(call, "The user declined")
-        if state.wants_tools():
-            agent.use_tools(state)
+    class DeclineChanges(DecidePermission):
+        def check(self, state, call, tool_):
+            if tool_.read_only:
+                return Allowed()
+            asked.append(call.name)
+            return Denied("The user declined")
 
     fake = FakeModel([[tool_call("read_file", path="a"), tool_call("bash", command="rm -rf /")], "done"])
     state = State("Task")
-    Agent(model=fake, tools=[read_file, bash], loop=careful, reporter=None, human=None).run(state)
+    agent = Agent(model=fake, tools=[read_file, bash], permissions=[DeclineChanges()], reporter=None, human=None)
+    agent.run(state)
 
     assert asked == ["bash"]
     results = [(e.kind, e.call.name) for e in state.history if e.call is not None]
-    assert results == [("denied", "bash"), ("tool_result", "read_file")]  # denied first, then use_tools runs
+    assert results == [("denied", "bash"), ("tool_result", "read_file")]  # denied first, then the tools run
 
 
 def test_think_with_the_read_only_tools_of_the_map():

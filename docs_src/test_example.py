@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, tool
+from alpineagents import Agent, State, StoppedByUntil, tool
 from alpineagents.testing import FakeModel, tool_call
 
 
@@ -25,5 +25,5 @@ def test_reads_the_file_then_answers(tmp_path, monkeypatch):
     agent.copy(model=fake, reporter=None).run(state)
 
     assert state.answer == "Line 1 has a syntax error"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     assert fake.remaining == 0

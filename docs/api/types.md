@@ -26,6 +26,20 @@ The data objects that the other classes take and return.
 
 ::: alpineagents.ToolOutcome
 
+::: alpineagents.ToolOutcomeKind
+
+## Why a loop stopped
+
+The values of `state.stopped`. `alpineagents.types.Stopped` is their union.
+
+::: alpineagents.StoppedByUntil
+
+::: alpineagents.StoppedByLimit
+
+::: alpineagents.StoppedByFinish
+
+::: alpineagents.StoppedByPermission
+
 ## Content blocks
 
 The parts of a `Message`. `ToolCall` above is also one.

@@ -1,12 +1,13 @@
 # Stop conditions
 
-A loop stops in one of three ways. Pick the one that matches who decides.
+A loop stops in one of four ways. Pick the one that matches who decides.
 
-| Who decides | How | `state.stopped_by` |
+| Who decides | How | `state.stopped` |
 | --- | --- | --- |
-| A check on the State, before every turn | An `until` function | The function's name |
-| Your code or a tool, at a specific moment | `state.finish(answer)` | `"finish"` |
-| A fixed maximum number of turns | `limit` | `"limit"` |
+| A check on the State, before every turn | An `until` function | `StoppedByUntil(name)`, the function's name |
+| Your code or a tool, at a specific moment | `state.finish(answer)` | `StoppedByFinish()` |
+| A fixed maximum number of turns | `limit` | `StoppedByLimit(turns)`, the limit |
+| A permission, when it refuses a call with `stop=True` | `Denied(reason, stop=True)`, for example `DecideByHuman`'s `no` ([Ask before a tool runs](approval.md)) | `StoppedByPermission(call, permission)` |
 
 ## Stop on a check
 
@@ -16,8 +17,8 @@ A loop stops in one of three ways. Pick the one that matches who decides.
 
 1. `spent_too_much` takes the State and returns `True` to stop.
 2. `until` takes a list. The loop stops when any function in it returns `True`.
-3. After the run, `state.stopped_by` is `"is_answered"`, `"spent_too_much"` or `"limit"`. The terminal output shows the
-   same name.
+3. After the run, `state.stopped` is `StoppedByUntil("is_answered")`, `StoppedByUntil("spent_too_much")` or
+   `StoppedByLimit(30)`. The terminal output shows the same name, for example `done: stopped by spent_too_much`.
 
 Give stop conditions clear names. The name is the only record of why the run stopped.
 
@@ -36,18 +37,42 @@ Let the model decide when the work is done, and return a structured answer:
 
 The answer can be any value. The model fills the tool's typed parameters, so the answer has a known shape.
 
+## Stop when the person says no
+
+A permission that refuses a call with `stop=True` stops the loop before its next turn. Unlike `finish`, the State is
+not finished: add the person's next message with `state.add_user_message(...)` and run again. See
+[Ask before a tool runs](approval.md#when-the-person-says-no).
+
+## In a loop without @loop
+
+`state.finish()` and a permission's `stop=True` set `state.stopped` right away. A loop written without `@loop` stops
+on them by checking it before each turn:
+
+```python
+def my_loop(agent: Agent, state: State):
+    while state.stopped is None and not state.is_answered():
+        agent.think(state)
+        if state.wants_tools():
+            agent.use_tools(state)
+```
+
+`run` resets `state.stopped` to `None` when it starts, so the previous run's reason does not stop the next one.
+
+A `@loop` called inside such a loop leaves its own `until` or `limit` reason in `state.stopped`. See
+[Loops](../concepts/loops.md#when-a-loop-stops) for the check to use then.
+
 ## Check for the limit
 
 Reaching `limit` stops the loop without an exception. Check it when an unfinished run matters. `agent` is the Agent
 from the example above:
 
 ```python
-from alpineagents import State
+from alpineagents import State, StoppedByLimit
 
 state = State("Rename the helper functions in utils.py")
 agent.run(state)
-if state.stopped_by == "limit":
-    print(f"Stopped after {state.stopped_limit} turns. The task may be unfinished.")
+if isinstance(state.stopped, StoppedByLimit):
+    print(f"Stopped after {state.stopped.turns} turns. The task may be unfinished.")
 ```
 
 ## Related

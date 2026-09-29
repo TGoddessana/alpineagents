@@ -20,6 +20,8 @@ Concepts: [Errors and interruptions](../concepts/errors.md).
 
 ::: alpineagents.ResumeWarning
 
+::: alpineagents.PermissionWarning
+
 ::: alpineagents.ToolError
 
 ::: alpineagents.ToolInputError
