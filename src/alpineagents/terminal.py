@@ -15,7 +15,15 @@ from typing import TYPE_CHECKING, Any, TextIO
 
 from .human import Human, describe_choices, parse_answer
 from .reporter import Reporter
-from .types import Image, _byte_size, _content_bytes, format_call, result_text
+from .types import (
+    Image,
+    StoppedByLimit,
+    ToolOutcomeKind,
+    _byte_size,
+    _content_bytes,
+    format_call,
+    result_text,
+)
 
 if TYPE_CHECKING:
     from .state import State
@@ -68,7 +76,7 @@ class Terminal(Reporter, Human):
           done 1.2KB
         [turn 2] thinking
           context compacted: 121k → 18k tokens (cache rebuilds)
-        done: is_answered (5 turns, ~$0.42, cache hit 84%)
+        done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)
     """
 
     def __init__(
@@ -176,23 +184,25 @@ class Terminal(Reporter, Human):
 
     def on_tool_end(self, state: State, call: ToolCall, result: ToolResultContent, outcome: ToolOutcome) -> None:
         """Writes one line by ``outcome.kind``: ``done 1.2KB`` (the result size, ``done 35.1KB (1 image)`` with
-        images), ``error {name}: ...``,
-        ``aborted {name}: ...``, ``denied {name}: ...``, or the input error itself."""
+        images), ``error {name}: ...``, ``aborted {name}: ...``, ``denied {name}: ...``,
+        ``cancelled {name}: ...``, or the input error itself."""
         # input_error "  {result}"; aborted or interrupted "  aborted {call.name}: {result}" (e.g.
         # "(aborted: TimeoutError)", "(interrupted by user)"); denied "  denied {call.name}: {result}";
-        # error "  error {call.name}: {first line of result, at most 100 characters}";
-        # done "  done {size}" (UTF-8 bytes: 512B, 1.2KB, 3.4MB).
+        # cancelled "  cancelled {call.name}: {result}"; error "  error {call.name}: {first line of result, at most
+        # 100 characters}"; done "  done {size}" (UTF-8 bytes: 512B, 1.2KB, 3.4MB).
         kind = outcome.kind
-        if kind != "done":
+        if kind != ToolOutcomeKind.DONE:
             result = result_text(result)
-        if kind == "input_error":
+        if kind == ToolOutcomeKind.INPUT_ERROR:
             text = f"  {result}"
-        elif kind == "error":
+        elif kind == ToolOutcomeKind.ERROR:
             text = f"  error {call.name}: {_first_line(result)}"
-        elif kind in ("aborted", "interrupted"):
+        elif kind in (ToolOutcomeKind.ABORTED, ToolOutcomeKind.INTERRUPTED):
             text = f"  aborted {call.name}: {result}"
-        elif kind == "denied":
+        elif kind == ToolOutcomeKind.DENIED:
             text = f"  denied {call.name}: {result}"
+        elif kind == ToolOutcomeKind.CANCELLED:
+            text = f"  cancelled {call.name}: {result}"
         else:
             text = f"  done {_format_size(result)}"
         self._write_line(state, text)
@@ -220,23 +230,25 @@ class Terminal(Reporter, Human):
         self._write_line(state, f"  model: {event.message}")
 
     def on_run_end(self, state: State, error: BaseException | None) -> None:
-        """Writes one last line, such as ``done: is_answered (5 turns, ~$0.42, cache hit 84%)``,
+        """Writes one last line, such as ``done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)``,
         ``done: reached limit(50), the task may be unfinished (50 turns)`` or ``done: interrupted by user (3 turns)``."""
-        # - Normal: "done: {stopped_by} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])" (cost is left out when
-        #   None; the cache hit rate is left out when None or 0. For a loop without @loop, stopped_by is None:
-        #   "done: (2 turns)").
+        # - Normal: "done: {str(state.stopped)} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])" (cost is left
+        #   out when None; the cache hit rate is left out when None or 0. A loop without @loop that ended on its
+        #   own check leaves stopped None: "done: (2 turns)").
+        # - StoppedByLimit: "done: reached limit({turns}), the task may be unfinished ({turns})".
         # - Any other exception: "done: error {type(error).__name__}: {error} ({turns})"
         # Before that, flushes any lines on_context_change still has queued because no next think came (e.g. the
         # last compaction happened after this run's last turn; otherwise they would be lost).
         self._flush_pending_context_lines()
         turns = _turns(state.turn)
+        stopped = state.stopped
         if error is not None:
             if isinstance(error, (KeyboardInterrupt, asyncio.CancelledError)):
                 text = f"done: interrupted by user ({turns})"
             else:
                 text = f"done: error {type(error).__name__}: {error} ({turns})"
-        elif state.stopped_by == "limit":
-            text = f"done: reached limit({state.stopped_limit}), the task may be unfinished ({turns})"
+        elif isinstance(stopped, StoppedByLimit):
+            text = f"done: reached limit({stopped.turns}), the task may be unfinished ({turns})"
         else:
             parts = [turns]
             cost = state.usage.cost
@@ -245,8 +257,7 @@ class Terminal(Reporter, Human):
             rate = state.usage.cache_hit_rate
             if rate:
                 parts.append(f"cache hit {rate:.0%}")
-            reason = state.stopped_by
-            head = f"done: {reason}" if reason is not None else "done:"
+            head = f"done: {stopped}" if stopped is not None else "done:"
             text = f"{head} ({', '.join(parts)})"
         self._write_line(state, text)
 

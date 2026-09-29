@@ -75,6 +75,7 @@ nav:
       - Let the model handle tool failures: guides/tool-failures.md
       - Context size: guides/context-size.md
       - Models: guides/models.md
+      - Models that stall or drop streams: guides/unreliable-models.md
       - Progress and questions: guides/progress.md
       - Async: guides/async.md
       - MCP servers: guides/mcp.md
@@ -84,6 +85,7 @@ nav:
       - State: api/state.md
       - Loops and blocks: api/loops.md
       - Tools and MCP: api/tools.md
+      - Permissions: api/permissions.md
       - Models: api/models.md
       - Reporter, Human, Terminal: api/io.md
       - Store: api/store.md

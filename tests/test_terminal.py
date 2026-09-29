@@ -1,5 +1,5 @@
 """Terminal tests. State is still being built in another unit, so these use a small stub object with only the
-attributes needed (turn, depth, usage, stopped_by, stopped_limit).
+attributes needed (turn, depth, usage, stopped).
 """
 
 from __future__ import annotations
@@ -10,16 +10,24 @@ import pytest
 
 from alpineagents.terminal import Terminal, default_terminal
 from alpineagents.testing import tool_call
-from alpineagents.types import ContextChange, ToolOutcome, Usage
+from alpineagents.types import (
+    ContextChange,
+    StoppedByFinish,
+    StoppedByLimit,
+    StoppedByPermission,
+    StoppedByUntil,
+    ToolOutcome,
+    ToolOutcomeKind,
+    Usage,
+)
 
 
 class StubState:
-    def __init__(self, *, turn=1, depth=0, usage=None, stopped_by=None, stopped_limit=None):
+    def __init__(self, *, turn=1, depth=0, usage=None, stopped=None):
         self.turn = turn
         self.depth = depth
         self.usage = usage if usage is not None else Usage()
-        self.stopped_by = stopped_by
-        self.stopped_limit = stopped_limit
+        self.stopped = stopped
 
 
 DONE = ToolOutcome("done")
@@ -123,6 +131,15 @@ def test_tool_end_denied():
     assert out.getvalue() == "  denied bash: The user denied it\n"
 
 
+def test_tool_end_cancelled():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    call = tool_call("bash", command="make build")
+    outcome = ToolOutcome(ToolOutcomeKind.CANCELLED, decided_by="DecideByHuman()")
+    terminal.on_tool_end(StubState(turn=1), call, "(not run: the user stopped this turn)", outcome)
+    assert out.getvalue() == "  cancelled bash: (not run: the user stopped this turn)\n"
+
+
 @pytest.mark.parametrize("result", ["(aborted: nothing to do)", "(input error in the log)", "(interrupted by user)"])
 def test_tool_end_done_result_is_not_read_as_a_failure(result):
     # The display follows the outcome, not the text: a tool whose normal output looks like a failure phrase
@@ -171,23 +188,31 @@ def test_run_end_normal_with_cost_and_cache_rate():
     out = io.StringIO()
     terminal = Terminal(output=out)
     usage = Usage(input_tokens=100, cache_read_tokens=525, cost=0.42)
-    state = StubState(turn=5, usage=usage, stopped_by="is_answered")
+    state = StubState(turn=5, usage=usage, stopped=StoppedByUntil("is_answered"))
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "done: is_answered (5 turns, ~$0.42, cache hit 84%)\n"
+    assert out.getvalue() == "done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)\n"
 
 
 def test_run_end_normal_without_cost_or_cache():
     out = io.StringIO()
     terminal = Terminal(output=out)
-    state = StubState(turn=2, usage=Usage(), stopped_by="finish")
+    state = StubState(turn=2, usage=Usage(), stopped=StoppedByFinish())
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "done: finish (2 turns)\n"
+    assert out.getvalue() == "done: stopped by finish (2 turns)\n"
+
+
+def test_run_end_stopped_by_permission():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    stopped = StoppedByPermission(tool_call("bash", command="rm -rf /"), "DecideByHuman()")
+    terminal.on_run_end(StubState(turn=3, stopped=stopped), None)
+    assert out.getvalue() == "done: stopped by permission DecideByHuman() (3 turns)\n"
 
 
 def test_run_end_limit_is_a_warning_line():
     out = io.StringIO()
     terminal = Terminal(output=out)
-    state = StubState(turn=50, stopped_by="limit", stopped_limit=50)
+    state = StubState(turn=50, stopped=StoppedByLimit(50))
     terminal.on_run_end(state, None)
     assert out.getvalue() == "done: reached limit(50), the task may be unfinished (50 turns)\n"
 
@@ -211,14 +236,14 @@ def test_run_end_other_exception():
 def test_run_end_breaks_mid_line_first():
     out = io.StringIO()
     terminal = Terminal(output=out)
-    state = StubState(turn=1, stopped_by="is_answered")
+    state = StubState(turn=1, stopped=StoppedByUntil("is_answered"))
     terminal.on_text(state, "stopped mid-line")
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "stopped mid-line\ndone: is_answered (1 turn)\n"
+    assert out.getvalue() == "stopped mid-line\ndone: stopped by is_answered (1 turn)\n"
 
 
-def test_run_end_without_stopped_by_does_not_show_none():
-    # A loop without @loop (a plain function) leaves no stopped_by. Python's None must not show on screen.
+def test_run_end_without_stopped_does_not_show_none():
+    # A loop without @loop (a plain function) leaves no stopped. Python's None must not show on screen.
     out = io.StringIO()
     terminal = Terminal(output=out)
     terminal.on_run_end(StubState(turn=2), None)

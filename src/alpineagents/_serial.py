@@ -30,6 +30,11 @@ from .types import (
     ModelEvent,
     RawBlock,
     Reply,
+    Stopped,
+    StoppedByFinish,
+    StoppedByLimit,
+    StoppedByPermission,
+    StoppedByUntil,
     TextBlock,
     ToolCall,
     ToolResultBlock,
@@ -49,11 +54,14 @@ __all__ = [
     "usage_from_dict",
     "time_to_str",
     "time_from_str",
+    "stopped_to_dict",
+    "stopped_from_snapshot",
 ]
 
 #: Version of the saved formats. Records with a newer version are refused when loading.
 #: 2: tool results can hold images.
-VERSION = 2
+#: 3: the snapshot has ``stopped`` (a dict, see ``stopped_to_dict``) instead of ``stopped_by`` and ``stopped_limit``.
+VERSION = 3
 
 
 def plain(value: Any, where: str) -> Any:
@@ -198,6 +206,56 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
     return Message(data["role"], tuple(_block_from_dict(b) for b in data["content"]), tokens=data["tokens"])
 
 
+# ---------------------------------------------------------------- why a loop stopped
+
+
+def stopped_to_dict(stopped: Stopped | None) -> dict[str, Any] | None:
+    """``{"kind": "until", "name": ...}``, ``{"kind": "limit", "turns": ...}``, ``{"kind": "finish"}``,
+    ``{"kind": "permission", "call": ..., "permission": ...}``, or ``None``."""
+    if stopped is None:
+        return None
+    if isinstance(stopped, StoppedByUntil):
+        return {"kind": "until", "name": stopped.name}
+    if isinstance(stopped, StoppedByLimit):
+        return {"kind": "limit", "turns": stopped.turns}
+    if isinstance(stopped, StoppedByFinish):
+        return {"kind": "finish"}
+    if isinstance(stopped, StoppedByPermission):
+        return {"kind": "permission", "call": _call_to_dict(stopped.call), "permission": stopped.permission}
+    raise TypeError(f"cannot save a stop reason of type {type(stopped).__name__}")
+
+
+def stopped_from_snapshot(snapshot: Mapping[str, Any]) -> Stopped | None:
+    """The ``stopped`` value of a snapshot. Version 1 and 2 snapshots have ``stopped_by`` (``"finish"``,
+    ``"limit"`` or an ``until`` name) and ``stopped_limit`` instead."""
+    if "stopped" not in snapshot:
+        return _stopped_from_old(snapshot.get("stopped_by"), snapshot.get("stopped_limit"))
+    data = snapshot["stopped"]
+    if data is None:
+        return None
+    kind = data["kind"]
+    if kind == "until":
+        return StoppedByUntil(data["name"])
+    if kind == "limit":
+        return StoppedByLimit(data["turns"])
+    if kind == "finish":
+        return StoppedByFinish()
+    if kind == "permission":
+        return StoppedByPermission(_call_from_dict(data["call"]), data["permission"])
+    raise ValueError(f"unknown stop kind {kind!r}")
+
+
+def _stopped_from_old(stopped_by: str | None, stopped_limit: int | None) -> Stopped | None:
+    # "finish" and "limit" could not be until names then (they were reserved), so the mapping is exact.
+    if stopped_by is None:
+        return None
+    if stopped_by == "finish":
+        return StoppedByFinish()
+    if stopped_by == "limit":
+        return StoppedByLimit(stopped_limit or 0)
+    return StoppedByUntil(stopped_by)
+
+
 # ---------------------------------------------------------------- history entries
 
 
@@ -239,7 +297,7 @@ def _content_from_plain(kind: str, data: Any) -> Any:
         return ModelEvent(data["kind"], data["message"], dict(data["data"]))
     if kind == "tool_result":
         return _result_from_plain(data)
-    if kind in ("user", "notice", "denied", "error"):
+    if kind in ("user", "notice", "denied", "cancelled", "error"):
         return data
     raise ValueError(f"unknown history entry kind {kind!r}")
 

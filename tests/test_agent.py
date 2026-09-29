@@ -521,12 +521,9 @@ def test_ask_human_unsupported_returns_raises_typeerror():
         agent.ask_human(state, "A number?", returns=int)
 
 
-def test_deny_call_not_in_pending_raises_valueerror():
-    """"deny a call that is not in pending_calls | ValueError" """
-    state = State("Task")
-    fake_call = tool_call("no_such_tool")
-    with pytest.raises(ValueError):
-        state.deny(fake_call, "already gone")
+def test_state_has_no_public_deny():
+    """Permissions refuse calls now; state.deny is gone from the public API."""
+    assert not hasattr(State("Task"), "deny")
 
 
 # ================================================================ what the Agent "does not do"
@@ -661,35 +658,39 @@ def test_loop_body_exception_outside_think_and_use_tools_keeps_context_and_close
     assert "(aborted: ValueError)" in _result_texts(state)
 
 
-def test_loop_catching_use_tools_exception_and_denying_keeps_run_from_raising():
+def test_loop_catching_use_tools_exception_and_retrying_keeps_run_from_raising():
     """Example: if the loop catches a use_tools exception, the calls are not closed and stay in pending_calls,
-    and state.deny can close them directly. ("Calls are closed only when an exception leaves run().")"""
+    and use_tools runs them again. ("Calls are closed only when an exception leaves run().")"""
+    attempts: list[int] = []
 
     @tool
-    def boom_tool() -> str:
-        """A tool that raises."""
-        raise TimeoutError("too slow, failed")
+    def flaky_tool() -> str:
+        """A tool that fails the first time."""
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise TimeoutError("too slow, failed")
+        return "ok"
 
-    def deny_on_timeout_loop(agent, state):
+    def retry_on_timeout_loop(agent, state):
         agent.think(state)
         if state.wants_tools():
             try:
                 agent.use_tools(state)
-            except TimeoutError as e:
-                for call in state.pending_calls:
-                    state.deny(call, f"failed: {e}")
+            except TimeoutError:
+                assert [c.name for c in state.pending_calls] == ["flaky_tool"]
+                agent.use_tools(state)
         state.finish("Cleaned up")
         return state.answer  # a raw callable was passed as loop=, so its return value is run()'s result
 
-    fake = FakeModel([tool_call("boom_tool")])
-    agent = Agent(model=fake, tools=[boom_tool], loop=deny_on_timeout_loop, reporter=None)
+    fake = FakeModel([tool_call("flaky_tool")])
+    agent = Agent(model=fake, tools=[flaky_tool], loop=retry_on_timeout_loop, reporter=None)
     state = State("Task")
 
     result = agent.run(state)  # the loop caught the exception, so run() finishes normally
 
     assert result == "Cleaned up"
     assert state.pending_calls == ()
-    assert any(h.kind == "denied" for h in state.history)
+    assert _result_texts(state) == ["ok"]
     assert not any("(aborted:" in text for text in _result_texts(state))
 
 

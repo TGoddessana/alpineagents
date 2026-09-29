@@ -10,4 +10,4 @@ class LogReporter(Reporter):
         log.info("turn %d: %s(%s)", state.turn, call.name, call.args)
 
     def on_run_end(self, state, error):
-        log.info("stopped by %s after %d turns", state.stopped_by, state.turn)
+        log.info("%s after %d turns", state.stopped, state.turn)

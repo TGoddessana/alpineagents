@@ -176,14 +176,8 @@ class Model(ABC):
         return replace(request, messages=request.messages + (Message.user(prompt),), tool_choice="none")
 
     def _cost(self, usage: Usage) -> float | None:
-        """Computed from ``price`` if set, otherwise from ``_lookup_price()``. ``None`` if neither is available."""
-        price = self.price if self.price is not None else self._lookup_price()
-        return None if price is None else price.cost(usage)
-
-    def _lookup_price(self) -> Price | None:
-        """Extension point: look up the table from ``alpineagents[prices]`` (genai-prices) if installed. The MVP
-        returns ``None``."""
-        return None
+        """Computed from ``price``. ``None`` if no price is set (unknown, not 0)."""
+        return None if self.price is None else self.price.cost(usage)
 
     def _check_supported(self, feature: str, setting: str) -> None:
         """``ValueError`` at construction if a configured feature is not supported (mistake-proofing error).

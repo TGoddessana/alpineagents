@@ -31,6 +31,7 @@ from . import _serial
 from ._async import run_in_thread
 from .errors import fix_message
 from .state import State, check_id
+from .types import Stopped
 
 __all__ = ["Store", "FileStore", "Record", "SavedState"]
 
@@ -59,9 +60,9 @@ class SavedState:
     """When the last saved step was recorded (UTC)."""
     turn: int
     """Turns so far."""
-    stopped_by: str | None
-    """Why its last run stopped (``"finish"``, ``"limit"``, an ``until`` name), or ``None`` if it ended with an
-    exception or was still running."""
+    stopped: Stopped | None
+    """Why its last run stopped (``state.stopped``: ``StoppedByUntil``, ``StoppedByLimit``, ``StoppedByFinish``
+    or ``StoppedByPermission``), or ``None`` if it ended with an exception or was still running."""
     finished: bool
     """Whether ``finish()`` was called. A finished State cannot run again."""
 
@@ -74,7 +75,7 @@ class SavedState:
             created_at=_serial.time_from_str(snapshot["created_at"]),
             updated_at=_serial.time_from_str(snapshot["updated_at"]),
             turn=snapshot["turn"],
-            stopped_by=snapshot["stopped_by"],
+            stopped=_serial.stopped_from_snapshot(snapshot),
             finished=snapshot["finished"],
         )
 

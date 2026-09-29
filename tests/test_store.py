@@ -29,6 +29,7 @@ from alpineagents import (
     ResumeWarning,
     SavedState,
     State,
+    StoppedByUntil,
     Store,
     Usage,
     loop,
@@ -156,7 +157,7 @@ def test_run_saves_and_load_rebuilds_the_state(tmp_path):
     assert loaded.turn == state.turn == 2
     assert loaded.usage == state.usage
     assert loaded.answer == "It is 3"
-    assert loaded.stopped_by == "is_answered"
+    assert loaded.stopped == StoppedByUntil("is_answered")
     assert loaded.data == {"seen": ["x", {"n": 1}]}
     assert loaded.created_at == state.created_at and loaded.updated_at == state.updated_at
     assert loaded.is_answered()
@@ -244,7 +245,7 @@ def test_saves_after_each_step_and_skips_unchanged_snapshots():
     record = store.states["s"]
     assert len(record.entries) == len(state.history)
     assert record.snapshot["history_len"] == len(state.history)
-    assert record.snapshot["stopped_by"] == "is_answered"
+    assert record.snapshot["stopped"] == {"kind": "until", "name": "is_answered"}
     writes = store.writes
     agent.save(state)
     assert store.writes == writes  # nothing new
@@ -528,7 +529,7 @@ def test_interrupt_while_saving_wins_over_the_original():
 
 def test_failed_save_at_the_end_of_a_good_run_raises():
     store = FailingStore()
-    store.fail_when = lambda entries, snapshot: snapshot is not None and snapshot["stopped_by"] is not None
+    store.fail_when = lambda entries, snapshot: snapshot is not None and snapshot["stopped"] is not None
     state = State("Go")
     with pytest.raises(OSError, match="disk full") as info:
         make_agent(["Done"], store=store).run(state)
@@ -605,7 +606,12 @@ def test_list_and_delete(tmp_path):
     saved = store.list()
     assert [s.id for s in saved] == ["two", "one"]
     assert isinstance(saved[0], SavedState)
-    assert (saved[0].task, saved[0].turn, saved[0].stopped_by, saved[0].finished) == ("Second", 1, "is_answered", False)
+    assert (saved[0].task, saved[0].turn, saved[0].stopped, saved[0].finished) == (
+        "Second",
+        1,
+        StoppedByUntil("is_answered"),
+        False,
+    )
 
     store.delete("one")
     store.delete("one")  # already gone: nothing happens

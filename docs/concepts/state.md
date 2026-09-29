@@ -29,7 +29,7 @@ reply and tool result. A `"reply"` entry holds the whole `Reply`, including `rep
 | Property | Value |
 | --- | --- |
 | `answer` | The value given to `finish(answer)`. Otherwise the text of the latest reply without tool calls. Otherwise `None` |
-| `stopped_by` | Why the last loop stopped: `"finish"`, `"limit"`, or the name of an `until` function. `None` while running or after an exception |
+| `stopped` | Why this run is set to stop: `StoppedByFinish()`, `StoppedByLimit(turns)`, `StoppedByUntil(name)` or `StoppedByPermission(call, permission)`. `None` until something decides, and after a run that ended with an exception. See [Loops](loops.md#when-a-loop-stops) |
 | `turn` | How many times `think` succeeded |
 | `usage` | Tokens, requests and cost of every model request on this State |
 
@@ -73,8 +73,9 @@ A message added after the model's answer makes `is_answered()` false, so the loo
 
 | Method | Effect |
 | --- | --- |
-| `deny(call, reason)` | Refuses one pending call. The model gets `reason` as that call's error result |
-| `finish(answer=None)` | Stops the loop before the next turn. Sets `answer` if it is not `None` |
+| `finish(answer=None)` | Sets `stopped` to `StoppedByFinish()` right away, so the loop stops before the next turn. Sets `answer` if it is not `None` |
+
+To refuse tool calls before they run, give the Agent [permissions](../guides/approval.md).
 
 `finish` ends the State for good. After it, `think`, `use_tools`, `ask` and `run` raise `ValueError`. If a tool calls
 `finish`, end the loop body without another `think`.
@@ -90,7 +91,7 @@ When a reply asks for tools, each call becomes a pending call in `state.pending_
 when:
 
 - `use_tools` records its result,
-- `deny` refuses it, or
+- a [permission](../guides/approval.md) refuses it, or cancels it because it stopped the turn, or
 - an exception ends the run and closes it.
 
 Every tool call needs a result before the model is asked again. So while calls are pending:
@@ -99,7 +100,7 @@ Every tool call needs a result before the model is asked again. So while calls a
 | --- | --- |
 | `think`, `compact`, `start_from`, `clear_tool_results` | Raise `ValueError` |
 | `add_user_message`, `add_notice` | Wait, and go into the context right after the results |
-| `finish`, `deny` | Work as usual |
+| `finish` | Works as usual |
 
 ## Your own data
 

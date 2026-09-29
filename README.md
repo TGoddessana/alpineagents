@@ -148,8 +148,6 @@ print(agent.run("Add a test for the add() function in calc.py"))
 - Skills (`skills=`). Passing `skills=` raises `NotImplementedError` for now
 - `agent.run_tool`, `agent.load_skill`
 - More tool result types (`File`, image URLs)
-- `alpineagents[prices]` (cost calculation with genai-prices; for now `usage.cost` is filled only when you pass
-  `price=Price(...)`)
 - `alpineagents add` CLI (copies the default loop and block sources into your project)
 - Per-adapter server-side compaction optimizations
 

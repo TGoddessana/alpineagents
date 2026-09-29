@@ -22,6 +22,9 @@ from alpineagents import (
     ContextTooLongError,
     Loop,
     State,
+    StoppedByFinish,
+    StoppedByLimit,
+    StoppedByUntil,
     compact_if_full,
     default_loop,
     loop,
@@ -36,8 +39,7 @@ class FakeState:
     def __init__(self):
         self._finished = False
         self._answer = None
-        self.stopped_by = None
-        self.stopped_limit = None
+        self.stopped = None
 
     def is_finished(self):
         return self._finished
@@ -51,12 +53,15 @@ class FakeState:
 
     def finish(self, answer=None):
         self._finished = True
+        self.stopped = StoppedByFinish()
         if answer is not None:
             self._answer = answer
 
-    def _set_stopped_by(self, reason, *, limit=None):
-        self.stopped_by = reason
-        self.stopped_limit = limit
+    def _set_stopped(self, stopped):
+        self.stopped = stopped
+
+    def _clear_stop(self):
+        self.stopped = None
 
 
 class FakeAgent:
@@ -101,23 +106,24 @@ def test_until_bound_to_state_instance_raises_typeerror():
 
 
 def test_until_lambda_warns():
-    # "A lambda gives a warning" (its name does not show in stopped_by)
+    # "A lambda gives a warning" (its name does not show in state.stopped)
     with pytest.warns(UserWarning):
         Loop(lambda a, s: None, until=lambda s: True, limit=5)
 
 
-def test_until_reserved_names_rejected():
-    # "'finish' and 'limit' are reserved names"
+def test_until_names_finish_and_limit_are_allowed():
+    # The stop values are types now, so an until function named like another stop reason cannot collide.
     def finish(s):
         return True
 
     def limit(s):
         return True
 
-    with pytest.raises(ValueError):
-        Loop(lambda a, s: None, until=finish, limit=5)
-    with pytest.raises(ValueError):
-        Loop(lambda a, s: None, until=limit, limit=5)
+    state = FakeState()
+    Loop(lambda a, s: None, until=finish, limit=5)(FakeAgent(), state)
+    assert state.stopped == StoppedByUntil("finish")
+    Loop(lambda a, s: None, until=limit, limit=5)(FakeAgent(), state)
+    assert state.stopped == StoppedByUntil("limit")
 
 
 def test_until_uncallable_item_rejected():
@@ -138,7 +144,7 @@ def test_until_accepts_tuple_as_well_as_list():
     state = FakeState()
     body_loop(FakeAgent(), state)
 
-    assert state.stopped_by == "cond_b"
+    assert state.stopped == StoppedByUntil("cond_b")
 
 
 @pytest.mark.parametrize("bad_limit", [True, 0, -1, 1.5, "50"])
@@ -174,12 +180,12 @@ def test_stops_when_until_condition_true():
     result = body_loop(FakeAgent(), state)
 
     assert result == "answer text"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     assert calls["n"] == 2
 
 
 def test_stops_on_finish():
-    # "state.finish() is called -> stop when that turn ends and return state.answer" stopped_by="finish"
+    # "state.finish() is called -> stop when that turn ends and return state.answer" stopped == StoppedByFinish()
     def body(agent, state):
         state.finish("done!")
 
@@ -188,7 +194,7 @@ def test_stops_on_finish():
     result = body_loop(FakeAgent(), state)
 
     assert result == "done!"
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
 
 
 def test_zero_turn_stop_when_already_finished():
@@ -206,11 +212,11 @@ def test_zero_turn_stop_when_already_finished():
 
     assert calls["n"] == 0
     assert result == "pre"
-    assert already_finished.stopped_by == "finish"
+    assert already_finished.stopped == StoppedByFinish()
 
 
 def test_stops_on_limit_with_none_answer():
-    # "After limit iterations... stop quietly with stopped_by='limit'" / "None if there is no answer yet"
+    # "After limit iterations... stop quietly with StoppedByLimit(limit)" / "None if there is no answer yet"
     calls = {"n": 0}
 
     def body(agent, state):
@@ -221,8 +227,7 @@ def test_stops_on_limit_with_none_answer():
     result = body_loop(FakeAgent(), state)
 
     assert result is None
-    assert state.stopped_by == "limit"
-    assert state.stopped_limit == 3
+    assert state.stopped == StoppedByLimit(3)
     assert calls["n"] == 3
 
 
@@ -242,11 +247,12 @@ def test_limit_checks_condition_once_more_before_stopping():
     body_loop(FakeAgent(), state)
 
     assert calls["n"] == 3
-    assert state.stopped_by == "done"
+    assert state.stopped == StoppedByUntil("done")
 
 
 def test_multiple_until_conditions_checked_in_order():
-    # "until takes... a list of functions" - conditions are checked in order, and the true one's name is stopped_by
+    # "until takes... a list of functions" - conditions are checked in order, and the true one's name is in
+    # state.stopped
     def cond_a(s):
         return False
 
@@ -257,7 +263,7 @@ def test_multiple_until_conditions_checked_in_order():
     state = FakeState()
     body_loop(FakeAgent(), state)
 
-    assert state.stopped_by == "cond_b"
+    assert state.stopped == StoppedByUntil("cond_b")
 
 
 def test_copy_overrides_only_given_fields():
@@ -311,7 +317,7 @@ def test_finish_ends_whole_run_so_later_loop_does_not_run():
     assert result_a == "early"
     assert result_b == "early"  # the answer set by finish, unchanged
     assert calls["n"] == 0  # loop_b's body never ran
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
 
 
 def test_loop_can_be_used_as_block_inside_another_loop():
@@ -350,7 +356,7 @@ def test_block_can_be_callable_object_not_just_function():
     result = body_loop(FakeAgent(), state)
 
     assert result == "via block object"
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
 
 
 # ============================================================ why conditions are checked before a turn (real State)
@@ -399,7 +405,7 @@ def test_until_accepts_builtin_and_custom_condition_together():
     answer = combo_loop(agent, state)
 
     assert answer == "final answer"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
 
 
 # ============================================================ body rules, @loop mistake-proofing errors
@@ -462,7 +468,7 @@ def test_default_loop_runs_think_then_use_tools_until_answered():
     answer = agent.run(state)
 
     assert answer == "final reply"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     assert state.turn == 2  # turn 1: tool call, turn 2: final reply
 
 
@@ -480,7 +486,7 @@ def test_default_loop_copy_creates_independent_loop():
 # ============================================================ stop table
 
 
-def test_stop_table_until_condition_sets_stopped_by_to_condition_name():
+def test_stop_table_until_condition_sets_stopped_to_condition_name():
     # "until condition true before a turn | stop and return state.answer | condition function name (e.g. 'over_budget')"
     def over_budget(state):
         return state.turn >= 2
@@ -497,11 +503,11 @@ def test_stop_table_until_condition_sets_stopped_by_to_condition_name():
     answer = agent.run(state)
 
     assert answer == state.answer == "second thought"
-    assert state.stopped_by == "over_budget"
+    assert state.stopped == StoppedByUntil("over_budget")
     assert state.turn == 2
 
 
-def test_stop_table_finish_sets_stopped_by_finish():
+def test_stop_table_finish_sets_stopped_finish():
     # "state.finish() called | stop when that turn ends and return state.answer... the whole run ends | 'finish'"
     @loop(until=State.is_answered, limit=5)
     def finishing_loop(agent, state):
@@ -513,10 +519,10 @@ def test_stop_table_finish_sets_stopped_by_finish():
     answer = agent.run(state)
 
     assert answer == "finished answer"
-    assert state.stopped_by == "finish"
+    assert state.stopped == StoppedByFinish()
 
 
-def test_stop_table_limit_sets_stopped_by_limit_and_returns_last_answer():
+def test_stop_table_limit_sets_stopped_limit_and_returns_last_answer():
     # "limit reached | stop without an exception and return state.answer (None if no answer yet) | 'limit'"
     def never(state):
         return False
@@ -533,7 +539,7 @@ def test_stop_table_limit_sets_stopped_by_limit_and_returns_last_answer():
     answer = agent.run(state)
 
     assert answer == state.answer == "thought two"  # stopping at limit does not lose the answer already there
-    assert state.stopped_by == "limit"
+    assert state.stopped == StoppedByLimit(2)
     assert state.turn == 2
 
 

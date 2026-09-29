@@ -44,7 +44,7 @@ A failure the model should handle, raised with `ToolError`, becomes an error res
 ```
 
 - The `tool_result` entry in `state.history` has the message the model got, and `is_error=True`.
-- `state.stopped_by == "is_answered"` shows the run went on after the failure. An exception that is not a
+- `state.stopped == StoppedByUntil("is_answered")` shows the run went on after the failure. An exception that is not a
   `ToolError` would have stopped the run and been raised by `run`.
 - To test only the tool, call it without an Agent. A `@tool` function runs as a plain function
   (`read_file("missing.py")` raises the `ToolError`), and a [`Tool` subclass](../concepts/tools.md#tools-that-are-not-functions)
@@ -56,12 +56,15 @@ A failure the model should handle, raised with `ToolError`, becomes an error res
 [Ask before a tool runs](approval.md):
 
 ```python
+from alpineagents import State, StoppedByPermission
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 
-fake = FakeModel([tool_call("write_file", path="a.md", content="x"), "Skipped"])
+fake = FakeModel([tool_call("write_file", path="a.md", content="x")])
 human = FakeHuman(["no"])
-agent.copy(model=fake, human=human, reporter=None).run("Write a.md")
+state = State("Write a.md")
+agent.copy(model=fake, human=human, reporter=None).run(state)
 assert human.remaining == 0
+assert isinstance(state.stopped, StoppedByPermission)
 ```
 
 An answer that does not fit the question's `returns` type is skipped, and the next one is used.
@@ -71,7 +74,7 @@ An answer that does not fit the question's `returns` type is skipped, and the ne
 | To check | Assert on |
 | --- | --- |
 | The result | `state.answer` |
-| Why the run stopped | `state.stopped_by` |
+| Why the run stopped | `state.stopped`, for example `StoppedByUntil("is_answered")` |
 | How many turns | `state.turn` |
 | What happened, in order | `state.history`, for example `[h.kind for h in state.history]`. The kinds are listed in the [Data types API](../api/types.md) |
 | What the model saw | `fake.requests` |

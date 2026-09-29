@@ -223,8 +223,8 @@ agent = Agent(model="claude-sonnet-5", tools=[Webhook(**row) for row in rows])
 
 ## Describe what a tool does
 
-Four hints say what a tool does. The model does not see them. They are for your code, such as a loop that asks the
-person before a call that changes something:
+Four hints say what a tool does. The model does not see them. They are for your code, such as a
+[permission](../guides/approval.md) that runs read-only calls without asking the person:
 
 ```python
 @tool(read_only=True, open_world=False)
@@ -249,6 +249,35 @@ def write_file(path: str, content: str) -> None:
 A hint left out assumes the worst, so a forgotten hint makes a rule stricter, never looser. `read_only=True` with
 `destructive=True` or `idempotent=False` raises `ValueError`. The hints have the meaning of MCP tool annotations.
 
+### Hints for one call
+
+The hints of `@tool` hold for every call, so they are the worst case. A shell tool that can run `rm` is not read-only,
+even though most of its calls only look. `hints_for=` gives the facts for one call:
+
+```python
+--8<-- "docs_src/tool_hints.py"
+```
+
+```python
+bash.hints_for({"command": "ls"}).read_only  # True
+bash.hints_for({"command": "rm -rf build"}).read_only  # False: the tool's own hints
+bash.read_only  # False: the worst case stays
+```
+
+- `Hints(...)` takes the same four hints with the same rules: one left out assumes the worst, and `read_only=True`
+  sets the other two. Every hint is a `bool` after that.
+- The function gets the model's arguments before they are checked against the type hints. A value can be missing or
+  of any type, so read with `args.get(...)` and `isinstance`, and return `None` when unsure: the tool's own hints then
+  apply. Anything other than `Hints` or `None` raises `TypeError`.
+- Hints are facts about the call, not decisions. Say what the call does; the code that reads the hints decides what
+  to allow. `AllowByReadOnly()` reads `hints_for`, so with it `bash("ls")` runs without asking. See
+  [Ask before a tool runs: decide by what a call does](../guides/approval.md#decide-by-what-a-call-does).
+- `tool.copy(hints_for=...)` adds or replaces the function, and `hints_for=None` removes it.
+- A `Tool` subclass overrides `hints_for(self, args)`, and returns `super().hints_for(args)` when unsure. An MCP
+  tool's `hints_for` returns its annotations for every call.
+- To tell more about a call, subclass `Hints` with fields that have defaults, such as
+  `@dataclass(frozen=True) class FileHints(Hints): paths: tuple[str, ...] = ()`, and return that.
+
 ### Find the tool of a call
 
 `agent.tool_map` has every tool the model can call, by the name it calls it: `@tool` functions, the `@tool` methods of
@@ -258,7 +287,7 @@ objects, and the tools of MCP servers. Look up a call's tool there to read its h
 for call in state.pending_calls:
     found = agent.tool_map.get(call.name)  # None for a name the model made up
     if found is not None and not found.read_only:
-        ...  # ask the person, see "Ask before a tool runs"
+        ...  # log it, for example. To ask the person first, see "Ask before a tool runs"
 ```
 
 Pick tools by their hints for `think(tools=...)`:
@@ -272,7 +301,8 @@ agent.think(state, tools=readers)
 - MCP servers' tools are in it only while the servers are connected: during a run, which covers the loop, blocks and
   Reporters, or inside `with agent:`. Looking up one of their names before that raises a `KeyError` that says so.
 - An MCP tool (`MCPTool`) gets its hints from the server's annotations (`readOnlyHint` and so on), with the same
-  defaults. The server says them about itself, so do not trust them more than the server. `found.server` says which
+  defaults. The server says them about itself, so do not trust them more than the server: `AllowByReadOnly()`
+  ignores them unless `trust_mcp=True` (see [MCP tools](../guides/approval.md#mcp-tools)). `found.server` says which
   server the tool is from.
 - A Reporter gets the State and the call, not the Agent. To read hints there, give it the Agent after creating both:
   `reporter.agent = agent`.

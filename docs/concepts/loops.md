@@ -26,16 +26,40 @@ agent = Agent(model="claude-sonnet-5", tools=[read_file], loop=coding)
 
 ## When a loop stops
 
-Before every turn, the loop checks three things in this order:
+`state.stopped` says why the run is set to stop. It is `None` until something decides:
 
-| Order | Check | `state.stopped_by` |
+| Who decides | When `state.stopped` is set | `state.stopped` |
 | --- | --- | --- |
-| 1 | `state.finish()` was called | `"finish"` |
-| 2 | An `until` function returns `True` | The function's name, for example `"is_answered"` |
-| 3 | `limit` turns have run in this call | `"limit"` |
+| `state.finish()` | Right away, when it is called | `StoppedByFinish()` |
+| A permission denies a tool call with `stop=True` | Right away, when `use_tools` records the results | `StoppedByPermission(call, permission)` |
+| An `until` function returns `True` | When the loop checks it, before a turn | `StoppedByUntil(name)`, for example `StoppedByUntil("is_answered")` |
+| `limit` turns have run in this call | When the loop checks it, before a turn | `StoppedByLimit(turns)`, where `turns` is the limit |
+
+Before every turn, the loop stops if `state.stopped` is already set. Otherwise it checks the `until` functions, then
+`limit`.
 
 - The checks run before each turn, so an `until` function sees the State after the previous turn.
-- Reaching `limit` does not raise. Check `state.stopped_by == "limit"` when you need to know.
+- Reaching `limit` does not raise. Check `isinstance(state.stopped, StoppedByLimit)` when you need to know.
+- `run` resets `state.stopped` to `None` when it starts. After a run that ended with an exception, it is `None`.
+- A loop inside another loop: its `until` or `limit` ends only the inner loop. The outer loop checks its own, and if
+  it goes on, `state.stopped` goes back to `None`. `finish()` and a permission's stop end every loop.
+- A loop written without `@loop` makes none of these checks. Check `state.stopped` yourself:
+
+```python
+def my_loop(agent: Agent, state: State):
+    while state.stopped is None and not state.is_answered():
+        agent.think(state)
+        if state.wants_tools():
+            agent.use_tools(state)
+```
+
+A loop written without `@loop` does not clear what a `@loop` inside it leaves behind. After that inner loop stops on
+its own `until` or `limit`, `state.stopped` stays set, so `state.stopped is None` would end the outer loop too. When
+it calls a `@loop`, check only the stops that end every loop, or write the outer loop with `@loop` as well:
+
+```python
+--8<-- "docs_src/nested_plain_loop.py"
+```
 
 ## until
 
@@ -52,13 +76,13 @@ def careful(agent: Agent, state: State):
 ```
 
 - Pass the function itself: `until=State.is_answered`. Not `state.is_answered()`, and not `state.is_answered`.
-- Use a named function. Its name becomes `state.stopped_by`. A `lambda` works, but warns because it has no name.
-- The names `finish` and `limit` are reserved. A function with one of these names raises `ValueError`.
+- Use a named function. Its name becomes `state.stopped.name`. A `lambda` works, but warns because it has no useful
+  name.
 
 ## Stop from inside a turn
 
-`state.finish(answer)` stops the loop before the next turn, with `stopped_by == "finish"`. The loop body and tools
-can call it. See [Stop conditions](../guides/stop-conditions.md).
+`state.finish(answer)` sets `state.stopped` to `StoppedByFinish()` right away, and the loop stops before the next
+turn. The loop body and tools can call it. See [Stop conditions](../guides/stop-conditions.md).
 
 ## Blocks
 

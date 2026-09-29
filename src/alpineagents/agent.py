@@ -24,6 +24,7 @@ from .human import check_returns as check_human_returns
 from .mcp_tools import MCP, MCPTool, MCPToolRef, check_tool_names, wait_sync
 from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
+from .permissions import Permission, _asks_only_async, _needs_agent_human, _only_async
 from .reporter import Reporter
 from .state import State
 from .store import Store
@@ -55,7 +56,9 @@ class _Default:
 DEFAULT: Any = _Default()
 
 #: Setting names ``copy`` accepts (same as the constructor arguments).
-SETTINGS = ("model", "system", "tools", "skills", "loop", "reporter", "human", "store", "name", "description")
+SETTINGS = (
+    "model", "system", "tools", "skills", "loop", "reporter", "human", "store", "permissions", "name", "description",
+)
 
 #: Notification methods a Reporter must have: every ``on_*`` the Reporter base class defines.
 _REPORTER_METHODS = tuple(name for name in vars(Reporter) if name.startswith("on_"))
@@ -117,6 +120,7 @@ class Agent:
         reporter: Reporter | None = DEFAULT,
         human: Human | None = DEFAULT,
         store: Store | None = None,
+        permissions: Iterable[Permission] | None = None,
         name: str | None = None,
         description: str | None = None,
     ) -> None:
@@ -136,12 +140,17 @@ class Agent:
             human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human.
             store: Saves the States this Agent runs as they go, so they can be continued with
                 ``store.load(id)``. ``None`` (the default) saves nothing.
+            permissions: Permissions that decide, before a tool call runs, whether it may run (see
+                ``alpineagents.permissions``). ``None`` (the default) runs every call without checks; to turn
+                checks off on a copy, ``agent.copy(permissions=None)``. A list, even an empty one, is asked about
+                every call, and a call no permission allows is denied with a ``PermissionWarning`` (so ``[]``
+                denies every call).
             name: The Agent's name.
             description: What the Agent does.
 
         Raises:
             TypeError: A setting has the wrong type, for example a function without ``@tool`` in ``tools=``,
-                a ``loop`` that is not callable, a Reporter, Human or Store class instead of an object.
+                a ``loop`` that is not callable, a Reporter, Human, Store or Permission class instead of an object.
             ValueError: Two tools share a name, or the model string is ambiguous.
         """
         # - model: resolve_model(model), no network.
@@ -152,8 +161,13 @@ class Agent:
         # - loop: default_loop if None. TypeError if not callable.
         # - reporter/human: DEFAULT means terminal.default_terminal() (one per process, the same object for
         #   both). reporter needs the Reporter on_* methods, human needs ask or aask.
+        # - permissions: None means no checks (kept as None, apart from an empty list, which denies every call);
+        #   each item must be a Permission object (a class is a TypeError).
         # - The original arguments are kept as given in _kwargs, for copy (including the DEFAULT marker).
         tools = _as_tuple(tools, "tools", "Agent(model=..., tools=[web_search])")
+        checks: tuple[Any, ...] | None = None if permissions is None else _as_tuple(
+            permissions, "permissions", "Agent(model=..., permissions=[AllowByReadOnly(), DecideByHuman()])"
+        )
         skills = (skills,) if isinstance(skills, str) else _as_tuple(
             skills, "skills", 'Agent(model=..., skills=["./skills"])'
         )
@@ -166,6 +180,7 @@ class Agent:
             "reporter": reporter,
             "human": human,
             "store": store,
+            "permissions": checks,
             "name": name,
             "description": description,
         }
@@ -296,6 +311,22 @@ class Agent:
                 )
             )
         self._store = store
+
+        for item in checks or ():
+            if not isinstance(item, Permission):
+                shown = item.__name__ if isinstance(item, type) else repr(item)
+                raise TypeError(
+                    fix_message(
+                        f"{shown} passed in permissions= is not a Permission object"
+                        + (" (it is the class)" if isinstance(item, type) else ""),
+                        "Pass objects of alpineagents.permissions classes (with parentheses), or of your own "
+                        "DenyPermission, AllowPermission or DecidePermission subclass",
+                        "from alpineagents.permissions import AllowByReadOnly, DecideByHuman\n\n"
+                        "agent = Agent(model=..., permissions=[AllowByReadOnly(), DecideByHuman()])",
+                    )
+                )
+        # None: no checks at all. A tuple (even empty) goes through the check phase of use_tools.
+        self._permissions: tuple[Permission, ...] | None = checks
         # Agent._summary() for snapshots, computed at the first save (settings do not change).
         self._saved_summary: dict[str, Any] | None = None
 
@@ -330,8 +361,8 @@ class Agent:
             ```python
             for call in state.pending_calls:
                 tool = agent.tool_map.get(call.name)  # None for a name the model made up
-                if tool is not None and not tool.read_only and not confirm(call):
-                    state.deny(call, "The user declined")
+                if tool is not None and not tool.read_only:
+                    print(f"{call.name} may change something")
             ```
         """
         ready = self._mcp_ready
@@ -374,6 +405,12 @@ class Agent:
         return self._store
 
     @property
+    def permissions(self) -> tuple[Permission, ...]:
+        """The permissions that decide whether each tool call may run, in the order given. Empty both without
+        ``permissions=`` (every call runs unchecked) and with an empty list (every call is denied)."""
+        return self._permissions or ()
+
+    @property
     def name(self) -> str | None:
         """The Agent's name, or ``None``."""
         return self._name
@@ -405,7 +442,10 @@ class Agent:
 
         Raises:
             TypeError: The loop is async (use ``arun``), ``task`` is neither a string nor a State, a value in the
-                State cannot be saved as JSON, or the store only works asynchronously.
+                State cannot be saved as JSON, the store only works asynchronously, or a permission only checks
+                asynchronously (implements ``acheck`` but not ``check``).
+            NoHumanError: A ``DecideByHuman()`` permission would ask the Agent's human, and the Agent has
+                ``human=None``.
             ValueError: The State was already ended with ``state.finish()``, or it is new and the store already
                 has a State with its id.
 
@@ -417,21 +457,25 @@ class Agent:
             ```python
             state = State("Find the bug in this repo")
             answer = agent.run(state)
-            print(state.stopped_by, state.usage.cost)
+            print(state.stopped, state.usage.cost)
             ```
         """
         # Order (ARCHITECTURE.md "run order and the context rules after exceptions"):
         # 1. _start_run: str -> State(task); State as is; anything else TypeError. A finish()ed State is a
-        #    ValueError. Clears state.stopped_by so a run ending in an exception keeps no stale reason. A loaded
-        #    State saved by a different Agent gives a ResumeWarning (once, outside the State lock).
+        #    ValueError. Clears state.stopped, so the previous run's reason (possibly restored by a Store) does not
+        #    stop this run. A loaded State saved by a different Agent gives a ResumeWarning (once, outside the
+        #    State lock).
         # 2. try: on_run_start; connect MCP (_mcp_open); state._note_window(...) records the window size with the
         #    full tool list so compact_if_full works on the first turn (the owner is not set); return loop(...)
         #    on_run_start is inside the try, so on_run_end is called whichever step raises.
-        # 3. except BaseException: state._record_error(e); state._close_pending(e); raise (KeyboardInterrupt too)
+        # 3. except BaseException: state._record_error(e); state._close_pending(e); state._clear_stop() (a run
+        #    ending in an exception has no stop reason, even if finish() or a permission set one); raise
+        #    (KeyboardInterrupt too)
         # 4. finally: close the MCP connections this run opened, then on_run_end(state, error) (None on success).
         # With a store: save after step 1 (before on_run_start: a failed first save means the run never started),
         # after the loop returns, and in step 3 after closing the pending calls (_save_after).
-        # An async loop (or a store that only works asynchronously) raises TypeError before step 1.
+        # An async loop (or a store or permission that only works asynchronously) raises TypeError before step 1,
+        # and so does a DecideByHuman() with no human to ask (NoHumanError): both would fail at the first tool call.
         check_sync_call("run")
         if is_async_callable(self._loop):
             raise TypeError(
@@ -443,6 +487,7 @@ class Agent:
             )
         if self._store is not None and type(self._store).write is Store.write:
             raise self._store._async_only("write", "awrite")
+        self._check_permissions("run")
         state = self._start_run(task)
         self._save(state)
         reporter = self.reporter
@@ -461,6 +506,7 @@ class Agent:
             error = e
             state._record_error(e)
             state._close_pending(e)
+            state._clear_stop()
             self._save_after(state, e)
             raise
         finally:
@@ -486,6 +532,8 @@ class Agent:
         Raises:
             TypeError: The loop is a sync loop other than ``default_loop``, which would block the event loop.
             ValueError: The State was already ended with ``state.finish()``.
+            NoHumanError: A ``DecideByHuman()`` permission would ask the Agent's human, and the Agent has
+                ``human=None``.
 
         Warns:
             ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
@@ -493,6 +541,7 @@ class Agent:
         """
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
+        self._check_permissions("arun")
         state = self._start_run(task)
         await self._asave(state)
         reporter = self.reporter
@@ -512,6 +561,7 @@ class Agent:
             error = e
             state._record_error(e)
             state._close_pending(e)
+            state._clear_stop()
             await self._asave_after(state, e)
             raise
         finally:
@@ -593,6 +643,10 @@ class Agent:
         results of the calls that finished are recorded, and the exception is raised as is. Invalid arguments
         and unknown tool names go back to the model as ``(input error: ...)`` results.
 
+        With ``permissions=``, every call is checked before any tool runs. A denied call does not run, and the
+        model gets the reason as its error result. A denial with ``stop=True`` cancels the other calls of the
+        turn too, so no tool of the turn runs, and the loop stops before its next turn.
+
         Args:
             state: The State whose ``pending_calls`` to run.
 
@@ -600,7 +654,7 @@ class Agent:
             ValueError: The State is finished or belongs to another Agent.
         """
         # state._ensure_open("use_tools") and state._claim(...) in _begin_use_tools, then _runner.run_calls.
-        # Concurrency, exception and interrupt rules are in _runner.run_calls.
+        # Permission, concurrency, exception and interrupt rules are in _runner.run_calls.
         # With a store: save after each batch of recorded results. Those saves do not stop the tools: an
         # Exception is dropped, and the save at the end (which writes everything not saved yet) raises instead.
         check_sync_call("use_tools")
@@ -608,7 +662,9 @@ class Agent:
         calls = self._begin_use_tools(state, "use_tools")
         try:
             if calls:
-                run_calls(state, calls, self._tool_map(), self.reporter, self._tool_saver(state))
+                run_calls(
+                    state, calls, self._tool_map(), self.reporter, self._tool_saver(state), self._permissions
+                )
         except BaseException as e:
             self._save_after(state, e)
             raise
@@ -625,7 +681,9 @@ class Agent:
         calls = self._begin_use_tools(state, "ause_tools")
         try:
             if calls:
-                await arun_calls(state, calls, self._tool_map(), self.reporter, self._atool_saver(state))
+                await arun_calls(
+                    state, calls, self._tool_map(), self.reporter, self._atool_saver(state), self._permissions
+                )
         except BaseException as e:
             await self._asave_after(state, e)
             raise
@@ -731,19 +789,7 @@ class Agent:
         # - value = human.ask(state, prompt, returns); state._record_human(prompt, value); return value.
         # - No finish check. Never called while holding the State lock.
         check_sync_call("ask_human")
-        human = self._human_to_ask(state, prompt, returns, "ask_human")
-        ask = getattr(human, "ask", None)
-        if not callable(ask):
-            raise TypeError(
-                fix_message(
-                    f"human={human!r} answers only asynchronously (it has aask, not ask)",
-                    "Ask it from an async loop with await agent.aask_human(...)",
-                    'ok = await agent.aask_human(state, "Run it?", returns=bool)',
-                )
-            )
-        value = ask(state, prompt, returns)
-        state._record_human(prompt, value)
-        return value
+        return self._ask_human(state, prompt, returns, "ask_human")
 
     async def aask_human(self, state: State, prompt: str, returns: Any = str) -> Any:
         """The async version of ``ask_human``.
@@ -751,14 +797,7 @@ class Agent:
         Awaits ``human.aask`` when the Human has it, and otherwise runs ``human.ask`` on a worker thread.
         """
         # A Human subclass's default aask runs ask on a worker thread too.
-        human = self._human_to_ask(state, prompt, returns, "aask_human")
-        aask = getattr(human, "aask", None)
-        if callable(aask):
-            value = await aask(state, prompt, returns)
-        else:
-            value = await run_in_thread(human.ask, state, prompt, returns)
-        state._record_human(prompt, value)
-        return value
+        return await self._aask_human(state, prompt, returns, "aask_human")
 
     def compact(self, state: State, instructions: str | None = None) -> None:
         """Asks the model to summarize the context, then replaces the context with the task and that summary.
@@ -929,7 +968,7 @@ class Agent:
                 )
             )
 
-        state._set_stopped_by(None)
+        state._clear_stop()
 
         saved = state._take_saved_agent()
         if saved is not None:
@@ -944,6 +983,42 @@ class Agent:
                     state._set_saved_agent(saved)
                     raise
         return state
+
+    def _check_permissions(self, method: str) -> None:
+        """Before a run starts: a permission that would fail at the first tool call fails the run now. ``TypeError``
+        for a permission that only checks asynchronously in a sync ``run``, or a ``DecideByHuman`` whose Human only
+        answers asynchronously; ``NoHumanError`` for a ``DecideByHuman()`` when the Agent has no human."""
+        for permission in self._permissions or ():
+            if method == "run" and _only_async(permission):
+                raise TypeError(
+                    fix_message(
+                        f"{permission!r} in permissions= checks calls only asynchronously (it implements acheck, "
+                        "not check), so this Agent cannot run with run()",
+                        "Await it with arun() inside async code, or implement check as well",
+                        'answer = await agent.arun("...")',
+                    )
+                )
+            if _needs_agent_human(permission) and self.human is None:
+                raise NoHumanError(
+                    fix_message(
+                        f"{permission!r} in permissions= asks the Agent's human, and this Agent has human=None",
+                        "Give the Agent a human, give the permission its own with DecideByHuman(human=...), or "
+                        "decide in code with other permissions",
+                        "agent = Agent(model=..., human=Terminal(), permissions=[DecideByHuman()])\n"
+                        "# in tests\n"
+                        'agent.copy(human=FakeHuman(["yes"]))',
+                    )
+                )
+            human = _asks_only_async(permission, self.human) if method == "run" else None
+            if human is not None:
+                raise TypeError(
+                    fix_message(
+                        f"{permission!r} in permissions= asks {type(human).__name__}, which answers only asynchronously (it "
+                        "implements aask, not ask), so this Agent cannot run with run()",
+                        "Await it with arun() inside async code, or give the Human an ask method as well",
+                        'answer = await agent.arun("...")',
+                    )
+                )
 
     def _note_window(self, state: State) -> None:
         """Records the context window size so context_used means something even before the first turn (the owner
@@ -1152,10 +1227,39 @@ class Agent:
             )
         ) from last_error
 
-    def _human_to_ask(self, state: State, prompt: str, returns: Any, method: str) -> Any:
-        """The checks of ``ask_human``; returns the Human."""
+    def _ask_human(self, state: State, prompt: str, returns: Any, method: str, human: Any = None) -> Any:
+        """``ask_human`` without the event loop check. ``human`` asks instead of the Agent's (``DecideByHuman``
+        uses it too, so its questions are checked and recorded the same way)."""
+        human = self._human_to_ask(state, prompt, returns, method, human)
+        ask = getattr(human, "ask", None)
+        if not callable(ask):
+            raise TypeError(
+                fix_message(
+                    f"human={human!r} answers only asynchronously (it has aask, not ask)",
+                    "Ask it from an async loop with await agent.aask_human(...)",
+                    'ok = await agent.aask_human(state, "Run it?", returns=bool)',
+                )
+            )
+        value = ask(state, prompt, returns)
+        state._record_human(prompt, value)
+        return value
+
+    async def _aask_human(self, state: State, prompt: str, returns: Any, method: str, human: Any = None) -> Any:
+        """The async version of ``_ask_human``."""
+        human = self._human_to_ask(state, prompt, returns, method, human)
+        aask = getattr(human, "aask", None)
+        if callable(aask):
+            value = await aask(state, prompt, returns)
+        else:
+            value = await run_in_thread(human.ask, state, prompt, returns)
+        state._record_human(prompt, value)
+        return value
+
+    def _human_to_ask(self, state: State, prompt: str, returns: Any, method: str, human: Any = None) -> Any:
+        """The checks of ``ask_human``; returns the Human (``human`` if given, else the Agent's)."""
         _check_state(state, method)
-        human = self.human
+        if human is None:
+            human = self.human
         if human is None:
             raise NoHumanError(
                 fix_message(

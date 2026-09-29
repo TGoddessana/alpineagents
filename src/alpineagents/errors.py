@@ -20,6 +20,7 @@ __all__ = [
     "ToolError",
     "ToolInputError",
     "ResumeWarning",
+    "PermissionWarning",
     "fix_message",
 ]
 
@@ -88,6 +89,15 @@ class ResumeWarning(UserWarning):
     def __reduce__(self) -> Any:
         # args holds only the message, so the default would rebuild without changes (pickle, copy).
         return (type(self), (str(self), self.changes))
+
+
+class PermissionWarning(UserWarning):
+    """No permission in ``Agent(permissions=[...])`` allowed or denied a tool call, so it was denied.
+
+    A call no permission decides about is never run. If that is what you want, turn the warning off with
+    ``warnings.filterwarnings("ignore", category=PermissionWarning)``. To allow every call no permission denied,
+    put ``AllowByDefault()`` at the end of the list.
+    """
 
 
 class ToolError(Exception):

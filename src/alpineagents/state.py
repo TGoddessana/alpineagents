@@ -3,8 +3,7 @@
 Internal rules (the user-facing contract is in the public docstrings):
 
 - It is mutable, but only through State's methods. Every method changes data inside the reentrant lock
-  ``self.lock``, and Reporter notifications (``on_context_change``, ``on_tool_end`` for a deny) are sent after
-  the lock is released.
+  ``self.lock``, and Reporter notifications (``on_context_change``) are sent after the lock is released.
 - ``history`` is append-only. Shrinking or rolling back the context never deletes from it.
 - Every entry gets its ``at`` when ``HistoryEntry`` is created: in ``__init__`` (before the State is shared) or
   in ``_append`` (inside the lock), so ``at`` does not go backwards in history order (unless the system clock
@@ -38,8 +37,12 @@ from .types import (
     Message,
     ModelEvent,
     Reply,
+    Stopped,
+    StoppedByFinish,
+    StoppedByPermission,
     ToolCall,
     ToolOutcome,
+    ToolOutcomeKind,
     ToolResultBlock,
     ToolResultContent,
     Usage,
@@ -66,6 +69,9 @@ INTERRUPTED = "(interrupted by user)"
 NOTICE_PREFIX = "[notice] "
 #: Text ``start_from``/``compact`` put before the summary.
 SUMMARY_PREFIX = "[notice] Summary so far:\n"
+
+#: Result of a call not run because a permission denied another call of the same turn with ``stop=True``.
+STOPPED_TURN = "(not run: the user stopped this turn)"
 
 #: Text put in place of a pending call's result in the context for ``ask``.
 NOT_RUN_YET = "(not run yet)"
@@ -101,8 +107,9 @@ def closed_result(error: BaseException) -> str:
 
 
 def closed_outcome(error: BaseException) -> ToolOutcome:
-    """The ``ToolOutcome`` matching ``closed_result(error)``: ``"interrupted"`` or ``"aborted"``, with ``error``."""
-    return ToolOutcome("interrupted" if _is_interrupt(error) else "aborted", error)
+    """The ``ToolOutcome`` matching ``closed_result(error)``: ``INTERRUPTED`` or ``ABORTED``, with ``error``."""
+    kind = ToolOutcomeKind.INTERRUPTED if _is_interrupt(error) else ToolOutcomeKind.ABORTED
+    return ToolOutcome(kind, error)
 
 
 def _is_interrupt(error: BaseException) -> bool:
@@ -282,12 +289,12 @@ class State:
         ```python
         state = State("Find the bug in this repo")
         agent.run(state)
-        print(state.answer, state.stopped_by, state.usage.cost)
+        print(state.answer, state.stopped, state.usage.cost)
         ```
     """
 
     # A new State starts with history [HistoryEntry("user", task, turn=0)] (its at is created_at), context
-    # (Message.user(task),), turn 0, Usage(), no pending calls, stopped_by None, parent None, root itself, depth 0
+    # (Message.user(task),), turn 0, Usage(), no pending calls, stopped None, parent None, root itself, depth 0
     # (subagents are an extension, see _child).
 
     def __init__(self, task: str, *, id: str | None = None) -> None:
@@ -340,8 +347,9 @@ class State:
         self._finished = False
         self._finish_answer: Any = None
         self._last_answer: str | None = None
-        self._stopped_by: str | None = None
-        self._stopped_limit_value: int | None = None
+        # Why this run is set to stop. Set by finish(), _stop_turn (a permission's stop=True) and Loop._stop
+        # (until/limit); cleared by _clear_stop at run start and when a run raises.
+        self._stopped: Stopped | None = None
         # Owner and context window size (set by _claim).
         self._owner: Agent | None = None
         self._reporter: Reporter | None = None
@@ -429,7 +437,8 @@ class State:
     def pending_calls(self) -> tuple[ToolCall, ...]:
         """Tool calls the model requested this turn that have no result yet, in request order.
 
-        A call leaves this tuple when it gets a result, is denied with ``deny``, or is closed by an exception.
+        A call leaves this tuple when it gets a result, is denied or cancelled by a permission, or is closed by an
+        exception.
         """
         with self._lock:
             return tuple(self._pending)
@@ -455,17 +464,37 @@ class State:
             return self.context_tokens / window
 
     @property
-    def stopped_by(self) -> str | None:
-        """Why the last loop stopped: ``"finish"``, ``"limit"``, or the name of the ``until`` function that returned
-        true (e.g. ``"is_answered"``). ``None`` while running, or if the run ended with an exception."""
-        with self._lock:
-            return self._stopped_by
+    def stopped(self) -> Stopped | None:
+        """Why this run is set to stop, or ``None`` until something decides that.
 
-    @property
-    def stopped_limit(self) -> int | None:
-        """The ``limit`` the loop reached if ``stopped_by == "limit"``, otherwise ``None``."""
+        - ``StoppedByFinish()``: ``finish()`` was called (set right away)
+        - ``StoppedByPermission(call, permission)``: a permission denied ``call`` with ``stop=True`` (set right
+          away, when ``use_tools`` records the results)
+        - ``StoppedByUntil(name)``: an ``until`` function returned true, e.g. ``StoppedByUntil("is_answered")``
+          (set when ``@loop`` checks it before a turn)
+        - ``StoppedByLimit(turns)``: the loop ran ``limit`` turns in this call; ``turns`` is the limit (set when
+          ``@loop`` checks it before a turn)
+
+        ``run``/``arun`` reset it to ``None`` at the start, and it is ``None`` after a run that ended with an
+        exception. A ``@loop`` stops before its next turn once it is set. A loop written without ``@loop`` checks
+        it itself. A ``@loop`` called inside such a loop leaves its ``until``/limit reason set, so a loop without
+        ``@loop`` that calls one checks only for ``StoppedByFinish``/``StoppedByPermission``.
+
+        Example:
+            ```python
+            agent.run(state)
+            if isinstance(state.stopped, StoppedByLimit):
+                print(f"gave up after {state.stopped.turns} turns")
+
+            def my_loop(agent, state):
+                while state.stopped is None and not state.is_answered():
+                    agent.think(state)
+                    if state.wants_tools():
+                        agent.use_tools(state)
+            ```
+        """
         with self._lock:
-            return self._stopped_limit_value if self._stopped_by == "limit" else None
+            return self._stopped
 
     @property
     def parent(self) -> State | None:
@@ -578,10 +607,11 @@ class State:
             self._append("notice", text)
             self._add_to_context(Message.user(text))
 
-    # ------------------------------------------------------------ stopping, denying
+    # ------------------------------------------------------------ stopping
 
     def finish(self, answer: Any = None) -> None:
-        """End the run. The loop stops before its next turn with ``stopped_by == "finish"``.
+        """End the run. ``state.stopped`` becomes ``StoppedByFinish()`` right away, and the loop stops before its
+        next turn.
 
         Tools may call it (a ``submit`` tool, for example), even while other calls are pending. Calling it again
         is allowed; the last ``answer`` given wins.
@@ -591,50 +621,9 @@ class State:
         """
         with self._lock:
             self._finished = True
+            self._stopped = StoppedByFinish()
             if answer is not None:
                 self._finish_answer = answer
-
-    def deny(self, call: ToolCall, reason: str) -> None:
-        """Refuse a pending tool call. The model gets ``reason`` as that call's error result.
-
-        Args:
-            call: One of ``state.pending_calls``.
-            reason: What the model is told, for example ``"The user denied it"``.
-
-        Raises:
-            ValueError: ``call`` is not pending, or ``reason`` is empty or whitespace only.
-
-        Example:
-            ```python
-            for call in state.pending_calls:
-                if call.name == "delete_file":
-                    state.deny(call, "Deleting files is not allowed")
-            agent.use_tools(state)
-            ```
-        """
-        # Compared by id. History gets "denied" (content=reason, call=call); the context gets
-        # ToolResultBlock(call.id, reason, name=call.name, is_error=True) under the same buffer rules as
-        # _record_tool_result. After the lock is released, the Reporter gets
-        # on_tool_end(self, call, reason, ToolOutcome("denied")).
-        _check_text("deny", "reason", reason, 'state.deny(call, "The user denied it")')
-        with self._lock:
-            index = self._pending_index(call)
-            if index is None:
-                shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
-                raise ValueError(
-                    fix_message(
-                        f"cannot deny a call that is not pending: {shown}",
-                        "only calls in state.pending_calls can be denied "
-                        "(this one already has a result or belongs to another turn)",
-                        'for call in state.pending_calls:\n    state.deny(call, "The user denied it")',
-                    )
-                )
-            stored = self._pending[index]
-            self._append("denied", reason, call=stored, is_error=True)
-            self._resolve(index, reason, is_error=True)
-            reporter = self._reporter
-        if reporter is not None:
-            reporter.on_tool_end(self, call, reason, ToolOutcome("denied"))
 
     # ------------------------------------------------------------ shrinking the context
 
@@ -713,17 +702,14 @@ class State:
 
         E.g. ``[turn 0] user: Find the bug`` / ``[turn 1] reply: read_file(path="main.py")`` /
         ``[turn 1] tool_result read_file: 1.2KB`` / ``[turn 1] tool_result fetch_url (error): HTTP 404: …`` /
-        ``done: is_answered (2 turns)``
+        ``done: stopped by is_answered (2 turns)``
         """
         with self._lock:
             lines = [_describe_entry(entry) for entry in self._history]
-            if self._stopped_by is not None:
-                reason = self._stopped_by
-                if reason == "limit" and self._stopped_limit_value is not None:
-                    reason = f"limit({self._stopped_limit_value})"
-                lines.append(f"done: {reason} ({_turns(self._turn)})")
+            if self._stopped is not None:
+                lines.append(f"done: {self._stopped} ({_turns(self._turn)})")
             elif self._finished:
-                lines.append(f"done: finish ({_turns(self._turn)})")
+                lines.append(f"done: stopped by finish ({_turns(self._turn)})")
             return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -858,8 +844,7 @@ class State:
             "finished": self._finished,
             "finish_answer": _serial.answer(self._finish_answer, "the finish() answer"),
             "last_answer": self._last_answer,
-            "stopped_by": self._stopped_by,
-            "stopped_limit": self._stopped_limit_value,
+            "stopped": _serial.stopped_to_dict(self._stopped),
             "data": _serial.plain(self._data, "state.data"),
             "agent": agent_summary,
         }
@@ -929,8 +914,7 @@ class State:
         self._finished = snapshot.get("finished", False)
         self._finish_answer = snapshot.get("finish_answer")
         self._last_answer = snapshot.get("last_answer")
-        self._stopped_by = snapshot.get("stopped_by")
-        self._stopped_limit_value = snapshot.get("stopped_limit")
+        self._stopped = _serial.stopped_from_snapshot(snapshot)
         self._data.clear()
         self._data.update(snapshot.get("data") or {})
         self._saved_agent = snapshot.get("agent")
@@ -969,7 +953,7 @@ class State:
                 if not self._thinking or not isinstance(entry.content, Reply):
                     return False
                 self._apply_reply(entry.content)
-            elif kind in ("tool_result", "denied"):
+            elif kind in ("tool_result", "denied", "cancelled"):
                 if entry.late and entry.call is not None:
                     notice = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
                     self._late_notices.append(notice)
@@ -995,7 +979,7 @@ class State:
         answered = {
             entry.call.id
             for entry in tail
-            if entry.kind in ("tool_result", "denied") and not entry.late and entry.call is not None
+            if entry.kind in ("tool_result", "denied", "cancelled") and not entry.late and entry.call is not None
         }
         calls: list[ToolCall] = []
         for entry in tail:
@@ -1026,7 +1010,7 @@ class State:
 
     def _ensure_no_pending(self, action: str) -> None:
         """``ValueError`` if there are pending calls: ``{action}`` was called while calls (list of names) are
-        pending. Fix: close them first with ``agent.use_tools(state)`` or ``state.deny(call, reason)``.
+        pending. Fix: run them first with ``agent.use_tools(state)``.
         No side effects.
         """
         with self._lock:
@@ -1036,7 +1020,7 @@ class State:
         raise ValueError(
             fix_message(
                 f"cannot call {action}() while calls are pending ({names})",
-                "run them with agent.use_tools(state) or close them first with state.deny(call, reason)",
+                "run them first with agent.use_tools(state) (its permissions decide which ones run)",
                 "agent.think(state)\nif state.wants_tools():\n    agent.use_tools(state)",
             )
         )
@@ -1209,6 +1193,46 @@ class State:
             self._append("tool_result", content, call=call, late=True, is_error=is_error, error=error)
             self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=result_text(content)))
 
+    def _deny(
+        self,
+        call: ToolCall,
+        reason: str,
+        *,
+        kind: ToolOutcomeKind = ToolOutcomeKind.DENIED,
+        error: BaseException | None = None,
+    ) -> None:
+        """Closes a pending call a permission refused, without running it (``_runner`` calls it, then notifies the
+        Reporter).
+
+        - ``ValueError`` if ``call`` is not in ``pending_calls`` (compared by id).
+        - ``kind`` ``DENIED``: ``"denied"`` in history (content=reason, call, is_error=True, error=error: a
+          ``ToolError`` the permission raised). ``CANCELLED``: ``"cancelled"`` the same way.
+        - The context gets ``ToolResultBlock(call.id, reason, is_error=True)`` under the same buffer rules as
+          ``_record_tool_result``.
+        """
+        with self._lock:
+            index = self._pending_index(call)
+            if index is None:
+                shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
+                raise ValueError(f"cannot deny a call that is not pending: {shown}")
+            entry_kind = "cancelled" if kind == ToolOutcomeKind.CANCELLED else "denied"
+            self._append(entry_kind, reason, call=self._pending[index], is_error=True, error=error)
+            self._resolve(index, reason, is_error=True)
+
+    def _stop_turn(self, call: ToolCall, reason: str, permission: str) -> list[ToolCall]:
+        """A permission denied ``call`` with ``stop=True``. As one change under the lock: ``call`` is denied with
+        ``reason``, every other pending call of the turn is cancelled with ``STOPPED_TURN``, and ``stopped``
+        becomes ``StoppedByPermission(call, permission)`` (unless ``finish()`` already set it: finish wins, as it
+        ends the State). Returns the cancelled calls, in request order."""
+        with self._lock:
+            self._deny(call, reason)
+            cancelled = list(self._pending)
+            for other in cancelled:
+                self._deny(other, STOPPED_TURN, kind=ToolOutcomeKind.CANCELLED)
+            if not isinstance(self._stopped, StoppedByFinish):
+                self._stopped = StoppedByPermission(call, permission)
+            return cancelled
+
     def _close_pending(self, error: BaseException) -> list[ToolCall]:
         """Close all pending calls when an exception leaves ``run()``.
 
@@ -1300,14 +1324,17 @@ class State:
             )
             return context + (Message("user", blocks),)
 
-    def _set_stopped_by(self, reason: str | None, *, limit: int | None = None) -> None:
-        """Called when Loop stops. For ``reason="limit"``, pass the number as ``limit``
-        (read back as ``stopped_limit``). For other reasons ``stopped_limit`` is ``None``.
-        ``Agent.run`` resets it to ``None`` at start (so the previous run's reason does not linger).
-        """
+    def _set_stopped(self, stopped: Stopped) -> None:
+        """Called when Loop stops on an ``until`` function or its limit, with why (read back as ``stopped``)."""
         with self._lock:
-            self._stopped_by = reason
-            self._stopped_limit_value = limit if reason == "limit" else None
+            self._stopped = stopped
+
+    def _clear_stop(self) -> None:
+        """``stopped`` goes back to ``None``. Called by ``Agent.run``/``arun`` at start (the previous run's reason,
+        possibly restored by a Store, does not stop this run) and when a run raises (a run ending in an exception
+        has no reason), and by Loop when it goes on after a nested loop stopped on its own ``until``/limit."""
+        with self._lock:
+            self._stopped = None
 
     @classmethod
     def _child(cls, parent: State, task: str) -> State:
@@ -1410,7 +1437,7 @@ def _describe_entry(entry: HistoryEntry) -> str:
         if entry.is_error:
             return f"{head} {name}{late} (error): {_short(result_text(content))}"
         return f"{head} {name}: {_size(content)}{late}"
-    if kind == "denied":
+    if kind in ("denied", "cancelled"):
         name = entry.call.name if entry.call else "?"
         return f"{head} {name}: {_short(content)}"
     if kind in ("ask", "human") and isinstance(content, Exchange):

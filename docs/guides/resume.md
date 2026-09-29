@@ -103,7 +103,7 @@ Nothing that failed to save is lost from the State: the next save writes it.
 
 ```python
 for saved in store.list():
-    print(saved.id, saved.task, saved.updated_at, saved.stopped_by)
+    print(saved.id, saved.task, saved.updated_at, saved.stopped)
 
 store.delete("review-pr-42")
 ```

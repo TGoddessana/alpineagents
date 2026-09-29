@@ -183,8 +183,8 @@ def _done_job(call, result: str) -> _runner._Job:
 
 
 def test_finish_does_not_raise_when_deny_races_the_check(monkeypatch):
-    """"If a finished call is no longer a pending call by then (a tool in the same turn closed it with state.deny),
-    its result is not recorded": another thread's deny cannot slip in between the check and the record."""
+    """"If a finished call is no longer a pending call by then, its result is not recorded": another thread's
+    State._deny cannot slip in between the check and the record."""
     state, call_a, call_b = _two_pending_calls()
     job = _done_job(call_b, "b's result")
 
@@ -203,7 +203,7 @@ def test_finish_does_not_raise_when_deny_races_the_check(monkeypatch):
     def deny_from_other_tool():
         barrier.wait(timeout=5)
         try:
-            state.deny(call_b, "tool a denied b concurrently")
+            state._deny(call_b, "tool a denied b concurrently")
         except ValueError as e:  # if recorded first, there is no call to deny (deny's contract)
             deny_errors.append(e)
 
@@ -221,9 +221,9 @@ def test_finish_does_not_raise_when_deny_races_the_check(monkeypatch):
 
 
 def test_finish_skips_a_call_denied_before_it_finished():
-    """If deny closed it first, the finished result is not recorded and nothing is raised."""
+    """If _deny closed it first, the finished result is not recorded and nothing is raised."""
     state, call_a, call_b = _two_pending_calls()
-    state.deny(call_b, "denied")
+    state._deny(call_b, "denied")
     _runner._finish(state, None, _done_job(call_b, "late"), [])
     assert [c.id for c in state.pending_calls] == [call_a.id]
     assert not any(h.kind == "tool_result" for h in state.history)

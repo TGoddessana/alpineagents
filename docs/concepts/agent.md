@@ -25,6 +25,7 @@ agent = Agent(
 | `loop` | `default_loop` | The loop `run` calls. See [Loops](loops.md) |
 | `reporter` | `Terminal` | Receives progress. `None` shows nothing. See [Progress and questions](../guides/progress.md) |
 | `human` | `Terminal` | Answers `ask_human`. `None` means nobody can answer |
+| `permissions` | `None` | Permissions that decide, before a tool call runs, whether it may run. `None` runs every call without checks. See [Ask before a tool runs](../guides/approval.md) |
 | `store` | `None` | Saves each State as it runs, so it can be continued later. See [Save and resume](../guides/resume.md) |
 | `name`, `description` | `None` | Labels for your own use |
 
@@ -73,10 +74,12 @@ if state.wants_tools():
 
 Rules:
 
-- `think` raises `ValueError` while calls are pending. Run them with `use_tools`, or refuse them with `state.deny`.
+- `think` raises `ValueError` while calls are pending. Run them with `use_tools`. With `Agent(permissions=[...])`,
+  `use_tools` first asks the permissions, and a call they refuse does not run. See
+  [Ask before a tool runs](../guides/approval.md).
 - `think(state, tools=[...])` limits the tools the model sees in this request. `tools=[]` shows none.
 - `agent.tool_map` has every tool the model can call, by name. Use it to find the tool of a pending call, for example
-  to ask before calls that are not `read_only`. See
+  to read its hints. See
   [Tools: describe what a tool does](tools.md#describe-what-a-tool-does).
 - If `think` fails, the context goes back to how it was before the call, and the turn does not count.
 

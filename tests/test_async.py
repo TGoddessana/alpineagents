@@ -20,6 +20,8 @@ from alpineagents import (
     Loop,
     Reporter,
     State,
+    StoppedByLimit,
+    StoppedByUntil,
     acompact_if_full,
     adefault_loop,
     compact_if_full,
@@ -90,7 +92,7 @@ async def test_arun_default_loop_with_sync_tool():
     agent = make_agent([tool_call("add", a=1, b=2), "It is 3"], tools=[add])
     state = State("What is 1 + 2?")
     assert await agent.arun(state) == "It is 3"
-    assert state.stopped_by == "is_answered"
+    assert state.stopped == StoppedByUntil("is_answered")
     assert [e.content for e in state.history if e.kind == "tool_result"] == ["3"]
 
 
@@ -187,7 +189,7 @@ async def test_async_loop_body_and_limit():
     agent = make_agent([tool_call("add", a=1, b=1), tool_call("add", a=2, b=2)], tools=[add], loop=looping)
     state = State("Keep adding")
     await agent.arun(state)
-    assert state.stopped_by == "limit"
+    assert state.stopped == StoppedByLimit(2)
     assert len(calls) == 2
 
 

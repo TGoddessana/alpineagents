@@ -66,6 +66,25 @@ def _looks_like_missing_credentials(message: str) -> bool:
     return any(hint in lowered for hint in _MISSING_CREDENTIALS_HINTS)
 
 
+def _sdk_errors() -> tuple[type[Exception], ...]:
+    """The exceptions ``respond``/``arespond`` wrap: SDK errors, the SDK's missing-credentials ``TypeError``, and
+    the transport errors the SDK lets through while a stream is read.
+
+    The SDK turns a failure to send the request into ``APIConnectionError``/``APITimeoutError``, and an ``error``
+    event in the stream into an ``APIStatusError``. But it reads the stream's body without wrapping, so a connection
+    dropped or a read timed out mid-stream reaches the adapter as a raw ``httpx2.RequestError`` (``ReadError``,
+    ``RemoteProtocolError``, ``ReadTimeout`` ...). ``ssl.SSLError`` and ``anyio.EndOfStream`` are TLS failures
+    httpx2 does not map yet; the openai SDK wraps the same set.
+    """
+    import ssl
+
+    import anthropic
+    import anyio
+    import httpx2
+
+    return (anthropic.AnthropicError, TypeError, httpx2.RequestError, ssl.SSLError, anyio.EndOfStream)
+
+
 def _result_content(content: ToolResultContent) -> str | list[dict[str, Any]]:
     """A tool result's ``content``: the string, or text and image blocks (whitespace-only text dropped)."""
     if isinstance(content, str):
@@ -264,10 +283,9 @@ class Anthropic(Model):
             RateLimitError: The API returned 429 after the SDK's retries.
             AuthError: The API key is missing or rejected.
             ContextTooLongError: The request is larger than the context window.
-            ProviderError: Any other API error.
+            ProviderError: Any other API error, or the connection dropped or timed out while the reply was
+                streaming (not retried: the SDK retries only a request whose reply has not started).
         """
-        import anthropic
-
         client = self._client()
         kwargs = self._build_request_kwargs(request)
         emit = _Emit(on_text)
@@ -277,7 +295,7 @@ class Anthropic(Model):
                 for chunk in stream.text_stream:
                     emit(chunk)
                 message = stream.get_final_message()
-        except (anthropic.AnthropicError, TypeError) as e:
+        except _sdk_errors() as e:
             if e is emit.error:
                 raise  # raised by on_text, not by the SDK: propagates as is
             raise self._wrap_error(e) from e
@@ -289,8 +307,6 @@ class Anthropic(Model):
     ) -> Reply:
         """The async version of ``respond``, with the same reply and errors. Cancelling it closes the stream."""
         # Uses AsyncAnthropic, one client per event loop (see _async_client).
-        import anthropic
-
         client = self._async_client()
         kwargs = self._build_request_kwargs(request)
         emit = _Emit(on_text)
@@ -300,7 +316,7 @@ class Anthropic(Model):
                 async for chunk in stream.text_stream:
                     emit(chunk)
                 message = await stream.get_final_message()
-        except (anthropic.AnthropicError, TypeError) as e:
+        except _sdk_errors() as e:
             if e is emit.error:
                 raise  # raised by on_text, not by the SDK: propagates as is
             raise self._wrap_error(e) from e
@@ -320,6 +336,10 @@ class Anthropic(Model):
         (header validation runs lazily), not an ``AnthropicError``. That message is recognized and wrapped in
         ``AuthError``; any other ``TypeError`` becomes ``ProviderError``. ``respond`` re-raises a ``TypeError``
         that ``on_text`` raised as is (``_Emit``).
+
+        A transport error raised while the stream is read (see ``_sdk_errors``: a dropped connection, a read
+        timeout) -> ``ProviderError``. ``respond`` re-raises one that ``on_text`` raised as is, and
+        ``KeyboardInterrupt``/``CancelledError`` are never caught.
         """
         import anthropic
 
@@ -337,6 +357,8 @@ class Anthropic(Model):
             if _looks_like_missing_credentials(str(e)):
                 return AuthError(f"Anthropic authentication failed (no credentials): {e}")
             return ProviderError(f"Error while building the Anthropic request: {e}")
+        if not isinstance(e, anthropic.AnthropicError):
+            return ProviderError(f"Anthropic stream failed mid-reply ({type(e).__name__}): {e}")
         return ProviderError(f"Anthropic API error: {e}")
 
     # ------------------------------------------------------------ sending

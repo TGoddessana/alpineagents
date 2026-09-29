@@ -169,12 +169,11 @@ class _RecordingModel(Model):
 
 
 class _PricedModel(Model):
-    """Minimal adapter for checking the ``_cost``/``_lookup_price`` priority."""
+    """Minimal adapter for checking ``_cost``."""
 
-    def __init__(self, price=None, lookup_price=None):
+    def __init__(self, price=None):
         self.name = "priced"
         self.price = price
-        self._lookup_result = lookup_price
 
     @property
     def context_window(self) -> int:
@@ -182,9 +181,6 @@ class _PricedModel(Model):
 
     def respond(self, request: Request, on_text=None, on_event=None) -> Reply:  # pragma: no cover - unused
         raise NotImplementedError
-
-    def _lookup_price(self):
-        return self._lookup_result
 
 
 # ==================================================================
@@ -336,27 +332,22 @@ def test_adapter_construction_needs_no_network_or_credentials(monkeypatch, adapt
 # ==================================================================
 
 
-def test_explicit_price_takes_priority_over_the_lookup_table():
-    """""price=Price(input=3.0, output=15.0)" (dollars per million tokens) takes priority over that."""
-    explicit = Price(input=1.0, output=2.0)
-    looked_up = Price(input=100.0, output=200.0)
-    model = _PricedModel(price=explicit, lookup_price=looked_up)
+def test_cost_is_computed_from_the_price():
+    """"price=Price(input=3.0, output=15.0)" (dollars per million tokens) gives usage.cost."""
+    price = Price(input=1.0, output=2.0)
+    model = _PricedModel(price=price)
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, requests=1)
-    assert model._cost(usage) == explicit.cost(usage)
+    assert model._cost(usage) == price.cost(usage) == 3.0
 
 
-def test_lookup_table_used_only_when_no_explicit_price_is_given():
-    """"With genai-prices installed via pip install alpineagents[prices], cost is computed from its table" (table
-    only)"""
-    looked_up = Price(input=5.0, output=10.0)
-    model = _PricedModel(price=None, lookup_price=looked_up)
-    usage = Usage(input_tokens=1_000_000, output_tokens=0, requests=1)
-    assert model._cost(usage) == 5.0
+def test_there_is_no_price_lookup_extension_point():
+    """The price catalog extension point was removed: cost comes from ``price`` only."""
+    assert not hasattr(Model, "_lookup_price")
 
 
 def test_cost_is_none_not_zero_when_price_is_unknown():
-    """"With neither, or for an unknown model, it is `None`. This keeps "unknown" apart from 0."""
-    model = _PricedModel(price=None, lookup_price=None)
+    """"Without a price it is `None`. This keeps "unknown" apart from 0."""
+    model = _PricedModel(price=None)
     usage = Usage(input_tokens=100, output_tokens=100, requests=1)
     cost = model._cost(usage)
     assert cost is None

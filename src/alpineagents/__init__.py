@@ -9,6 +9,7 @@ from .errors import (
     MCPConnectionError,
     NoHumanError,
     OutputError,
+    PermissionWarning,
     ProviderError,
     RateLimitError,
     ResumeWarning,
@@ -23,7 +24,7 @@ from .reporter import Reporter
 from .state import State
 from .store import FileStore, SavedState, Store
 from .terminal import Terminal
-from .tool import FunctionTool, Tool, tool
+from .tool import FunctionTool, Hints, Tool, tool
 from .types import (
     ContextChange,
     HistoryEntry,
@@ -33,8 +34,13 @@ from .types import (
     Price,
     Reply,
     Request,
+    StoppedByFinish,
+    StoppedByLimit,
+    StoppedByPermission,
+    StoppedByUntil,
     ToolCall,
     ToolOutcome,
+    ToolOutcomeKind,
     ToolSpec,
     Usage,
 )
@@ -52,6 +58,7 @@ __all__ = [
     "tool",
     "Tool",
     "FunctionTool",
+    "Hints",
     "compact_if_full",
     "acompact_if_full",
     "MCP",
@@ -78,6 +85,11 @@ __all__ = [
     "ContextChange",
     "ModelEvent",
     "ToolOutcome",
+    "ToolOutcomeKind",
+    "StoppedByUntil",
+    "StoppedByLimit",
+    "StoppedByFinish",
+    "StoppedByPermission",
     "SavedState",
     "Image",
     # Errors
@@ -90,6 +102,7 @@ __all__ = [
     "NoHumanError",
     "MCPConnectionError",
     "ResumeWarning",
+    "PermissionWarning",
     "ToolError",
     "ToolInputError",
 ]

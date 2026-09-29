@@ -7,3 +7,5 @@ Guide: [Models](../guides/models.md).
 ::: alpineagents.Anthropic
 
 ::: alpineagents.OpenAICompatible
+
+::: alpineagents.models.resolve_model

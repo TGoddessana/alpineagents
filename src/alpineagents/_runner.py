@@ -9,28 +9,33 @@ import asyncio
 import contextvars
 import inspect
 import threading
+import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from .errors import ToolError, ToolInputError
-from .state import closed_outcome, closed_result
+from .errors import PermissionWarning, ToolError, ToolInputError
+from .permissions import Allowed, Denied, _acheck_call, _check_call, _Decision
+from .state import STOPPED_TURN, closed_outcome, closed_result
 from .tool import format_result, invalid_args_message
-from .types import ToolOutcome, ToolResultContent, format_call
+from .types import ToolOutcome, ToolOutcomeKind, ToolResultContent, format_call
 
 if TYPE_CHECKING:
+    from .permissions import Permission
     from .reporter import Reporter
     from .state import State
     from .tool import Tool
     from .types import ToolCall
 
-__all__ = ["run_calls", "arun_calls", "INPUT_ERROR", "UNKNOWN_TOOL", "LATE_EXCEPTION"]
+__all__ = ["run_calls", "arun_calls", "INPUT_ERROR", "UNKNOWN_TOOL", "LATE_EXCEPTION", "NO_PERMISSION"]
 
 #: Result when argument validation fails. ``INPUT_ERROR.format(message)``.
 INPUT_ERROR = "(input error: {})"
 #: Call to a tool that does not exist. ``UNKNOWN_TOOL.format(name, "a, b")``.
 UNKNOWN_TOOL = "(input error: unknown tool {!r}. Available tools: {})"
+#: Result of a call no permission allowed or denied (it is denied).
+NO_PERMISSION = "No permission allowed this call."
 #: Result of a call not waited for on interrupt that later raised. ``LATE_EXCEPTION.format(type_name, error)``.
 #: Goes into the ``LATE_RESULT`` notice.
 LATE_EXCEPTION = "(exception: {}: {})"
@@ -222,7 +227,7 @@ def _record_if_pending(
     state: State, call: ToolCall, text: ToolResultContent, is_error: bool = False, error: ToolError | None = None
 ) -> bool:
     """If ``call`` is still a pending call, records the result and returns true. The check and the record
-    happen under one ``state.lock`` (so a tool in the same turn cannot close it with ``state.deny`` in between)."""
+    happen under one ``state.lock`` (so nothing can close it in between)."""
     with state.lock:
         if not _is_pending(state, call):
             return False
@@ -253,11 +258,10 @@ def _end(
 def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_Job]) -> None:
     """Records one finished call and calls ``on_tool_end`` (main thread).
 
-    - Success: if it is still a pending call, records the result and calls ``on_tool_end(result, "done")``
-      (``"error"`` and ``is_error`` for a ``ToolError`` the tool raised, which the history entry keeps in
-      ``error``; ``"input_error"`` and ``is_error`` for a ``ToolInputError``).
-      If a tool in the same turn already closed it with ``state.deny``, nothing is recorded (``deny`` already
-      called ``on_tool_end``).
+    - Success: if it is still a pending call, records the result and calls ``on_tool_end(result, DONE)``
+      (``ERROR`` and ``is_error`` for a ``ToolError`` the tool raised, which the history entry keeps in
+      ``error``; ``INPUT_ERROR`` and ``is_error`` for a ``ToolInputError``).
+      If something already closed it, nothing is recorded and ``on_tool_end`` is not called.
     - Exception: records ``error``, adds the job to ``failures`` and calls
       ``on_tool_end(closed_result(e), closed_outcome(e))``.
       No result is recorded (the call stays in ``pending_calls`` and ``Agent.run`` closes it with the same text).
@@ -270,7 +274,11 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
         text = job.future.result()
         recorded = _record_if_pending(state, job.call, text, job.is_error, job.tool_error)
         shown: ToolResultContent | None = text if recorded else None
-        outcome = ToolOutcome("input_error" if job.input_error else "error" if job.is_error else "done")
+        outcome = ToolOutcome(
+            ToolOutcomeKind.INPUT_ERROR if job.input_error
+            else ToolOutcomeKind.ERROR if job.is_error
+            else ToolOutcomeKind.DONE
+        )
     else:
         state._record_error(error, job.call)
         if job not in failures:
@@ -336,7 +344,7 @@ def _record_now(state: State, reporter: Reporter | None, call: ToolCall, text: s
         reporter.on_tool_start(state, call)
     state._record_tool_result(call, text, is_error=True)
     if reporter is not None:
-        reporter.on_tool_end(state, call, text, ToolOutcome("input_error"))
+        reporter.on_tool_end(state, call, text, ToolOutcome(ToolOutcomeKind.INPUT_ERROR))
 
 
 def _start(
@@ -357,6 +365,7 @@ def run_calls(
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
     on_record: Callable[[], None] | None = None,
+    permissions: tuple[Permission, ...] | None = None,
 ) -> None:
     """Runs ``calls`` (a snapshot of ``state.pending_calls``) and records the results in State.
 
@@ -366,6 +375,22 @@ def run_calls(
     1. Prepare (in request order): if the tool does not exist the result is ``UNKNOWN_TOOL``; if the arguments
        were not valid JSON (``invalid_args_message``) it is ``INPUT_ERROR``: ``on_tool_start`` →
        ``state._record_tool_result(call, result, is_error=True)`` → ``on_tool_end``. The tool is not called.
+    1b. Permissions (unless ``permissions`` is ``None``; an empty tuple denies every call), for every remaining call in request order, before any tool runs
+       (``permissions._check_call``: deny permissions first, then the rest in list order; the first verdict
+       decides). Allowed → the call goes on to step 2. Otherwise the call is closed with
+       ``state._deny(call, reason)`` and gets ``on_tool_end(reason, ToolOutcome(DENIED, decided_by=repr(p)))``
+       (no ``on_tool_start``):
+       - ``Denied(reason)``: that reason.
+       - The permission raised ``ToolError``: its message, with the ``ToolError`` as the entry's and the outcome's
+         ``error``.
+       - Nobody decided: ``NO_PERMISSION`` and a ``PermissionWarning``; ``decided_by`` is ``None``.
+       - ``Denied(reason, stop=True)``: ``state._stop_turn`` denies the call, cancels every other pending call of
+         the turn with ``STOPPED_TURN`` (``CANCELLED`` outcomes, same ``decided_by``) and sets ``state.stopped``
+         to ``StoppedByPermission``, all under one lock. No tool of the turn runs: this function returns after ``on_record()``.
+       Any other exception from a permission is recorded as an ``error`` entry with the call and propagates;
+       the calls denied before it stay closed, the rest stay pending. If this step recorded anything (a closed call,
+       or a ``DecideByHuman`` question and answer), ``on_record()`` runs once after it, so an approval is saved
+       before the tool it approved starts.
     2. Parallel group (``tool.parallel``): for each call, ``on_tool_start``, then hand it to ``_Executor``
        (daemon worker threads, at most ``_MAX_WORKERS`` at once).
        The worker thread runs ``value = tool.run(dict(call.args), state)``; if it is a coroutine, it creates a new
@@ -373,8 +398,7 @@ def run_calls(
        The result is ``format_result(value)`` (on the worker thread). A ``ToolError`` or ``ToolInputError`` the
        tool raises is not an exception here: it becomes an error result (``(input error: ...)`` for the latter).
     3. As they finish (completion order), on the main thread: success → ``state._record_tool_result(call, text)``
-       → ``on_tool_end`` (check and record under one ``state.lock``; a call closed by ``state.deny`` in between
-       is not recorded).
+       → ``on_tool_end`` (check and record under one ``state.lock``; a call already closed is not recorded).
        Exception → ``state._record_error(e, call)`` →
        ``on_tool_end(state, call, closed_result(e), closed_outcome(e))``, and the first exception is remembered
        (no result is recorded, so the call stays in ``pending_calls``).
@@ -401,7 +425,26 @@ def run_calls(
     - Results of calls that already finished stay recorded, and the interrupt exception is re-raised as is
       (``Agent.run`` does the closing).
     """
-    parallel, serial = _prepare(state, calls, tools, reporter)
+    jobs = _prepare(state, calls, tools, reporter)
+    if jobs and permissions is not None:
+        recorded = len(state.history)
+        allowed: list[_Job] = []
+        for job in jobs:
+            try:
+                decision = _check_call(permissions, state, job.call, job.tool)
+            except Exception as e:
+                state._record_error(e, job.call)
+                raise
+            if _apply(state, reporter, job, decision):
+                allowed.append(job)
+                continue
+            if _stopped(decision):
+                allowed = []
+                break
+        if on_record is not None and len(state.history) != recorded:
+            on_record()
+        jobs = allowed
+    parallel, serial = _split(jobs)
     if not parallel and not serial:
         return
 
@@ -428,11 +471,10 @@ def run_calls(
 
 def _prepare(
     state: State, calls: Sequence[ToolCall], tools: Mapping[str, Tool], reporter: Reporter | None
-) -> tuple[list[_Job], list[_Job]]:
-    """Step 1 of ``run_calls``: records unknown tools and arguments that are not valid JSON right away, and splits
-    the rest into the parallel and serial groups (request order)."""
-    parallel: list[_Job] = []
-    serial: list[_Job] = []
+) -> list[_Job]:
+    """Step 1 of ``run_calls``: records unknown tools and arguments that are not valid JSON right away, and returns
+    a job for each of the rest (request order)."""
+    jobs: list[_Job] = []
     for call in calls:
         tool = tools.get(call.name)
         if tool is None:
@@ -443,8 +485,60 @@ def _prepare(
         if invalid is not None:
             _record_now(state, reporter, call, INPUT_ERROR.format(invalid))
             continue
-        (parallel if tool.parallel else serial).append(_Job(call, tool))
-    return parallel, serial
+        jobs.append(_Job(call, tool))
+    return jobs
+
+
+def _split(jobs: list[_Job]) -> tuple[list[_Job], list[_Job]]:
+    """The parallel and serial groups (request order)."""
+    return [job for job in jobs if job.tool.parallel], [job for job in jobs if not job.tool.parallel]
+
+
+def _stopped(decision: _Decision) -> bool:
+    return isinstance(decision.verdict, Denied) and decision.verdict.stop
+
+
+def _apply(state: State, reporter: Reporter | None, job: _Job, decision: _Decision) -> bool:
+    """Step 1b of ``run_calls`` for one call: returns true if it may run; otherwise closes it (and, for a denial
+    with ``stop=True``, the rest of the turn) and calls ``on_tool_end``. Main thread, outside the State lock."""
+    verdict, permission, error = decision
+    if isinstance(verdict, Allowed):
+        return True
+    call = job.call
+    decided_by = repr(permission) if permission is not None else None
+    if error is not None:
+        state._deny(call, str(error), error=error)
+        _notify(state, reporter, call, str(error), ToolOutcome(ToolOutcomeKind.DENIED, error, decided_by))
+        return False
+    if verdict is None:
+        warnings.warn(
+            PermissionWarning(
+                f"No permission allowed or denied the call to {call.name}, so it was denied. To allow every call "
+                "no permission denies, put AllowByDefault() at the end of permissions="
+            ),
+            stacklevel=2,
+        )
+        state._deny(call, NO_PERMISSION)
+        _notify(state, reporter, call, NO_PERMISSION, ToolOutcome(ToolOutcomeKind.DENIED))
+        return False
+    assert decided_by is not None
+    if verdict.stop:
+        cancelled = state._stop_turn(call, verdict.reason, decided_by)
+        _notify(state, reporter, call, verdict.reason, ToolOutcome(ToolOutcomeKind.DENIED, decided_by=decided_by))
+        for other in cancelled:
+            outcome = ToolOutcome(ToolOutcomeKind.CANCELLED, decided_by=decided_by)
+            _notify(state, reporter, other, STOPPED_TURN, outcome)
+        return False
+    state._deny(call, verdict.reason)
+    _notify(state, reporter, call, verdict.reason, ToolOutcome(ToolOutcomeKind.DENIED, decided_by=decided_by))
+    return False
+
+
+def _notify(
+    state: State, reporter: Reporter | None, call: ToolCall, text: ToolResultContent, outcome: ToolOutcome
+) -> None:
+    if reporter is not None:
+        reporter.on_tool_end(state, call, text, outcome)
 
 
 def _raise_first(failures: list[_Job]) -> None:
@@ -566,15 +660,36 @@ async def arun_calls(
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
     on_record: Callable[[], Awaitable[None]] | None = None,
+    permissions: tuple[Permission, ...] | None = None,
 ) -> None:
     """The async version of ``run_calls``, run on the event loop thread. Same steps, records and notifications.
 
+    - Permissions are asked with ``acheck`` (``permissions._acheck_call``).
     - ``async def`` tools run as Tasks on the running event loop (not on a worker thread's loop). Other tools run
       on daemon worker threads as in ``run_calls``; the loop awaits their futures.
     - Cancellation (``CancelledError`` of the awaiting task) is the interrupt: finished results stay recorded,
       Tasks are cancelled, sync threads are not waited for (late results), and the exception is re-raised as is.
     """
-    parallel, serial = _prepare(state, calls, tools, reporter)
+    jobs = _prepare(state, calls, tools, reporter)
+    if jobs and permissions is not None:
+        recorded = len(state.history)
+        allowed: list[_Job] = []
+        for job in jobs:
+            try:
+                decision = await _acheck_call(permissions, state, job.call, job.tool)
+            except Exception as e:
+                state._record_error(e, job.call)
+                raise
+            if _apply(state, reporter, job, decision):
+                allowed.append(job)
+                continue
+            if _stopped(decision):
+                allowed = []
+                break
+        if on_record is not None and len(state.history) != recorded:
+            await on_record()
+        jobs = allowed
+    parallel, serial = _split(jobs)
     if not parallel and not serial:
         return
 

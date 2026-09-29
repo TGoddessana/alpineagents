@@ -37,6 +37,7 @@ __all__ = [
     "collect_tools",
     "format_result",
     "hint_values",
+    "Hints",
     "invalid_args_message",
     "SUPPORTED_TYPES_TEXT",
     "DONE",
@@ -252,13 +253,19 @@ def hint_values(
 def _check_hints(tool_name: str, **hints: Any) -> tuple[bool, bool, bool, bool]:
     """``hint_values`` for ``@tool``: each hint must be a bool or left out, and a read-only tool cannot also be
     destructive or not idempotent."""
+    return _checked_hint_values(f"Tool {tool_name}", "@tool", **hints)
+
+
+def _checked_hint_values(where: str, maker: str, **hints: Any) -> tuple[bool, bool, bool, bool]:
+    """The checks of ``_check_hints``, with ``where`` starting the message and ``maker`` (``@tool``, ``Hints``)
+    in the examples."""
     for hint, value in hints.items():
         if value is not None and not isinstance(value, bool):
             raise TypeError(
                 fix_message(
-                    f"Tool {tool_name}: {hint}= takes True or False (got: {value!r})",
+                    f"{where}: {hint}= takes True or False (got: {value!r})",
                     "Pass a bool, or leave it out to assume the worst",
-                    "@tool(read_only=True, open_world=False)",
+                    f"{maker}(read_only=True, open_world=False)",
                 )
             )
     if hints["read_only"]:
@@ -266,13 +273,105 @@ def _check_hints(tool_name: str, **hints: Any) -> tuple[bool, bool, bool, bool]:
             if hints[hint] is contradiction:
                 raise ValueError(
                     fix_message(
-                        f"Tool {tool_name}: read_only=True and {hint}={contradiction} contradict each other. "
+                        f"{where}: read_only=True and {hint}={contradiction} contradict each other. "
                         "A read-only tool changes nothing, so it is never destructive and always idempotent",
                         f"Leave {hint} out (read_only=True sets it), or set read_only=False",
-                        "@tool(read_only=True)",
+                        f"{maker}(read_only=True)",
                     )
                 )
     return hint_values(**hints)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Hints:
+    """The four hints of one call: what running the tool with these arguments does. ``tool.hints_for(args)``
+    returns them.
+
+    Made like the hints of ``@tool``: ``Hints(read_only=True, open_world=False)``. A hint left out assumes the
+    worst (not read-only, destructive, not idempotent, open world), and ``read_only=True`` sets
+    ``destructive=False`` and ``idempotent=True``. After construction every hint is a ``bool``.
+
+    A subclass can carry more facts about the call. Give each new field a default:
+
+    ```python
+    @dataclass(frozen=True)
+    class FileHints(Hints):
+        paths: tuple[str, ...] = ()
+    ```
+
+    Raises:
+        TypeError: A hint is not a bool.
+        ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
+    """
+
+    # None only until __post_init__ fills in the hints left out.
+    read_only: bool = None  # type: ignore[assignment]
+    """The call does not change its environment."""
+    destructive: bool = None  # type: ignore[assignment]
+    """The call may delete or overwrite something."""
+    idempotent: bool = None  # type: ignore[assignment]
+    """Making the call again with the same arguments has no further effect."""
+    open_world: bool = None  # type: ignore[assignment]
+    """The call reaches outside the tool's own domain, such as the web, a shell or another system."""
+
+    def __post_init__(self) -> None:
+        name = type(self).__name__
+        values = _checked_hint_values(
+            name,
+            name,
+            read_only=self.read_only,
+            destructive=self.destructive,
+            idempotent=self.idempotent,
+            open_world=self.open_world,
+        )
+        for field, value in zip(("read_only", "destructive", "idempotent", "open_world"), values, strict=True):
+            object.__setattr__(self, field, value)
+
+
+_HINTS_FOR_EXAMPLE = (
+    "def bash_hints(args):\n"
+    '    if args.get("command") in ("ls", "pwd"):\n'
+    "        return Hints(read_only=True)\n"
+    "    return None  # not sure: the tool's own hints\n"
+    "\n"
+    "@tool(hints_for=bash_hints)\n"
+    "def bash(command: str) -> str: ..."
+)
+
+
+def _check_hints_function(fn: Any, tool_name: str) -> None:
+    """Checks a ``hints_for`` function: a regular function that takes the call's arguments."""
+    where = f"Tool {tool_name}: hints_for={fn!r}"
+    if not callable(fn) or isinstance(fn, type):
+        raise TypeError(
+            fix_message(
+                f"{where} is not a function",
+                "Pass a function that takes the call's arguments and returns Hints, or None when unsure",
+                _HINTS_FOR_EXAMPLE,
+            )
+        )
+    if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+        raise TypeError(
+            fix_message(
+                f"{where} is async",
+                "Write it as a regular def. It only reads the arguments",
+                _HINTS_FOR_EXAMPLE,
+            )
+        )
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return
+    try:
+        signature.bind({})
+    except TypeError:
+        raise TypeError(
+            fix_message(
+                f"{where} must take exactly one argument, the call's arguments as a dict",
+                "Give it one parameter",
+                _HINTS_FOR_EXAMPLE,
+            )
+        ) from None
 
 
 _HANDLER_EXAMPLE = (
@@ -436,7 +535,8 @@ class Tool:
     """``True`` runs the tool together with the turn's other calls. ``False`` runs it alone after they finish."""
     read_only: bool
     """The tool does not change its environment. ``False`` unless given. The model does not see the hints; they are
-    for your own code, such as a loop that asks before calls that are not read-only."""
+    for your own code, such as a loop that asks before calls that are not read-only. These four are the worst case
+    for the tool; ``hints_for(args)`` gives the hints of one call."""
     destructive: bool
     """The tool may delete or overwrite something. ``True`` unless given, and ``False`` for a read-only tool."""
     idempotent: bool
@@ -527,6 +627,27 @@ class Tool:
             ToolError: A failure the model should handle. The model gets it as an error result.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement run(self, args, state)")
+
+    def hints_for(self, args: Mapping[str, Any]) -> Hints:
+        """The hints of one call: what running the tool with these arguments does. By default the tool's own hints
+        (``read_only`` and the others), which are the worst case for any call.
+
+        A subclass can override it to tell more about one call, such as a shell tool whose ``ls`` changes nothing.
+        Return the tool's own hints (``super().hints_for(args)``) when unsure.
+
+        Args:
+            args: The model's arguments, parsed from JSON but not yet checked against ``input_schema``: any value
+                can be missing or of the wrong type.
+
+        Returns:
+            A ``Hints``, or an instance of a ``Hints`` subclass that carries more facts about the call.
+        """
+        return Hints(
+            read_only=self.read_only,
+            destructive=self.destructive,
+            idempotent=self.idempotent,
+            open_world=self.open_world,
+        )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.name!r})"
@@ -632,6 +753,7 @@ class FunctionTool(Tool):
         description: str | None = None,
         parallel: bool = True,
         exception_handler: Callable[[Any], str] | None = None,
+        hints_for: Callable[[dict[str, Any]], Hints | None] | None = None,
         read_only: bool | None = None,
         destructive: bool | None = None,
         idempotent: bool | None = None,
@@ -645,6 +767,7 @@ class FunctionTool(Tool):
             description: Defaults to the docstring's first paragraph.
             parallel: ``False`` runs the tool alone after the turn's other calls finish.
             exception_handler: See ``tool``.
+            hints_for: See ``tool``.
             read_only: See ``tool``.
             destructive: See ``tool``.
             idempotent: See ``tool``.
@@ -653,7 +776,8 @@ class FunctionTool(Tool):
         Raises:
             TypeError: The name is invalid, a parameter has no type hint or an unsupported type, the function
                 takes ``*args``, ``**kwargs`` or positional-only parameters, ``exception_handler`` is not a
-                function with one parameter whose type hint names ``Exception`` subclasses, or a hint is not a bool.
+                function with one parameter whose type hint names ``Exception`` subclasses, ``hints_for`` is not a
+                regular function with one parameter, or a hint is not a bool.
             ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
         """
         # - If the first parameter is named ``self`` with no type hint, it is a method (``needs_self=True``, left
@@ -672,12 +796,17 @@ class FunctionTool(Tool):
         # The options as given, for copy.
         self._options: dict[str, Any] = {
             "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
-            "read_only": read_only, "destructive": destructive, "idempotent": idempotent, "open_world": open_world,
+            "hints_for": hints_for, "read_only": read_only, "destructive": destructive, "idempotent": idempotent,
+            "open_world": open_world,
         }
         self.exception_handler = exception_handler
         self._handles: tuple[type[Exception], ...] = (
             () if exception_handler is None else _handled_types(exception_handler, tool_name)
         )
+        if hints_for is not None:
+            _check_hints_function(hints_for, tool_name)
+        # The hints_for= function (the name hints_for is the method).
+        self._hints_function = hints_for
 
         doc_description, arg_docs = _parse_docstring(fn.__doc__)
 
@@ -872,12 +1001,40 @@ class FunctionTool(Tool):
             ) from error
         raise ToolError(message) from error
 
+    def hints_for(self, args: Mapping[str, Any]) -> Hints:
+        """The hints of one call: what the ``hints_for=`` function returns for ``args``, or the tool's own hints
+        when it returns ``None`` or was not given.
+
+        Args:
+            args: The model's arguments, parsed from JSON but not yet checked against the type hints.
+
+        Returns:
+            A ``Hints``, or an instance of a ``Hints`` subclass.
+
+        Raises:
+            TypeError: The ``hints_for=`` function returned something other than ``Hints`` or ``None``.
+        """
+        if self._hints_function is None:
+            return super().hints_for(args)
+        hints = self._hints_function(args)
+        if hints is None:
+            return super().hints_for(args)
+        if not isinstance(hints, Hints):
+            raise TypeError(
+                fix_message(
+                    f"Tool {self.name}: hints_for {self._hints_function!r} returned {hints!r}, not Hints",
+                    "Return Hints(...) with what this call does, or None when unsure to use the tool's own hints",
+                    _HINTS_FOR_EXAMPLE,
+                )
+            )
+        return hints
+
     def copy(self, **changes: Any) -> FunctionTool:
         """Returns a new tool with some options changed. The original does not change, and a bound tool stays bound.
 
         Args:
             **changes: Any ``@tool`` option: ``name``, ``description``, ``parallel``, ``exception_handler``,
-                ``read_only``, ``destructive``, ``idempotent`` or ``open_world``.
+                ``hints_for``, ``read_only``, ``destructive``, ``idempotent`` or ``open_world``.
 
         Returns:
             The new tool.
@@ -932,6 +1089,7 @@ def tool(
     description: str | None = None,
     parallel: bool = True,
     exception_handler: Callable[[Any], str] | None = None,
+    hints_for: Callable[[dict[str, Any]], Hints | None] | None = None,
     read_only: bool | None = None,
     destructive: bool | None = None,
     idempotent: bool | None = None,
@@ -947,6 +1105,7 @@ def tool(
     description: str | None = None,
     parallel: bool = True,
     exception_handler: Callable[[Any], str] | None = None,
+    hints_for: Callable[[dict[str, Any]], Hints | None] | None = None,
     read_only: bool | None = None,
     destructive: bool | None = None,
     idempotent: bool | None = None,
@@ -960,7 +1119,7 @@ def tool(
     (or a list of text and ``Image``s, such as ``["Page loaded", Image(png)]``) as an image, anything else as JSON.
 
     Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...,
-    exception_handler=..., read_only=..., destructive=..., idempotent=..., open_world=...)``).
+    exception_handler=..., hints_for=..., read_only=..., destructive=..., idempotent=..., open_world=...)``).
 
     An exception from the tool stops the run, because it is usually a bug. For a failure the model should see and
     handle, raise ``ToolError("message")``, or name the exceptions in ``exception_handler``.
@@ -969,7 +1128,7 @@ def tool(
     MCP tool annotations. The model does not see them: they are for your code, such as a loop that asks before calls
     that are not read-only, and it reads them through ``agent.tool_map``. A hint left out assumes the worst: not
     read-only, destructive, not idempotent, open world. ``@tool(read_only=True, open_world=False)`` fits a tool that
-    reads local files.
+    reads local files. These hints are the worst case for any call; ``hints_for=`` tells what one call does.
 
     Example:
         ```python
@@ -1001,6 +1160,21 @@ def tool(
             def fetch_url(url: str) -> str:
                 return httpx.get(url).raise_for_status().text
             ```
+        hints_for: A function that takes the arguments of one call and returns its ``Hints``, or ``None`` when
+            unsure (the tool's own hints then apply). ``tool.hints_for(args)`` calls it. The arguments are parsed
+            from JSON but not yet checked against the type hints, so read them with care (``args.get(...)``,
+            ``isinstance``) and return ``None`` for anything unexpected. Hints are facts about the call, not a
+            decision to allow it.
+
+            ```python
+            def bash_hints(args):
+                if args.get("command") in ("ls", "pwd"):
+                    return Hints(read_only=True)
+                return None
+
+            @tool(hints_for=bash_hints)
+            def bash(command: str) -> str: ...
+            ```
         read_only: The tool does not change its environment. Sets ``destructive=False`` and ``idempotent=True``.
         destructive: The tool may delete or overwrite something (``False`` for one that only adds).
         idempotent: Calling it again with the same arguments has no further effect.
@@ -1013,12 +1187,14 @@ def tool(
     Raises:
         TypeError: ``@tool`` is applied twice or to something that is not a function, the function cannot be a
             tool, ``exception_handler`` is not a function with one parameter whose type hint names
-            ``Exception`` subclasses, or a hint is not a bool (see ``FunctionTool``).
+            ``Exception`` subclasses, ``hints_for`` is not a regular function with one parameter, or a hint is not
+            a bool (see ``FunctionTool``).
         ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
     """
     options: dict[str, Any] = {
         "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
-        "read_only": read_only, "destructive": destructive, "idempotent": idempotent, "open_world": open_world,
+        "hints_for": hints_for, "read_only": read_only, "destructive": destructive, "idempotent": idempotent,
+        "open_world": open_world,
     }
     if fn is not None:
         if isinstance(fn, Tool):
