@@ -91,6 +91,8 @@ All notable changes to alpineagents are listed here. The format follows
   instead of a loop that calls `state.deny`.
 - Stores save in format version 3. Earlier versions of alpineagents cannot load States saved from now on; this
   version still loads States they saved, and turns their `stopped_by` into the new values.
+- `store.load` refuses a snapshot that misses keys with `ValueError` ("is damaged: its snapshot has no ...") instead
+  of failing with a `KeyError` halfway through the load.
 
 ### Removed
 

@@ -12,7 +12,7 @@ A denied call does not run and the model gets the reason as its error result. ``
 cancels the other calls of the turn and sets ``state.stopped`` to ``StoppedByPermission`` right away, so the loop
 stops before its next turn. The runner (``_runner.run_calls``) applies the verdicts; this module only asks.
 
-Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._owner``).
+Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._owner.agent``).
 """
 
 from __future__ import annotations
@@ -460,7 +460,7 @@ class DecideByHuman(DecidePermission):
 
 def _running_agent(state: State, permission: Permission) -> Any:
     """The Agent running ``state`` (its owner, set when ``use_tools`` starts)."""
-    agent = state._owner
+    agent = state._owner.agent
     if agent is None:
         raise ValueError(
             fix_message(

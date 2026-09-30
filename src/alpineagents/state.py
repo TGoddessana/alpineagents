@@ -23,11 +23,12 @@ import re
 import threading
 import uuid
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from . import _serial, _tokens
+from ._serial import AgentSummary, Snapshot
 from .errors import fix_message
 from .types import (
     ContextChange,
@@ -118,7 +119,10 @@ def _is_interrupt(error: BaseException) -> bool:
 
 @dataclass(frozen=True)
 class _Batch:
-    """What a store does not have yet (``State._unsaved``): JSON-ready entries and snapshot."""
+    """What a store does not have yet (``State._unsaved``): JSON-ready entries and snapshot.
+
+    Typed as the ``Store.write`` arguments: stores take plain dicts (``Snapshot`` only names the keys).
+    """
 
     entries: list[dict[str, Any]]
     snapshot: dict[str, Any] | None
@@ -156,6 +160,73 @@ class Checkpoint:
     context_len: int
     turn: int
     last_answer: str | None
+
+
+# ---------------------------------------------------------------- the parts of a State
+# A State holds its id, task, history, context and data, plus one of each of these. They are plain mutable
+# records: State changes them inside its lock, and nothing else holds a reference to them.
+
+
+@dataclass(slots=True)
+class _Progress:
+    """What the run has done so far. Saved in the snapshot, restored on load."""
+
+    turn: int = 0
+    """``state.turn``. ``_begin_think`` adds 1, ``_rollback`` reverts it."""
+    usage: Usage = field(default_factory=Usage)
+    last_answer: str | None = None
+    """Text of the latest reply without tool calls. ``state.answer`` unless ``finish_answer`` is set."""
+    finished: bool = False
+    finish_answer: Any = None
+    """The ``finish(answer)`` value, if one was given."""
+    stopped: Stopped | None = None
+    """Why this run is set to stop. Set by ``finish()``, ``_stop_turn`` (a permission's ``stop=True``) and
+    ``Loop`` (until/limit); cleared by ``_clear_stop`` at run start and when a run raises."""
+    late_notices: list[str] = field(default_factory=list)
+    """Notices of results that came after their call was closed. Go into the context at the next think."""
+
+
+@dataclass(slots=True)
+class _CurrentTurn:
+    """The turn in progress, from ``think`` until its last call is closed. Replaced by a new one when the turn
+    closes, rolls back or is restored. Never saved: a snapshot is only taken when this is empty."""
+
+    calls: tuple[ToolCall, ...] = ()
+    """Every call the model requested this turn, in request order. Result messages follow this order."""
+    pending: list[ToolCall] = field(default_factory=list)
+    """``calls`` that have no result yet."""
+    results: dict[str, ToolResultBlock] = field(default_factory=dict)
+    """Results collected so far, by call id. Go into the context together when ``pending`` is empty."""
+    deferred: list[Message] = field(default_factory=list)
+    """User messages and notices added while calls are pending or ``thinking``. Go in after the results."""
+    thinking: bool = False
+    """``think`` is waiting on the model (``_begin_think`` .. ``_record_reply``/``_rollback``)."""
+
+
+@dataclass(slots=True)
+class _Owner:
+    """The Agent that thinks with this State and what it told the State. Set by ``_claim``."""
+
+    agent: Agent | None = None
+    """The first Agent to think. Another Agent cannot think with this State."""
+    reporter: Reporter | None = None
+    """Told about context changes (``on_context_change``), outside the lock."""
+    context_window: int | None = None
+    """The model's window size, for ``context_used``. Also set by ``_note_window`` before the first think."""
+    overhead_tokens: int = 0
+    """Estimated tokens of the system prompt and tool definitions, for ``context_tokens``."""
+
+
+@dataclass(slots=True)
+class _SaveCursor:
+    """What the bound store already has (see ``_unsaved``). Moves only after a write succeeded."""
+
+    store: object | None = None
+    """The store this State is bound to (compared with ``==``). ``None`` until the first write."""
+    history_len: int = 0
+    """How many history entries the store has."""
+    snapshot: dict[str, Any] | None = None
+    """The last snapshot the store has (as it got it), to skip writing the same one again."""
 
 
 class _LockedDict(dict):
@@ -293,10 +364,6 @@ class State:
         ```
     """
 
-    # A new State starts with history [HistoryEntry("user", task, turn=0)] (its at is created_at), context
-    # (Message.user(task),), turn 0, Usage(), no pending calls, stopped None, parent None, root itself, depth 0
-    # (subagents are an extension, see _child).
-
     def __init__(self, task: str, *, id: str | None = None) -> None:
         """Start a run with one user message.
 
@@ -327,46 +394,28 @@ class State:
                 )
             )
         self._id = uuid.uuid4().hex if id is None else check_id(id, "State(id=...)")
-        self._lock = threading.RLock()
         self._task = task
+        self._lock = threading.RLock()
+
+        # What happened (append-only) and what the model sees next.
         self._history: list[HistoryEntry] = [HistoryEntry("user", task, turn=0)]
         self._context: list[Message] = [Message.user(task)]
-        self._turn = 0
-        self._usage = Usage()
-        # This turn: all calls the model requested (request order), pending calls, collected results, deferred messages.
-        self._turn_calls: tuple[ToolCall, ...] = ()
-        self._pending: list[ToolCall] = []
-        self._results: dict[str, ToolResultBlock] = {}
-        self._deferred: list[Message] = []
-        # think is waiting on the model (_begin_think .. _record_reply/_rollback): added messages are deferred.
-        self._thinking = False
+        # state.data: the user's own values, guarded by the lock.
+        self._data = _LockedDict(self._lock)
+
+        self._progress = _Progress()
+        self._current = _CurrentTurn()
+        self._owner = _Owner()
+        self._saved = _SaveCursor()
+
         # Messages added while compact waits on the model (_begin_compact .. _end_compact).
         self._compact_added: list[Message] | None = None
-        # Late result notices to put into the context at the next _begin_think.
-        self._late_notices: list[str] = []
-        self._finished = False
-        self._finish_answer: Any = None
-        self._last_answer: str | None = None
-        # Why this run is set to stop. Set by finish(), _stop_turn (a permission's stop=True) and Loop._stop
-        # (until/limit); cleared by _clear_stop at run start and when a run raises.
-        self._stopped: Stopped | None = None
-        # Owner and context window size (set by _claim).
-        self._owner: Agent | None = None
-        self._reporter: Reporter | None = None
-        self._context_window: int | None = None
-        self._overhead = 0
+        # Summary of the Agent that saved this State. Set by the Store loader; compared once by Agent._start_run.
+        self._saved_agent: AgentSummary | None = None
+        # Reserved for subagents (see _child).
         self._parent: State | None = None
         self._root: State = self
         self._depth = 0
-        self._data = _LockedDict(self._lock)
-        # Summary of the Agent that saved this State (Agent._summary). Set by the Store loader; compared once by
-        # Agent._start_run.
-        self._saved_agent: dict[str, Any] | None = None
-        # Saving (see _unsaved): the store this State is bound to (only compared with ==), how many history
-        # entries it has, and the last snapshot it has (to skip writing the same one again).
-        self._store: object | None = None
-        self._saved_len = 0
-        self._saved_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ yes/no questions
 
@@ -379,7 +428,7 @@ class State:
         Use it as a stop condition: ``@loop(until=State.is_answered, limit=50)``.
         """
         with self._lock:
-            if self._pending or self._deferred or not self._context:
+            if self._current.pending or self._current.deferred or not self._context:
                 return False
             last = self._context[-1]
             return last.role == "assistant" and not last.tool_calls
@@ -387,12 +436,12 @@ class State:
     def wants_tools(self) -> bool:
         """Whether the model requested tool calls that have not run yet (``pending_calls`` is not empty)."""
         with self._lock:
-            return bool(self._pending)
+            return bool(self._current.pending)
 
     def is_finished(self) -> bool:
         """Whether ``finish()`` was called. A finished State stops its loop before the next turn."""
         with self._lock:
-            return self._finished
+            return self._progress.finished
 
     # ------------------------------------------------------------ values (read-only)
 
@@ -413,25 +462,25 @@ class State:
         The value given to ``finish(answer)`` if there is one, otherwise the text of the latest model reply
         without tool calls, otherwise ``None``. A ``think`` that fails does not change it.
         """
-        # _rollback restores _last_answer from the Checkpoint.
+        # _rollback restores last_answer from the Checkpoint.
         with self._lock:
-            if self._finish_answer is not None:
-                return self._finish_answer
-            return self._last_answer
+            if self._progress.finish_answer is not None:
+                return self._progress.finish_answer
+            return self._progress.last_answer
 
     @property
     def turn(self) -> int:
         """Number of turns so far: each ``think`` adds 1, and a ``think`` that fails does not count."""
         # _begin_think adds 1 and _rollback reverts it.
         with self._lock:
-            return self._turn
+            return self._progress.turn
 
     @property
     def usage(self) -> Usage:
         """Total tokens, requests and cost of every ``think``, ``ask`` and ``compact`` on this State."""
         # Added with _add_usage.
         with self._lock:
-            return self._usage
+            return self._progress.usage
 
     @property
     def pending_calls(self) -> tuple[ToolCall, ...]:
@@ -441,14 +490,14 @@ class State:
         exception.
         """
         with self._lock:
-            return tuple(self._pending)
+            return tuple(self._current.pending)
 
     @property
     def context_tokens(self) -> int:
         """Estimated token count of the context, including the system prompt and tool definitions."""
         # _tokens.context_tokens(context, overhead). overhead is the value _claim received (0 if none yet).
         with self._lock:
-            return _tokens.context_tokens(tuple(self._context), self._overhead)
+            return _tokens.context_tokens(tuple(self._context), self._owner.overhead_tokens)
 
     @property
     def context_used(self) -> float:
@@ -458,7 +507,7 @@ class State:
         """
         # The window size is stored by _claim or Agent.run's _note_window.
         with self._lock:
-            window = self._context_window
+            window = self._owner.context_window
             if not window or window <= 0:
                 return 0.0
             return self.context_tokens / window
@@ -494,7 +543,7 @@ class State:
             ```
         """
         with self._lock:
-            return self._stopped
+            return self._progress.stopped
 
     @property
     def parent(self) -> State | None:
@@ -582,7 +631,7 @@ class State:
             ValueError: ``text`` is empty or whitespace only.
         """
         # History records it right away; the context gets it via _add_to_context, which defers it while
-        # _pending or _thinking so a message the model never saw does not land before its reply.
+        # calls are pending or think is waiting, so a message the model never saw does not land before its reply.
         _check_text("add_user_message", "text", text, 'state.add_user_message("Next step: run the tests")')
         with self._lock:
             self._append("user", text)
@@ -620,10 +669,10 @@ class State:
             answer: If not ``None``, becomes ``state.answer``. Any value, not only a string.
         """
         with self._lock:
-            self._finished = True
-            self._stopped = StoppedByFinish()
+            self._progress.finished = True
+            self._progress.stopped = StoppedByFinish()
             if answer is not None:
-                self._finish_answer = answer
+                self._progress.finish_answer = answer
 
     # ------------------------------------------------------------ shrinking the context
 
@@ -667,15 +716,15 @@ class State:
         with self._lock:
             self._ensure_no_pending("clear_tool_results")
             positions = [
-                (m, b)
+                (m, b, block)
                 for m, message in enumerate(self._context)
                 for b, block in enumerate(message.content)
                 if isinstance(block, ToolResultBlock)
             ]
             to_clear = positions[: max(len(positions) - keep_last, 0)]
             targets: dict[int, set[int]] = {}
-            for m, b in to_clear:
-                if self._context[m].content[b].content != CLEARED:
+            for m, b, block in to_clear:
+                if block.content != CLEARED:
                     targets.setdefault(m, set()).add(b)
             if not targets:
                 return
@@ -692,7 +741,7 @@ class State:
             self._context = new_context
             change = ContextChange("clear_tool_results", before, self.context_tokens)
             self._append("context_change", change)
-            reporter = self._reporter
+            reporter = self._owner.reporter
         self._notify_context_change(reporter, change)
 
     # ------------------------------------------------------------ display
@@ -706,19 +755,19 @@ class State:
         """
         with self._lock:
             lines = [_describe_entry(entry) for entry in self._history]
-            if self._stopped is not None:
-                lines.append(f"done: {self._stopped} ({_turns(self._turn)})")
-            elif self._finished:
-                lines.append(f"done: stopped by finish ({_turns(self._turn)})")
+            if self._progress.stopped is not None:
+                lines.append(f"done: {self._progress.stopped} ({_turns(self._progress.turn)})")
+            elif self._progress.finished:
+                lines.append(f"done: stopped by finish ({_turns(self._progress.turn)})")
             return "\n".join(lines)
 
     def __repr__(self) -> str:
         with self._lock:
-            extra = " finished" if self._finished else ""
+            extra = " finished" if self._progress.finished else ""
             return (
-                f"<State task={_short(self._task, 30)!r} turn={self._turn} "
+                f"<State task={_short(self._task, 30)!r} turn={self._progress.turn} "
                 f"history={len(self._history)} context={len(self._context)} "
-                f"pending={len(self._pending)}{extra}>"
+                f"pending={len(self._current.pending)}{extra}>"
             )
 
     # ================================================================ Agent only (internal contract)
@@ -739,21 +788,21 @@ class State:
         # agent.reporter may create the default Terminal, so read it outside the lock.
         reporter = agent.reporter
         with self._lock:
-            if self._owner is None:
-                self._owner = agent
-            elif self._owner is not agent:
+            if self._owner.agent is None:
+                self._owner.agent = agent
+            elif self._owner.agent is not agent:
                 raise ValueError(
                     fix_message(
-                        f"this State is owned by another Agent ({_agent_label(self._owner)}). "
+                        f"this State is owned by another Agent ({_agent_label(self._owner.agent)}). "
                         "An Agent cannot think with another Agent's State (the two conversations must not mix)",
                         "let the other Agent only read it with ask, or call it as a subagent to work in a new State",
                         'review = reviewer.ask(state, "Review the changes so far")',
                     )
                 )
-            self._context_window = context_window
+            self._owner.context_window = context_window
             if overhead_tokens is not None:
-                self._overhead = overhead_tokens
-            self._reporter = reporter
+                self._owner.overhead_tokens = overhead_tokens
+            self._owner.reporter = reporter
 
     def _note_window(self, agent: Agent, *, context_window: int, overhead_tokens: int) -> None:
         """Called by ``Agent.run`` before the loop: with no owner, or if ``agent`` is the owner, only records the
@@ -764,19 +813,19 @@ class State:
         the first turn. If another Agent is the owner, it does nothing (owner checks are ``_claim``'s job).
         """
         with self._lock:
-            if self._owner is not None and self._owner is not agent:
+            if self._owner.agent is not None and self._owner.agent is not agent:
                 return
-            self._context_window = context_window
-            self._overhead = overhead_tokens
+            self._owner.context_window = context_window
+            self._owner.overhead_tokens = overhead_tokens
 
-    def _set_saved_agent(self, summary: dict[str, Any] | None) -> None:
+    def _set_saved_agent(self, summary: AgentSummary | None) -> None:
         """Called by the Store loader when it rebuilds a saved State: records the summary of the Agent that saved
         it (``Agent._summary()``, ``None`` if the snapshot has none). The next ``Agent.run`` compares it with
         itself and warns with ``ResumeWarning`` if they differ."""
         with self._lock:
             self._saved_agent = summary
 
-    def _take_saved_agent(self) -> dict[str, Any] | None:
+    def _take_saved_agent(self) -> AgentSummary | None:
         """Called by ``Agent.run`` at start: returns the saved Agent summary and clears it, so the comparison
         happens only once (after the next save, the snapshot holds the current Agent's summary anyway)."""
         with self._lock:
@@ -785,7 +834,7 @@ class State:
 
     # ------------------------------------------------------------ saving (Agent and Store only)
 
-    def _unsaved(self, store: object, agent_summary: dict[str, Any] | None) -> _Batch | None:
+    def _unsaved(self, store: object, agent_summary: AgentSummary | None) -> _Batch | None:
         """What ``store`` does not have yet, as JSON values, or ``None`` if it has everything. Called by Agent at
         its save points, outside any State method (the write happens after the lock is released).
 
@@ -799,37 +848,39 @@ class State:
         - ``TypeError`` (from ``_serial``) if a value cannot be saved as JSON.
         """
         with self._lock:
-            if self._store is not None and self._store != store:
+            if self._saved.store is not None and self._saved.store != store:
                 raise ValueError(
                     fix_message(
-                        f"State {self._id!r} is saved in another store ({self._store!r}), and a State is saved "
+                        f"State {self._id!r} is saved in another store ({self._saved.store!r}), and a State is saved "
                         f"in one store only (this Agent's store is {store!r})",
                         "run it with an Agent that has the store it was saved in, or start a new State",
                         'state = store.load("task-1")\nAgent(model=..., store=store).run(state)',
                     )
                 )
             end = len(self._history)
-            entries = [_serial.entry_to_dict(self._history[i], i) for i in range(self._saved_len, end)]
-            snapshot = None
-            if not self._pending and not self._thinking and not self._deferred:
-                snapshot = self._snapshot(end, agent_summary)
-                if snapshot == self._saved_snapshot:
+            entries = [_serial.entry_to_dict(self._history[i], i) for i in range(self._saved.history_len, end)]
+            snapshot: dict[str, Any] | None = None
+            if not self._current.pending and not self._current.thinking and not self._current.deferred:
+                snapshot = cast("dict[str, Any]", self._snapshot(end, agent_summary))
+                if snapshot == self._saved.snapshot:
                     snapshot = None
             if not entries and snapshot is None:
                 return None
-            return _Batch(entries, snapshot, end, create=self._store is None)
+            return _Batch(entries, snapshot, end, create=self._saved.store is None)
 
     def _mark_saved(self, store: object, batch: _Batch) -> None:
         """``store`` now has ``batch``. Only called after the write succeeded, so a failed write is sent again at
         the next save point (stores skip entries they already have by ``seq``)."""
         with self._lock:
-            self._store = store
-            self._saved_len = max(self._saved_len, batch.end)
+            self._saved.store = store
+            self._saved.history_len = max(self._saved.history_len, batch.end)
             if batch.snapshot is not None:
-                self._saved_snapshot = batch.snapshot
+                self._saved.snapshot = batch.snapshot
 
-    def _snapshot(self, history_len: int, agent_summary: dict[str, Any] | None) -> dict[str, Any]:
-        """Everything but history, as JSON values. Inside the lock, with no calls pending."""
+    def _snapshot(self, history_len: int, agent_summary: AgentSummary | None) -> Snapshot:
+        """Everything but history, as JSON values. Inside the lock, with no calls pending (``_current`` is empty,
+        so it is not saved)."""
+        progress = self._progress
         return {
             "v": _serial.VERSION,
             "id": self._id,
@@ -838,13 +889,13 @@ class State:
             "created_at": _serial.time_to_str(self._history[0].at),
             "updated_at": _serial.time_to_str(self._history[history_len - 1].at),
             "context": [_serial.message_to_dict(message) for message in self._context],
-            "turn": self._turn,
-            "usage": _serial.usage_to_dict(self._usage),
-            "late_notices": list(self._late_notices),
-            "finished": self._finished,
-            "finish_answer": _serial.answer(self._finish_answer, "the finish() answer"),
-            "last_answer": self._last_answer,
-            "stopped": _serial.stopped_to_dict(self._stopped),
+            "turn": progress.turn,
+            "usage": _serial.usage_to_dict(progress.usage),
+            "late_notices": list(progress.late_notices),
+            "finished": progress.finished,
+            "finish_answer": _serial.answer(progress.finish_answer, "the finish() answer"),
+            "last_answer": progress.last_answer,
+            "stopped": _serial.stopped_to_dict(progress.stopped),
             "data": _serial.plain(self._data, "state.data"),
             "agent": agent_summary,
         }
@@ -874,14 +925,10 @@ class State:
                     f"saved State {state_id!r} is damaged: history entry {index} has seq {entry.get('seq')!r}"
                 )
         start = 1
+        checked = None
         if snapshot is not None:
-            version = snapshot.get("v")
-            if not isinstance(version, int) or version > _serial.VERSION:
-                raise ValueError(
-                    f"saved State {state_id!r} has format version {version!r}, and this alpineagents reads up to "
-                    f"{_serial.VERSION}. Upgrade alpineagents to load it"
-                )
-            start = snapshot["history_len"]
+            checked = _serial.read_snapshot(state_id, snapshot)
+            start = checked["history_len"]
             if not isinstance(start, int) or not 1 <= start <= len(entries):
                 raise ValueError(
                     f"saved State {state_id!r} is damaged: its snapshot covers {start!r} history entries, "
@@ -890,39 +937,40 @@ class State:
         history = [_serial.entry_from_dict(entry) for entry in entries]
         state = cls(history[0].content, id=state_id)
         state._history = history
-        state._restore(snapshot)
+        state._restore(checked)
         tail = history[start:]
         if state._replay(tail):
-            for call in list(state._pending):
+            for call in list(state._current.pending):
                 state._record_tool_result(call, UNSAVED_RESULT, is_error=True)
         else:
-            state._restore(snapshot)
+            state._restore(checked)
             state._note_unsaved(tail)
-        state._store = store
-        state._saved_len = len(entries)
-        state._saved_snapshot = dict(snapshot) if snapshot is not None else None
+        state._saved.store = store
+        state._saved.history_len = len(entries)
+        state._saved.snapshot = dict(snapshot) if snapshot is not None else None
         return state
 
-    def _restore(self, snapshot: Mapping[str, Any] | None) -> None:
+    def _restore(self, snapshot: Snapshot | None) -> None:
         """Sets everything but history from ``snapshot`` (a new State's values if ``None``)."""
-        if snapshot is None:
-            snapshot = {"context": [_serial.message_to_dict(Message.user(self._task))], "usage": {}}
-        self._context = [_serial.message_from_dict(message) for message in snapshot["context"]]
-        self._turn = snapshot.get("turn", 0)
-        self._usage = _serial.usage_from_dict(snapshot["usage"])
-        self._late_notices = list(snapshot.get("late_notices", ()))
-        self._finished = snapshot.get("finished", False)
-        self._finish_answer = snapshot.get("finish_answer")
-        self._last_answer = snapshot.get("last_answer")
-        self._stopped = _serial.stopped_from_snapshot(snapshot)
+        self._current = _CurrentTurn()
         self._data.clear()
-        self._data.update(snapshot.get("data") or {})
-        self._saved_agent = snapshot.get("agent")
-        self._turn_calls = ()
-        self._pending = []
-        self._results = {}
-        self._deferred = []
-        self._thinking = False
+        if snapshot is None:
+            self._context = [Message.user(self._task)]
+            self._progress = _Progress()
+            self._saved_agent = None
+            return
+        self._context = [_serial.message_from_dict(message) for message in snapshot["context"]]
+        self._progress = _Progress(
+            turn=snapshot["turn"],
+            usage=_serial.usage_from_dict(snapshot["usage"]),
+            last_answer=snapshot["last_answer"],
+            finished=snapshot["finished"],
+            finish_answer=snapshot["finish_answer"],
+            stopped=_serial.stopped_from_snapshot(snapshot),
+            late_notices=list(snapshot["late_notices"]),
+        )
+        self._data.update(snapshot["data"] or {})
+        self._saved_agent = snapshot["agent"]
 
     def _replay(self, tail: Sequence[HistoryEntry]) -> bool:
         """Applies history entries saved after the snapshot to the context, the way the live methods did, without
@@ -943,34 +991,36 @@ class State:
                 if isinstance(entry.content, ContextChange) and entry.content.kind == "rollback":
                     continue  # the error entry before it already rolled back
                 return False
-            if not self._thinking and entry.turn == self._turn + 1:
+            if not self._current.thinking and entry.turn == self._progress.turn + 1:
+                if self._current.pending:
+                    return False  # a live think refuses to start with calls pending
                 checkpoint = self._start_thinking()
-            elif entry.turn != self._turn:
+            elif entry.turn != self._progress.turn:
                 return False
             if kind in ("user", "notice"):
                 self._add_to_context(Message.user(entry.content))
             elif kind == "reply":
-                if not self._thinking or not isinstance(entry.content, Reply):
+                if not self._current.thinking or not isinstance(entry.content, Reply):
                     return False
                 self._apply_reply(entry.content)
             elif kind in ("tool_result", "denied", "cancelled"):
                 if entry.late and entry.call is not None:
                     notice = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
-                    self._late_notices.append(notice)
+                    self._progress.late_notices.append(notice)
                     continue
                 index = self._pending_index(entry.call)
                 if index is None:
                     return False
                 self._resolve(index, entry.content, is_error=entry.is_error)
-            elif kind == "error" and self._thinking and entry.call is None and checkpoint is not None:
+            elif kind == "error" and self._current.thinking and entry.call is None and checkpoint is not None:
                 self._undo_think(checkpoint)
-                self._turn = checkpoint.turn
-                self._last_answer = checkpoint.last_answer
+                self._progress.turn = checkpoint.turn
+                self._progress.last_answer = checkpoint.last_answer
             # model_event, ask, human and other errors are history only.
-        if self._thinking and checkpoint is not None:
+        if self._current.thinking and checkpoint is not None:
             self._undo_think(checkpoint)
-            self._turn = checkpoint.turn
-            self._last_answer = checkpoint.last_answer
+            self._progress.turn = checkpoint.turn
+            self._progress.last_answer = checkpoint.last_answer
         return True
 
     def _note_unsaved(self, tail: Sequence[HistoryEntry]) -> None:
@@ -984,9 +1034,9 @@ class State:
         calls: list[ToolCall] = []
         for entry in tail:
             if entry.kind == "reply" and isinstance(entry.content, Reply):
-                self._usage = self._usage + entry.content.usage
+                self._progress.usage = self._progress.usage + entry.content.usage
                 calls.extend(call for call in entry.content.tool_calls if call.id not in answered)
-        self._turn = max([self._turn, *(entry.turn for entry in tail)])
+        self._progress.turn = max([self._progress.turn, *(entry.turn for entry in tail)])
         text = UNSAVED_STEPS
         if calls:
             text += UNSAVED_CALLS.format(calls=", ".join(format_call(call) for call in calls))
@@ -998,7 +1048,7 @@ class State:
         Fix: if a block called ``finish()``, ``return`` from the loop body. (Called by think, use_tools, ask)
         """
         with self._lock:
-            if not self._finished:
+            if not self._progress.finished:
                 return
         raise ValueError(
             fix_message(
@@ -1014,9 +1064,9 @@ class State:
         No side effects.
         """
         with self._lock:
-            if not self._pending:
+            if not self._current.pending:
                 return
-            names = ", ".join(format_call(call) for call in self._pending)
+            names = ", ".join(format_call(call) for call in self._current.pending)
         raise ValueError(
             fix_message(
                 f"cannot call {action}() while calls are pending ({names})",
@@ -1097,9 +1147,9 @@ class State:
             if dropped:
                 change = ContextChange("rollback", before, self.context_tokens)
                 self._append("context_change", change)
-            self._turn = checkpoint.turn
-            self._last_answer = checkpoint.last_answer
-            reporter = self._reporter
+            self._progress.turn = checkpoint.turn
+            self._progress.last_answer = checkpoint.last_answer
+            reporter = self._owner.reporter
         if change is not None:
             self._notify_context_change(reporter, change)
 
@@ -1108,27 +1158,26 @@ class State:
 
     def _start_thinking(self) -> Checkpoint:
         """Steps 2-5 of ``_begin_think``. Inside the lock."""
-        for notice in self._late_notices:
+        for notice in self._progress.late_notices:
             self._context.append(Message.user(notice))
-        self._late_notices.clear()
-        checkpoint = Checkpoint(len(self._context), self._turn, self._last_answer)
-        self._turn += 1
-        self._thinking = True
+        self._progress.late_notices.clear()
+        checkpoint = Checkpoint(len(self._context), self._progress.turn, self._progress.last_answer)
+        self._progress.turn += 1
+        self._current.thinking = True
         return checkpoint
 
     def _apply_reply(self, reply: Reply) -> None:
         """The context part of ``_record_reply``. Inside the lock."""
-        self._thinking = False
         self._context.append(Message("assistant", reply.message.content, tokens=reply.context_tokens))
+        self._progress.usage = self._progress.usage + reply.usage
         calls = reply.tool_calls
-        self._turn_calls = calls
-        self._pending = list(calls)
-        self._results = {}
-        if not calls:
-            self._last_answer = reply.text
-            self._context.extend(self._deferred)
-            self._deferred = []
-        self._usage = self._usage + reply.usage
+        if calls:
+            # The turn stays open until every call is closed; deferred messages wait for the results.
+            self._current = _CurrentTurn(calls=calls, pending=list(calls), deferred=self._current.deferred)
+            return
+        self._progress.last_answer = reply.text
+        self._context.extend(self._current.deferred)
+        self._current = _CurrentTurn()
 
     def _undo_think(self, checkpoint: Checkpoint) -> int:
         """The context part of ``_rollback`` (turn and last_answer are not restored). Returns how many messages
@@ -1141,13 +1190,9 @@ class State:
                 kept.append(message)
             else:
                 dropped += 1
-        kept.extend(self._deferred)
+        kept.extend(self._current.deferred)
         self._context = kept
-        self._thinking = False
-        self._turn_calls = ()
-        self._pending = []
-        self._results = {}
-        self._deferred = []
+        self._current = _CurrentTurn()
         return dropped
 
     def _record_tool_result(
@@ -1167,7 +1212,7 @@ class State:
             if index is None:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot record a result for a call that is not pending: {shown}")
-            stored = self._pending[index]
+            stored = self._current.pending[index]
             self._append("tool_result", content, call=stored, is_error=is_error, error=error)
             self._resolve(index, content, is_error=is_error)
 
@@ -1185,13 +1230,13 @@ class State:
           next ``_begin_think``.
         """
         with self._lock:
-            index = next((i for i, pending in enumerate(self._pending) if pending is call), None)
+            index = next((i for i, pending in enumerate(self._current.pending) if pending is call), None)
             if index is not None:
                 self._append("tool_result", content, call=call, is_error=is_error, error=error)
                 self._resolve(index, content, is_error=is_error)
                 return
             self._append("tool_result", content, call=call, late=True, is_error=is_error, error=error)
-            self._late_notices.append(LATE_RESULT.format(call=format_call(call), content=result_text(content)))
+            self._progress.late_notices.append(LATE_RESULT.format(call=format_call(call), content=result_text(content)))
 
     def _deny(
         self,
@@ -1216,7 +1261,7 @@ class State:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot deny a call that is not pending: {shown}")
             entry_kind = "cancelled" if kind == ToolOutcomeKind.CANCELLED else "denied"
-            self._append(entry_kind, reason, call=self._pending[index], is_error=True, error=error)
+            self._append(entry_kind, reason, call=self._current.pending[index], is_error=True, error=error)
             self._resolve(index, reason, is_error=True)
 
     def _stop_turn(self, call: ToolCall, reason: str, permission: str) -> list[ToolCall]:
@@ -1226,11 +1271,11 @@ class State:
         ends the State). Returns the cancelled calls, in request order."""
         with self._lock:
             self._deny(call, reason)
-            cancelled = list(self._pending)
+            cancelled = list(self._current.pending)
             for other in cancelled:
                 self._deny(other, STOPPED_TURN, kind=ToolOutcomeKind.CANCELLED)
-            if not isinstance(self._stopped, StoppedByFinish):
-                self._stopped = StoppedByPermission(call, permission)
+            if not isinstance(self._progress.stopped, StoppedByFinish):
+                self._progress.stopped = StoppedByPermission(call, permission)
             return cancelled
 
     def _close_pending(self, error: BaseException) -> list[ToolCall]:
@@ -1241,7 +1286,7 @@ class State:
         """
         text = closed_result(error)
         with self._lock:
-            closed = list(self._pending)
+            closed = list(self._current.pending)
             for call in closed:
                 self._record_tool_result(call, text, is_error=True)
             return closed
@@ -1277,7 +1322,7 @@ class State:
     def _add_usage(self, usage: Usage) -> None:
         """Add usage from ``ask`` and ``compact`` (``_record_reply`` adds it for ``think``)."""
         with self._lock:
-            self._usage = self._usage + usage
+            self._progress.usage = self._progress.usage + usage
 
     def _replace_context(self, summary: str, kind: ContextChangeKind) -> None:
         """Replace the context with ``(Message.user(task), Message.user(SUMMARY_PREFIX + summary))``.
@@ -1303,7 +1348,7 @@ class State:
             self._context.extend(added or ())
             change = ContextChange(kind, before, self.context_tokens, summary=summary)
             self._append("context_change", change)
-            reporter = self._reporter
+            reporter = self._owner.reporter
         self._notify_context_change(reporter, change)
 
     def _context_for_question(self) -> tuple[Message, ...]:
@@ -1315,26 +1360,26 @@ class State:
         """
         with self._lock:
             context = tuple(self._context)
-            if not self._pending:
+            if not self._current.pending:
                 return context
             blocks = tuple(
-                self._results.get(call.id)
+                self._current.results.get(call.id)
                 or ToolResultBlock(call.id, NOT_RUN_YET, name=call.name)
-                for call in self._turn_calls
+                for call in self._current.calls
             )
             return context + (Message("user", blocks),)
 
     def _set_stopped(self, stopped: Stopped) -> None:
         """Called when Loop stops on an ``until`` function or its limit, with why (read back as ``stopped``)."""
         with self._lock:
-            self._stopped = stopped
+            self._progress.stopped = stopped
 
     def _clear_stop(self) -> None:
         """``stopped`` goes back to ``None``. Called by ``Agent.run``/``arun`` at start (the previous run's reason,
         possibly restored by a Store, does not stop this run) and when a run raises (a run ending in an exception
         has no reason), and by Loop when it goes on after a nested loop stopped on its own ``until``/limit."""
         with self._lock:
-            self._stopped = None
+            self._progress.stopped = None
 
     @classmethod
     def _child(cls, parent: State, task: str) -> State:
@@ -1348,15 +1393,15 @@ class State:
     # ------------------------------------------------------------ internal helpers (called inside the lock)
 
     def _append(self, kind: Any, content: Any, **fields: Any) -> None:
-        self._history.append(HistoryEntry(kind, content, turn=self._turn, **fields))
+        self._history.append(HistoryEntry(kind, content, turn=self._progress.turn, **fields))
 
     def _add_to_context(self, message: Message) -> None:
         """Defer if there are pending calls or think is waiting on the model; otherwise add to the context now.
         During compaction, also collect it separately for ``_replace_context`` to re-add after the summary."""
         if self._compact_added is not None:
             self._compact_added.append(message)
-        if self._pending or self._thinking:
-            self._deferred.append(message)
+        if self._current.pending or self._current.thinking:
+            self._current.deferred.append(message)
         else:
             self._context.append(message)
 
@@ -1364,24 +1409,23 @@ class State:
         call_id = getattr(call, "id", None)
         if call_id is None:
             return None
-        for index, pending in enumerate(self._pending):
+        for index, pending in enumerate(self._current.pending):
             if pending.id == call_id:
                 return index
         return None
 
     def _resolve(self, index: int, content: ToolResultContent, *, is_error: bool) -> None:
         """Put the result in the turn buffer; on the last call, add the result message and deferred messages."""
-        call = self._pending.pop(index)
-        self._results[call.id] = ToolResultBlock(call.id, content, name=call.name, is_error=is_error)
-        if self._pending:
+        turn = self._current
+        call = turn.pending.pop(index)
+        turn.results[call.id] = ToolResultBlock(call.id, content, name=call.name, is_error=is_error)
+        if turn.pending:
             return
-        blocks = tuple(self._results[c.id] for c in self._turn_calls if c.id in self._results)
+        blocks = tuple(turn.results[c.id] for c in turn.calls if c.id in turn.results)
         if blocks:
             self._context.append(Message("user", blocks))
-        self._context.extend(self._deferred)
-        self._deferred = []
-        self._results = {}
-        self._turn_calls = ()
+        self._context.extend(turn.deferred)
+        self._current = _CurrentTurn()
 
     def _notify_context_change(self, reporter: Reporter | None, change: ContextChange) -> None:
         """Called outside the lock."""

@@ -50,7 +50,7 @@ def always(state: State) -> bool:
 def stop_by_permission(state: State) -> None:
     """What a permission's Denied(..., stop=True) does to state.stopped (without the pending calls it needs)."""
     with state._lock:
-        state._stopped = BY_PERMISSION
+        state._progress.stopped = BY_PERMISSION
 
 
 # ================================================================ the values
