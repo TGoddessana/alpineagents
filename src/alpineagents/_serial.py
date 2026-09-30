@@ -12,13 +12,12 @@ Only State calls these. The formats are the saved formats, so a change here need
   a ``tool_result`` from a ``ToolError`` keeps the message the model saw.
 """
 
-from __future__ import annotations
-
+# No ``from __future__ import annotations``: ``Snapshot.__required_keys__`` needs real ``NotRequired`` annotations.
 import dataclasses
 import math
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, NotRequired, TypeAlias, TypedDict, cast
 
 from .errors import fix_message
 from .types import (
@@ -44,6 +43,9 @@ from .types import (
 
 __all__ = [
     "VERSION",
+    "Snapshot",
+    "AgentSummary",
+    "read_snapshot",
     "plain",
     "answer",
     "entry_to_dict",
@@ -62,6 +64,98 @@ __all__ = [
 #: 2: tool results can hold images.
 #: 3: the snapshot has ``stopped`` (a dict, see ``stopped_to_dict``) instead of ``stopped_by`` and ``stopped_limit``.
 VERSION = 3
+
+
+# ---------------------------------------------------------------- saved shapes
+
+#: ``Agent._summary()``: ``name``, ``model``, ``system_sha256``, ``tools``, ``mcp_servers``. One loaded from a store
+#: may miss keys or hold odd values, so it stays a plain dict (``Agent._start_run`` compares it without raising).
+AgentSummary: TypeAlias = dict[str, Any]
+#: One message block: ``{"type": "text" | "tool_call" | "tool_result" | "raw", ...}`` (see ``_block_to_dict``).
+BlockDict: TypeAlias = dict[str, Any]
+
+
+class CallDict(TypedDict):
+    name: str
+    args: dict[str, Any]
+    id: str
+
+
+class MessageDict(TypedDict):
+    role: Literal["user", "assistant"]
+    content: list[BlockDict]
+    tokens: int | None
+
+
+class UsageDict(TypedDict):
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    requests: int
+    cost: float | None
+
+
+class StoppedDict(TypedDict):
+    kind: Literal["until", "limit", "finish", "permission"]
+    name: NotRequired[str]
+    """``until``: the until function's name."""
+    turns: NotRequired[int]
+    """``limit``: the limit."""
+    call: NotRequired[CallDict]
+    """``permission``: the denied call."""
+    permission: NotRequired[str]
+    """``permission``: the permission's ``repr()``."""
+
+
+class Snapshot(TypedDict):
+    """Everything in a State but its history, as JSON values (``State._snapshot``). A store keeps the latest one.
+
+    Taken only when no call is pending and ``think`` is not waiting on the model, so there is no half-done turn in
+    it. History entries saved after it are replayed on load (``State._replay``).
+    """
+
+    v: int
+    """Format version (``VERSION`` when written)."""
+    id: str
+    task: str
+    history_len: int
+    """How many history entries it covers (``seq`` 0 to ``history_len - 1``)."""
+    created_at: str
+    updated_at: str
+    """ISO ``at`` of the first and of the last covered history entry."""
+    context: list[MessageDict]
+    turn: int
+    usage: UsageDict
+    late_notices: list[str]
+    finished: bool
+    finish_answer: Any
+    """The ``finish()`` answer as JSON (see ``answer``), or ``None``."""
+    last_answer: str | None
+    stopped: NotRequired[StoppedDict | None]
+    """Version 3 and later."""
+    stopped_by: NotRequired[str | None]
+    """Versions 1 and 2: ``"finish"``, ``"limit"`` or an ``until`` name."""
+    stopped_limit: NotRequired[int | None]
+    """Versions 1 and 2: the limit, when ``stopped_by`` is ``"limit"``."""
+    data: dict[str, Any]
+    """``state.data``."""
+    agent: AgentSummary | None
+    """The Agent that saved it, compared when the State is resumed."""
+
+
+def read_snapshot(state_id: str, data: Mapping[str, Any]) -> Snapshot:
+    """A snapshot a store returned, checked: ``ValueError`` if it was saved by a newer version or misses keys."""
+    version = data.get("v")
+    if not isinstance(version, int) or version > VERSION:
+        raise ValueError(
+            f"saved State {state_id!r} has format version {version!r}, and this alpineagents reads up to "
+            f"{VERSION}. Upgrade alpineagents to load it"
+        )
+    missing = sorted(Snapshot.__required_keys__ - data.keys())
+    if missing:
+        raise ValueError(f"saved State {state_id!r} is damaged: its snapshot has no {', '.join(missing)}")
+    return cast(Snapshot, data)
 
 
 def plain(value: Any, where: str) -> Any:
@@ -125,15 +219,15 @@ def time_from_str(text: str) -> datetime:
 # ---------------------------------------------------------------- messages
 
 
-def usage_to_dict(usage: Usage) -> dict[str, Any]:
-    return dataclasses.asdict(usage)
+def usage_to_dict(usage: Usage) -> UsageDict:
+    return cast(UsageDict, dataclasses.asdict(usage))
 
 
 def usage_from_dict(data: Mapping[str, Any]) -> Usage:
     return Usage(**data)
 
 
-def _call_to_dict(call: ToolCall) -> dict[str, Any]:
+def _call_to_dict(call: ToolCall) -> CallDict:
     return {"name": call.name, "args": plain(call.args, f"tool call {call.name} args"), "id": call.id}
 
 
@@ -161,7 +255,7 @@ def _result_from_plain(data: Any) -> ToolResultContent:
     )
 
 
-def _block_to_dict(block: Any) -> dict[str, Any]:
+def _block_to_dict(block: Any) -> BlockDict:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
     if isinstance(block, ToolCall):
@@ -194,7 +288,7 @@ def _block_from_dict(data: Mapping[str, Any]) -> Any:
     raise ValueError(f"unknown message block type {kind!r}")
 
 
-def message_to_dict(message: Message) -> dict[str, Any]:
+def message_to_dict(message: Message) -> MessageDict:
     return {
         "role": message.role,
         "content": [_block_to_dict(block) for block in message.content],
@@ -209,7 +303,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
 # ---------------------------------------------------------------- why a loop stopped
 
 
-def stopped_to_dict(stopped: Stopped | None) -> dict[str, Any] | None:
+def stopped_to_dict(stopped: Stopped | None) -> StoppedDict | None:
     """``{"kind": "until", "name": ...}``, ``{"kind": "limit", "turns": ...}``, ``{"kind": "finish"}``,
     ``{"kind": "permission", "call": ..., "permission": ...}``, or ``None``."""
     if stopped is None:

@@ -304,6 +304,29 @@ def test_two_file_stores_for_one_folder_are_the_same_store(tmp_path):
     assert FileStore(tmp_path).load("same").answer == "Two"
 
 
+def _edit_snapshot(tmp_path: Path, state_id: str, edit) -> None:
+    path = tmp_path / state_id / "snapshot.json"
+    snapshot = json.loads(path.read_text("utf-8"))
+    edit(snapshot)
+    path.write_text(json.dumps(snapshot), "utf-8")
+
+
+def test_load_refuses_a_snapshot_from_a_newer_version(tmp_path):
+    store = FileStore(tmp_path)
+    make_agent(store=store).run(State("Hi", id="new"))
+    _edit_snapshot(tmp_path, "new", lambda s: s.update(v=_serial.VERSION + 1))
+    with pytest.raises(ValueError, match="Upgrade alpineagents"):
+        store.load("new")
+
+
+def test_load_refuses_a_snapshot_that_misses_keys(tmp_path):
+    store = FileStore(tmp_path)
+    make_agent(store=store).run(State("Hi", id="torn"))
+    _edit_snapshot(tmp_path, "torn", lambda s: (s.pop("usage"), s.pop("turn")))
+    with pytest.raises(ValueError, match="damaged: its snapshot has no turn, usage"):
+        store.load("torn")
+
+
 def test_load_missing_id(tmp_path):
     with pytest.raises(LookupError, match="no saved State"):
         FileStore(tmp_path).load("nope")
