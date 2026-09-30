@@ -77,6 +77,20 @@ All notable changes to alpineagents are listed here. The format follows
 
 ### Changed
 
+- **History entries have a class per kind.** `state.history` holds `MessageEntry` (`user`, `notice`), `ReplyEntry`,
+  `ToolResultEntry`, `NotRunEntry` (`denied`, `cancelled`), `ExchangeEntry` (`ask`, `human`), `ContextChangeEntry`,
+  `ModelEventEntry` and `ErrorEntry`. `HistoryEntry` is now their union. The `kind` values and `entry.content` do not
+  change, and checking `kind` now tells a type checker what `content` is: after `if entry.kind == "reply":`,
+  `entry.content` is a `Reply`. `match entry: case ToolResultEntry(call=call): ...` works too.
+  - Fields are only on the classes where they mean something. `call` is on `ToolResultEntry`, `NotRunEntry` (never
+    `None` there) and `ErrorEntry`; `late` only on `ToolResultEntry`; `is_error` on `ToolResultEntry` and
+    `NotRunEntry`; `error` on those two and `ErrorEntry`. Reading `entry.call` without checking the kind first raises
+    `AttributeError` on other entries: filter with `entry.kind in ("tool_result", "denied", "cancelled")`.
+  - `HistoryEntry(...)` cannot be called any more. Make the class you need, with keywords:
+    `MessageEntry(kind="user", content="Hi", turn=0)`.
+  - `HistoryEntry.substate` is removed. It was reserved for subagents and always `None`.
+  - Stores save entries in the same format, so saved States load as before.
+
 - `Anthropic` raises `ProviderError` when the connection drops or a read times out while a reply is streaming. It
   raised the HTTP library's own error before, which `except ProviderError` did not catch. The original error is in
   `__cause__`. It is not retried: the SDK retries only a request whose reply has not started.

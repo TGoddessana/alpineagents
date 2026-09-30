@@ -12,7 +12,7 @@ import pytest
 import alpineagents.types as types_module
 from alpineagents import Agent, State, tool
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
-from alpineagents.types import HistoryEntry
+from alpineagents.types import MessageEntry
 
 T0 = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
 
@@ -78,10 +78,10 @@ def test_changing_data_alone_does_not_move_updated_at(clock):
 
 
 def test_equality_ignores_at():
-    first = HistoryEntry("user", "Find the bug", turn=0, at=minute(0))
-    later = HistoryEntry("user", "Find the bug", turn=0, at=minute(5))
+    first = MessageEntry(kind="user", content="Find the bug", turn=0, at=minute(0))
+    later = MessageEntry(kind="user", content="Find the bug", turn=0, at=minute(5))
     assert first == later
-    assert HistoryEntry("user", "Find the bug", turn=0) == first
+    assert MessageEntry(kind="user", content="Find the bug", turn=0) == first
 
 
 def test_at_is_timezone_aware_utc():

@@ -42,6 +42,14 @@ __all__ = [
     "Price",
     "HistoryKind",
     "HistoryEntry",
+    "MessageEntry",
+    "ReplyEntry",
+    "ToolResultEntry",
+    "NotRunEntry",
+    "ExchangeEntry",
+    "ContextChangeEntry",
+    "ModelEventEntry",
+    "ErrorEntry",
     "Exchange",
     "ContextChangeKind",
     "ContextChange",
@@ -568,55 +576,163 @@ Stopped: TypeAlias = StoppedByUntil | StoppedByLimit | StoppedByFinish | Stopped
 
 
 def _now() -> datetime:
-    """The current time in UTC, used to stamp ``HistoryEntry.at``."""
+    """The current time in UTC, used to stamp ``at`` on history entries."""
     return datetime.now(timezone.utc)
 
 
-@dataclass(frozen=True)
-class HistoryEntry:
-    """One entry of ``state.history``. History only grows; shrinking the context never removes entries."""
+def _stamp() -> Any:
+    # A lambda rather than _now itself, so _now is looked up at call time (tests monkeypatch types._now).
+    return field(default_factory=lambda: _now(), compare=False)
 
-    kind: HistoryKind
-    """What happened. ``content`` depends on it:
 
-    | kind | content |
-    | --- | --- |
-    | ``user`` | ``str``, what the person said. The first entry is the task |
-    | ``reply`` | ``Reply`` |
-    | ``tool_result`` | the result sent to the model: ``str``, or a tuple of ``TextBlock`` and ``Image``. Has ``call`` |
-    | ``notice`` | ``str`` starting with ``"[notice] "`` |
-    | ``denied`` | ``str``, what the model was told: the reason a permission denied the call. Has ``call`` |
-    | ``cancelled`` | ``str``, what the model was told: a permission stopped the turn, so the call did not run. Has ``call`` |
-    | ``ask`` | an object with ``question`` and ``answer`` (``answer`` is ``None`` if no answer came) |
-    | ``human`` | same as ``ask`` |
-    | ``context_change`` | ``ContextChange`` |
-    | ``model_event`` | ``ModelEvent`` |
-    | ``error`` | ``str`` such as ``"TimeoutError: ..."``. ``error`` holds the exception |
-    """
-    content: Any
-    """The recorded value. Its type depends on ``kind``."""
+# Every entry class has ``kind``, ``content``, ``turn`` and ``at``; ``kind`` tells them apart, so checking it
+# narrows the type (``if entry.kind == "reply": entry.content`` is a ``Reply``). Other fields exist only where they
+# mean something. Store records keep the same keys for every kind (``_serial.entry_to_dict``).
+#
+# ``at`` is when the entry was added to history, not when the work started: a ``reply`` is stamped when the reply
+# finished, a ``human`` entry when the answer arrived, and a ``user`` message added while tools run when
+# ``add_user_message`` was called, even though it goes into the context later. ``==`` ignores it.
+
+
+@dataclass(frozen=True, kw_only=True)
+class MessageEntry:
+    """A user message or a notice. The first entry of every history is the task (``kind="user"``, turn 0)."""
+
+    kind: Literal["user", "notice"]
+    """``"user"``: from the person (``add_user_message``). ``"notice"``: from your loop or a tool
+    (``add_notice``)."""
+    content: str
+    """The text. A notice starts with ``"[notice] "``."""
     turn: int
     """``state.turn`` when the entry was recorded."""
-    call: ToolCall | None = None
-    """The tool call, for ``tool_result``, ``denied``, ``cancelled`` and errors raised by a tool or a permission."""
-    error: BaseException | None = None
-    """The exception, for ``error`` entries. For a ``tool_result`` made from a ``ToolError``, that ``ToolError``
-    (its ``__cause__`` is the original exception when ``exception_handler`` made it), and for a ``denied`` entry
-    made from a ``ToolError`` a permission raised, that one. Not saved by a store."""
-    late: bool = False
-    """``True`` for a tool result that arrived after its call was already closed."""
-    is_error: bool = False
-    """``True`` for a ``tool_result``, ``denied`` or ``cancelled`` entry the model sees as an error result."""
-    substate: Any = None
-    """Reserved for subagents, which are not implemented yet. Always ``None``."""
-    # A lambda rather than _now itself, so _now is looked up at call time (tests monkeypatch types._now).
-    at: datetime = field(default_factory=lambda: _now(), compare=False)
-    """When the entry was recorded, as a timezone-aware UTC ``datetime``. ``==`` ignores it.
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
 
-    It is the time the entry was added to history, not when the work started: a ``reply`` is stamped when the
-    reply finished, a ``human`` entry when the answer arrived, and a ``user`` message added while tools run when
-    ``add_user_message`` was called, even though it goes into the context later.
-    """
+
+@dataclass(frozen=True, kw_only=True)
+class ReplyEntry:
+    """A model reply from ``think``."""
+
+    kind: Literal["reply"] = "reply"
+    content: Reply
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolResultEntry:
+    """The result of a tool call, as the model got it. Also input errors, ``ToolError`` results and calls closed by
+    an exception (``"(aborted: TimeoutError)"``, ``"(interrupted by user)"``)."""
+
+    kind: Literal["tool_result"] = "tool_result"
+    content: ToolResultContent
+    """The result sent to the model: a ``str``, or a tuple of ``TextBlock`` and ``Image``."""
+    call: ToolCall
+    """The call this is the result of."""
+    is_error: bool = False
+    """``True`` if the model got it as an error result."""
+    late: bool = False
+    """``True`` if it arrived after its call was already closed (the model gets it as a notice at the next
+    ``think``)."""
+    error: BaseException | None = None
+    """The ``ToolError`` behind an error result (its ``__cause__`` is the original exception when
+    ``exception_handler`` made it). Not saved by a store."""
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class NotRunEntry:
+    """A tool call a permission kept from running. The model got ``content`` as an error result."""
+
+    kind: Literal["denied", "cancelled"]
+    """``"denied"``: a permission refused this call. ``"cancelled"``: a permission stopped the turn
+    (``Denied(..., stop=True)`` on another call)."""
+    content: str
+    """What the model was told: the reason, or ``"(not run: the user stopped this turn)"``."""
+    call: ToolCall
+    """The call that did not run."""
+    is_error: Literal[True] = True
+    """Always ``True``, like an error result of ``ToolResultEntry``."""
+    error: BaseException | None = None
+    """The ``ToolError`` a permission raised to deny it, if that is how it was denied. Not saved by a store."""
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExchangeEntry:
+    """A question and its answer. The context does not change."""
+
+    kind: Literal["ask", "human"]
+    """``"ask"``: ``agent.ask`` asked the model. ``"human"``: the Human was asked (``ask_human``,
+    ``DecideByHuman``)."""
+    content: Exchange
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded (when the answer came), as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ContextChangeEntry:
+    """The context was replaced or shrunk (``compact``, ``start_from``, ``clear_tool_results``) or rolled back."""
+
+    kind: Literal["context_change"] = "context_change"
+    content: ContextChange
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelEventEntry:
+    """Something the Model went through, such as a fallback or a retry."""
+
+    kind: Literal["model_event"] = "model_event"
+    content: ModelEvent
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ErrorEntry:
+    """An exception raised in ``think``, ``use_tools`` or ``run``. An exception is recorded once."""
+
+    kind: Literal["error"] = "error"
+    content: str
+    """Its type and message, e.g. ``"TimeoutError: timed out"`` (only the type if the message is empty)."""
+    error: BaseException | None = None
+    """The exception. ``None`` in a State loaded from a store (``content`` keeps the text)."""
+    call: ToolCall | None = None
+    """The call whose tool or permission raised it, or ``None``."""
+    turn: int
+    """``state.turn`` when the entry was recorded."""
+    at: datetime = _stamp()
+    """When the entry was recorded, as a timezone-aware UTC ``datetime``."""
+
+
+#: One entry of ``state.history``: one of the classes above. Check ``kind`` (or use ``isinstance``/``match``) to
+#: know which, and so what ``content`` is. History only grows; shrinking the context never removes entries.
+HistoryEntry: TypeAlias = (
+    MessageEntry
+    | ReplyEntry
+    | ToolResultEntry
+    | NotRunEntry
+    | ExchangeEntry
+    | ContextChangeEntry
+    | ModelEventEntry
+    | ErrorEntry
+)
 
 
 # ---------------------------------------------------------------- display helpers

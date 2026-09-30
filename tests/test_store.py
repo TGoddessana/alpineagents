@@ -26,6 +26,7 @@ from alpineagents import (
     FileStore,
     Message,
     Reply,
+    ReplyEntry,
     ResumeWarning,
     SavedState,
     State,
@@ -192,7 +193,7 @@ def test_history_entry_is_error_round_trips(tmp_path):
     assert closed and closed[-1].is_error
     loaded = store.load("err")
     # The exception object is not saved; the entry text keeps its type and message.
-    assert loaded.history == tuple(dataclasses.replace(e, error=None) for e in state.history)
+    assert loaded.history == tuple(dataclasses.replace(e, error=None) if hasattr(e, "error") else e for e in state.history)
     assert [e.content for e in loaded.history if e.kind == "error"] == ["RuntimeError: boom"]
 
 
@@ -325,6 +326,14 @@ def test_load_refuses_a_snapshot_that_misses_keys(tmp_path):
     _edit_snapshot(tmp_path, "torn", lambda s: (s.pop("usage"), s.pop("turn")))
     with pytest.raises(ValueError, match="damaged: its snapshot has no turn, usage"):
         store.load("torn")
+
+
+def test_load_refuses_a_history_that_does_not_start_with_the_task():
+    store = MemoryStore()
+    entry = _serial.entry_to_dict(ReplyEntry(content=Reply(Message("assistant", ()), Usage()), turn=1), 0)
+    store.states["bad"] = Record([entry], None)
+    with pytest.raises(ValueError, match="first history entry is not the task"):
+        store.load("bad")
 
 
 def test_load_missing_id(tmp_path):

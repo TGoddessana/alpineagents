@@ -75,7 +75,7 @@ A store keeps JSON, so a loaded State differs from the one that was saved in a f
 | --- | --- |
 | `state.data` | Must hold only JSON values: dicts with string keys, lists, strings, numbers, booleans, `None`. Anything else raises `TypeError` when saving, before the next model request. Tuples come back as lists |
 | `finish(answer)` and `ask` answers | Pydantic models and dataclasses come back as dicts. Other values must be JSON values |
-| `HistoryEntry.error` | `None`. The entry's text still holds the exception type and message |
+| `error` of history entries | `None`. The entry's text still holds the exception type and message |
 | The Agent | Not saved. The Agent in your code runs the State, and the first `run` warns with `ResumeWarning` if it differs from the one that saved it. See [State](../concepts/state.md#a-state-saved-by-another-agent) |
 
 ## If saving fails

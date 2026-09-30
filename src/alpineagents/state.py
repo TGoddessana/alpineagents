@@ -5,8 +5,8 @@ Internal rules (the user-facing contract is in the public docstrings):
 - It is mutable, but only through State's methods. Every method changes data inside the reentrant lock
   ``self.lock``, and Reporter notifications (``on_context_change``) are sent after the lock is released.
 - ``history`` is append-only. Shrinking or rolling back the context never deletes from it.
-- Every entry gets its ``at`` when ``HistoryEntry`` is created: in ``__init__`` (before the State is shared) or
-  in ``_append`` (inside the lock), so ``at`` does not go backwards in history order (unless the system clock
+- Every entry gets its ``at`` when it is created: in ``__init__`` (before the State is shared) or right before
+  ``_add`` (inside the lock), so ``at`` does not go backwards in history order (unless the system clock
   does). There is no other clock. A State loaded from a Store (``_from_record``) keeps the saved ``at`` values.
 - Saving: State turns itself into JSON values (``_unsaved``) but never calls a Store; the Agent writes them
   outside the lock and then calls ``_mark_saved``.
@@ -25,7 +25,7 @@ import uuid
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from . import _serial, _tokens
 from ._serial import AgentSummary, Snapshot
@@ -34,7 +34,15 @@ from .types import (
     ContextChange,
     ContextChangeKind,
     Exchange,
+    ContextChangeEntry,
+    ErrorEntry,
+    ExchangeEntry,
     HistoryEntry,
+    MessageEntry,
+    ModelEventEntry,
+    NotRunEntry,
+    ReplyEntry,
+    ToolResultEntry,
     Message,
     ModelEvent,
     Reply,
@@ -398,7 +406,7 @@ class State:
         self._lock = threading.RLock()
 
         # What happened (append-only) and what the model sees next.
-        self._history: list[HistoryEntry] = [HistoryEntry("user", task, turn=0)]
+        self._history: list[HistoryEntry] = [MessageEntry(kind="user", content=task, turn=0)]
         self._context: list[Message] = [Message.user(task)]
         # state.data: the user's own values, guarded by the lock.
         self._data = _LockedDict(self._lock)
@@ -565,7 +573,17 @@ class State:
         """Everything that happened in this run, oldest first: messages, replies, tool results, errors and context
         changes. Entries are only ever added, so shrinking the context never removes anything from here.
 
-        Returns a copy.
+        Each entry is one of the ``HistoryEntry`` classes (``ReplyEntry``, ``ToolResultEntry``, ...). Checking
+        ``kind`` tells which, so type checkers know what ``content`` is. Returns a copy.
+
+        Example:
+            ```python
+            for entry in state.history:
+                if entry.kind == "reply":
+                    print(entry.content.tool_calls)  # a Reply
+                elif entry.kind in ("tool_result", "denied", "cancelled"):
+                    print(entry.call.name, entry.is_error)
+            ```
         """
         with self._lock:
             return tuple(self._history)
@@ -634,7 +652,7 @@ class State:
         # calls are pending or think is waiting, so a message the model never saw does not land before its reply.
         _check_text("add_user_message", "text", text, 'state.add_user_message("Next step: run the tests")')
         with self._lock:
-            self._append("user", text)
+            self._add(MessageEntry(kind="user", content=text, turn=self._progress.turn))
             self._add_to_context(Message.user(text))
 
     def add_notice(self, text: str) -> None:
@@ -653,7 +671,7 @@ class State:
         if not text.startswith(NOTICE_PREFIX):
             text = NOTICE_PREFIX + text
         with self._lock:
-            self._append("notice", text)
+            self._add(MessageEntry(kind="notice", content=text, turn=self._progress.turn))
             self._add_to_context(Message.user(text))
 
     # ------------------------------------------------------------ stopping
@@ -740,7 +758,7 @@ class State:
                 new_context.append(Message(message.role, blocks, tokens=None))
             self._context = new_context
             change = ContextChange("clear_tool_results", before, self.context_tokens)
-            self._append("context_change", change)
+            self._add(ContextChangeEntry(content=change, turn=self._progress.turn))
             reporter = self._owner.reporter
         self._notify_context_change(reporter, change)
 
@@ -935,7 +953,10 @@ class State:
                     f"but only {len(entries)} were saved"
                 )
         history = [_serial.entry_from_dict(entry) for entry in entries]
-        state = cls(history[0].content, id=state_id)
+        first = history[0]
+        if not (isinstance(first, MessageEntry) and first.kind == "user"):
+            raise ValueError(f"saved State {state_id!r} is damaged: its first history entry is not the task")
+        state = cls(first.content, id=state_id)
         state._history = history
         state._restore(checked)
         tail = history[start:]
@@ -986,9 +1007,8 @@ class State:
         """
         checkpoint: Checkpoint | None = None
         for entry in tail:
-            kind = entry.kind
-            if kind == "context_change":
-                if isinstance(entry.content, ContextChange) and entry.content.kind == "rollback":
+            if isinstance(entry, ContextChangeEntry):
+                if entry.content.kind == "rollback":
                     continue  # the error entry before it already rolled back
                 return False
             if not self._current.thinking and entry.turn == self._progress.turn + 1:
@@ -997,22 +1017,26 @@ class State:
                 checkpoint = self._start_thinking()
             elif entry.turn != self._progress.turn:
                 return False
-            if kind in ("user", "notice"):
+            if isinstance(entry, MessageEntry):
                 self._add_to_context(Message.user(entry.content))
-            elif kind == "reply":
-                if not self._current.thinking or not isinstance(entry.content, Reply):
+            elif isinstance(entry, ReplyEntry):
+                if not self._current.thinking:
                     return False
                 self._apply_reply(entry.content)
-            elif kind in ("tool_result", "denied", "cancelled"):
-                if entry.late and entry.call is not None:
-                    notice = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
-                    self._progress.late_notices.append(notice)
-                    continue
+            elif isinstance(entry, ToolResultEntry) and entry.late:
+                notice = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
+                self._progress.late_notices.append(notice)
+            elif isinstance(entry, (ToolResultEntry, NotRunEntry)):
                 index = self._pending_index(entry.call)
                 if index is None:
                     return False
                 self._resolve(index, entry.content, is_error=entry.is_error)
-            elif kind == "error" and self._current.thinking and entry.call is None and checkpoint is not None:
+            elif (
+                isinstance(entry, ErrorEntry)
+                and entry.call is None
+                and self._current.thinking
+                and checkpoint is not None
+            ):
                 self._undo_think(checkpoint)
                 self._progress.turn = checkpoint.turn
                 self._progress.last_answer = checkpoint.last_answer
@@ -1029,18 +1053,18 @@ class State:
         answered = {
             entry.call.id
             for entry in tail
-            if entry.kind in ("tool_result", "denied", "cancelled") and not entry.late and entry.call is not None
+            if isinstance(entry, NotRunEntry) or (isinstance(entry, ToolResultEntry) and not entry.late)
         }
         calls: list[ToolCall] = []
         for entry in tail:
-            if entry.kind == "reply" and isinstance(entry.content, Reply):
+            if isinstance(entry, ReplyEntry):
                 self._progress.usage = self._progress.usage + entry.content.usage
                 calls.extend(call for call in entry.content.tool_calls if call.id not in answered)
         self._progress.turn = max([self._progress.turn, *(entry.turn for entry in tail)])
         text = UNSAVED_STEPS
         if calls:
             text += UNSAVED_CALLS.format(calls=", ".join(format_call(call) for call in calls))
-        self._append("notice", text)
+        self._add(MessageEntry(kind="notice", content=text, turn=self._progress.turn))
         self._context.append(Message.user(text))
 
     def _ensure_open(self, action: str) -> None:
@@ -1122,7 +1146,7 @@ class State:
           (``is_answered()`` false); otherwise they stay deferred and go after this turn's result message.
         """
         with self._lock:
-            self._append("reply", reply)
+            self._add(ReplyEntry(content=reply, turn=self._progress.turn))
             self._apply_reply(reply)
 
     def _rollback(self, checkpoint: Checkpoint, error: BaseException) -> None:
@@ -1146,7 +1170,7 @@ class State:
             change = None
             if dropped:
                 change = ContextChange("rollback", before, self.context_tokens)
-                self._append("context_change", change)
+                self._add(ContextChangeEntry(content=change, turn=self._progress.turn))
             self._progress.turn = checkpoint.turn
             self._progress.last_answer = checkpoint.last_answer
             reporter = self._owner.reporter
@@ -1213,7 +1237,7 @@ class State:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot record a result for a call that is not pending: {shown}")
             stored = self._current.pending[index]
-            self._append("tool_result", content, call=stored, is_error=is_error, error=error)
+            self._add(ToolResultEntry(content=content, call=stored, is_error=is_error, error=error, turn=self._progress.turn))
             self._resolve(index, content, is_error=is_error)
 
     def _record_late_result(
@@ -1232,10 +1256,12 @@ class State:
         with self._lock:
             index = next((i for i, pending in enumerate(self._current.pending) if pending is call), None)
             if index is not None:
-                self._append("tool_result", content, call=call, is_error=is_error, error=error)
+                self._add(ToolResultEntry(content=content, call=call, is_error=is_error, error=error, turn=self._progress.turn))
                 self._resolve(index, content, is_error=is_error)
                 return
-            self._append("tool_result", content, call=call, late=True, is_error=is_error, error=error)
+            self._add(
+                ToolResultEntry(content=content, call=call, late=True, is_error=is_error, error=error, turn=self._progress.turn)
+            )
             self._progress.late_notices.append(LATE_RESULT.format(call=format_call(call), content=result_text(content)))
 
     def _deny(
@@ -1260,8 +1286,9 @@ class State:
             if index is None:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot deny a call that is not pending: {shown}")
-            entry_kind = "cancelled" if kind == ToolOutcomeKind.CANCELLED else "denied"
-            self._append(entry_kind, reason, call=self._current.pending[index], is_error=True, error=error)
+            entry_kind: Literal["denied", "cancelled"] = "cancelled" if kind == ToolOutcomeKind.CANCELLED else "denied"
+            call = self._current.pending[index]
+            self._add(NotRunEntry(kind=entry_kind, content=reason, call=call, error=error, turn=self._progress.turn))
             self._resolve(index, reason, is_error=True)
 
     def _stop_turn(self, call: ToolCall, reason: str, permission: str) -> list[ToolCall]:
@@ -1302,22 +1329,22 @@ class State:
             for entry in self._history:
                 if entry.kind == "error" and entry.error is error:
                     return
-            self._append("error", _error_text(error), call=call, error=error)
+            self._add(ErrorEntry(content=_error_text(error), error=error, call=call, turn=self._progress.turn))
 
     def _record_ask(self, question: str, answer: Any) -> None:
         """``"ask"`` in history (content=Exchange(question, answer)). The context is unchanged."""
         with self._lock:
-            self._append("ask", Exchange(question, answer))
+            self._add(ExchangeEntry(kind="ask", content=Exchange(question, answer), turn=self._progress.turn))
 
     def _record_human(self, question: str, answer: Any) -> None:
         """``"human"`` in history (content=Exchange(question, answer)). The context is unchanged."""
         with self._lock:
-            self._append("human", Exchange(question, answer))
+            self._add(ExchangeEntry(kind="human", content=Exchange(question, answer), turn=self._progress.turn))
 
     def _record_model_event(self, event: ModelEvent) -> None:
         """``"model_event"`` in history (content=event). The context is unchanged."""
         with self._lock:
-            self._append("model_event", event)
+            self._add(ModelEventEntry(content=event, turn=self._progress.turn))
 
     def _add_usage(self, usage: Usage) -> None:
         """Add usage from ``ask`` and ``compact`` (``_record_reply`` adds it for ``think``)."""
@@ -1347,7 +1374,7 @@ class State:
             self._context = [Message.user(self._task), Message.user(SUMMARY_PREFIX + summary)]
             self._context.extend(added or ())
             change = ContextChange(kind, before, self.context_tokens, summary=summary)
-            self._append("context_change", change)
+            self._add(ContextChangeEntry(content=change, turn=self._progress.turn))
             reporter = self._owner.reporter
         self._notify_context_change(reporter, change)
 
@@ -1392,8 +1419,8 @@ class State:
 
     # ------------------------------------------------------------ internal helpers (called inside the lock)
 
-    def _append(self, kind: Any, content: Any, **fields: Any) -> None:
-        self._history.append(HistoryEntry(kind, content, turn=self._progress.turn, **fields))
+    def _add(self, entry: HistoryEntry) -> None:
+        self._history.append(entry)
 
     def _add_to_context(self, message: Message) -> None:
         """Defer if there are pending calls or think is waiting on the model; otherwise add to the context now.
@@ -1467,27 +1494,22 @@ def _agent_label(agent: Any) -> str:
 def _describe_entry(entry: HistoryEntry) -> str:
     """One history entry as one line."""
     head = f"[turn {entry.turn}] {entry.kind}"
-    content = entry.content
-    kind = entry.kind
-    if kind == "reply" and isinstance(content, Reply):
-        parts = []
-        if content.text:
-            parts.append(_short(content.text))
-        parts.extend(_short(format_call(call)) for call in content.tool_calls)
-        return f"{head}: {'; '.join(parts) if parts else '(empty reply)'}"
-    if kind == "tool_result":
-        name = entry.call.name if entry.call else "?"
-        late = " (late)" if entry.late else ""
-        if entry.is_error:
-            return f"{head} {name}{late} (error): {_short(result_text(content))}"
-        return f"{head} {name}: {_size(content)}{late}"
-    if kind in ("denied", "cancelled"):
-        name = entry.call.name if entry.call else "?"
-        return f"{head} {name}: {_short(content)}"
-    if kind in ("ask", "human") and isinstance(content, Exchange):
-        return f"{head}: {_short(content.question, 40)} → {_short(content.answer, 40)}"
-    if kind == "context_change" and isinstance(content, ContextChange):
-        return f"{head} {content.kind}: {content.before_tokens} → {content.after_tokens} tokens"
-    if kind == "error" and entry.call is not None:
-        return f"{head} {entry.call.name}: {_short(content)}"
-    return f"{head}: {_short(content)}"
+    match entry:
+        case ReplyEntry(content=reply):
+            parts = [_short(reply.text)] if reply.text else []
+            parts.extend(_short(format_call(call)) for call in reply.tool_calls)
+            return f"{head}: {'; '.join(parts) if parts else '(empty reply)'}"
+        case ToolResultEntry(content=content, call=call):
+            late = " (late)" if entry.late else ""
+            if entry.is_error:
+                return f"{head} {call.name}{late} (error): {_short(result_text(content))}"
+            return f"{head} {call.name}: {_size(content)}{late}"
+        case NotRunEntry(content=reason, call=call):
+            return f"{head} {call.name}: {_short(reason)}"
+        case ExchangeEntry(content=exchange):
+            return f"{head}: {_short(exchange.question, 40)} → {_short(exchange.answer, 40)}"
+        case ContextChangeEntry(content=change):
+            return f"{head} {change.kind}: {change.before_tokens} → {change.after_tokens} tokens"
+        case ErrorEntry(call=ToolCall() as call):
+            return f"{head} {call.name}: {_short(entry.content)}"
+    return f"{head}: {_short(entry.content)}"
