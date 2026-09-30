@@ -60,6 +60,13 @@ packages = ["src/alpineagents"]
 # Some docs examples continue the example before them on the same page, so they use names defined there.
 "docs_src/*" = ["F821"]
 
+[tool.pyright]
+# CI runs `uvx pyright@1.1.414` with the dev install in .venv (the one setup-uv makes). Only the package for now.
+include = ["src/alpineagents"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
