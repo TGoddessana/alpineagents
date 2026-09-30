@@ -41,7 +41,7 @@ reply and tool result. A `"reply"` entry holds the whole `Reply`, including `rep
 | `task` | The task the State was created with |
 | `pending_calls` | Tool calls the model asked for that have no result yet |
 | `context` | See above |
-| `history` | See above. `HistoryEntry.kind` values are listed in the [Data types API](../api/types.md). Each entry's `at` is when it was recorded, in UTC |
+| `history` | See above. Each entry is a `ReplyEntry`, `ToolResultEntry` and so on, told apart by `kind`; they are listed in the [Data types API](../api/types.md#history-entries). Each entry's `at` is when it was recorded, in UTC |
 | `created_at` | When the State was created, in UTC: the `at` of the first history entry |
 | `updated_at` | When something was last added to history, in UTC. Changing `data` alone does not move it |
 | `data` | A dict for your own values. The model never sees it |

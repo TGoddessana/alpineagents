@@ -12,6 +12,7 @@ No network. Uses ``alpineagents.testing.FakeModel``/``FakeHuman`` and ``reporter
 """
 
 import threading
+import typing
 import time
 
 import pytest
@@ -19,7 +20,8 @@ import pytest
 from alpineagents import Agent, Reporter, State, StoppedByLimit, StoppedByUntil, tool
 from alpineagents.permissions import DenyByName
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
-from alpineagents.types import HistoryEntry, RawBlock, ToolOutcome, Usage
+from alpineagents import types
+from alpineagents.types import MessageEntry, RawBlock, ToolOutcome, Usage
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,7 +62,7 @@ def test_initial_values_match_construction_contract():
     # pending_calls=(), stopped=None.
     state = State("Find the bug")
 
-    assert state.history == (HistoryEntry("user", "Find the bug", turn=0),)
+    assert state.history == (MessageEntry(kind="user", content="Find the bug", turn=0),)
     assert [m.text for m in state.context] == ["Find the bug"]
     assert state.turn == 0
     assert state.usage == Usage()
@@ -897,3 +899,9 @@ def test_str_summarizes_history_one_line_per_entry():
     assert "read_file" in text
     assert "The bug is on line 3" in text
     assert lines[-1] == "done: stopped by is_answered (2 turns)"
+
+
+def test_every_history_kind_has_exactly_one_entry_class():
+    kinds_by_class = {cls: typing.get_args(typing.get_type_hints(cls)["kind"]) for cls in typing.get_args(types.HistoryEntry)}
+    all_kinds = [kind for kinds in kinds_by_class.values() for kind in kinds]
+    assert sorted(all_kinds) == sorted(typing.get_args(types.HistoryKind))

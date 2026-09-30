@@ -215,8 +215,7 @@ def test_finish_does_not_raise_when_deny_races_the_check(monkeypatch):
 
     assert failures == []
     assert [c.id for c in state.pending_calls] == [call_a.id]
-    closings = [h for h in state.history if h.call is not None and h.call.id == call_b.id
-                and h.kind in ("tool_result", "denied")]
+    closings = [h for h in state.history if h.kind in ("tool_result", "denied") and h.call.id == call_b.id]
     assert len(closings) == 1
 
 

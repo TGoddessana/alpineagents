@@ -22,13 +22,20 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict, cast
 from .errors import fix_message
 from .types import (
     ContextChange,
+    ContextChangeEntry,
+    ErrorEntry,
     Exchange,
+    ExchangeEntry,
     HistoryEntry,
     Image,
     Message,
+    MessageEntry,
     ModelEvent,
+    ModelEventEntry,
+    NotRunEntry,
     RawBlock,
     Reply,
+    ReplyEntry,
     Stopped,
     StoppedByFinish,
     StoppedByLimit,
@@ -38,6 +45,7 @@ from .types import (
     ToolCall,
     ToolResultBlock,
     ToolResultContent,
+    ToolResultEntry,
     Usage,
 )
 
@@ -351,49 +359,47 @@ def _stopped_from_old(stopped_by: str | None, stopped_limit: int | None) -> Stop
 
 
 # ---------------------------------------------------------------- history entries
+# Every kind is saved with the same keys: seq, kind, turn, at, content, and call/late/is_error when the entry has
+# them set. So the format does not depend on which class holds the entry.
+
+
+def _reply_to_plain(reply: Reply) -> dict[str, Any]:
+    return {
+        "message": message_to_dict(reply.message),
+        "usage": usage_to_dict(reply.usage),
+        "context_tokens": reply.context_tokens,
+        "stop_reason": reply.stop_reason,
+        "model": reply.model,
+    }
+
+
+def _reply_from_plain(data: Mapping[str, Any]) -> Reply:
+    return Reply(
+        message=message_from_dict(data["message"]),
+        usage=usage_from_dict(data["usage"]),
+        context_tokens=data["context_tokens"],
+        stop_reason=data["stop_reason"],
+        model=data["model"],
+    )
 
 
 def _content_to_plain(entry: HistoryEntry) -> Any:
-    content = entry.content
-    if isinstance(content, Reply):
-        return {
-            "message": message_to_dict(content.message),
-            "usage": usage_to_dict(content.usage),
-            "context_tokens": content.context_tokens,
-            "stop_reason": content.stop_reason,
-            "model": content.model,
-        }
-    if isinstance(content, Exchange):
-        return {"question": content.question, "answer": answer(content.answer, f"answer to {content.question!r}")}
-    if isinstance(content, ContextChange):
-        return dataclasses.asdict(content)
-    if isinstance(content, ModelEvent):
-        return {"kind": content.kind, "message": content.message, "data": plain(content.data, "ModelEvent.data")}
-    if entry.kind == "tool_result":
-        return _result_to_plain(content)
-    return plain(content, f"{entry.kind} history entry")
-
-
-def _content_from_plain(kind: str, data: Any) -> Any:
-    if kind == "reply":
-        return Reply(
-            message=message_from_dict(data["message"]),
-            usage=usage_from_dict(data["usage"]),
-            context_tokens=data["context_tokens"],
-            stop_reason=data["stop_reason"],
-            model=data["model"],
-        )
-    if kind in ("ask", "human"):
-        return Exchange(data["question"], data["answer"])
-    if kind == "context_change":
-        return ContextChange(**data)
-    if kind == "model_event":
-        return ModelEvent(data["kind"], data["message"], dict(data["data"]))
-    if kind == "tool_result":
-        return _result_from_plain(data)
-    if kind in ("user", "notice", "denied", "cancelled", "error"):
-        return data
-    raise ValueError(f"unknown history entry kind {kind!r}")
+    match entry:
+        case ReplyEntry(content=reply):
+            return _reply_to_plain(reply)
+        case ExchangeEntry(content=exchange):
+            return {
+                "question": exchange.question,
+                "answer": answer(exchange.answer, f"answer to {exchange.question!r}"),
+            }
+        case ContextChangeEntry(content=change):
+            return dataclasses.asdict(change)
+        case ModelEventEntry(content=event):
+            return {"kind": event.kind, "message": event.message, "data": plain(event.data, "ModelEvent.data")}
+        case ToolResultEntry(content=content):
+            return _result_to_plain(content)
+        case MessageEntry(content=text) | NotRunEntry(content=text) | ErrorEntry(content=text):
+            return plain(text, f"{entry.kind} history entry")
 
 
 def entry_to_dict(entry: HistoryEntry, seq: int) -> dict[str, Any]:
@@ -405,23 +411,49 @@ def entry_to_dict(entry: HistoryEntry, seq: int) -> dict[str, Any]:
         "at": time_to_str(entry.at),
         "content": _content_to_plain(entry),
     }
-    if entry.call is not None:
+    if isinstance(entry, (ToolResultEntry, NotRunEntry, ErrorEntry)) and entry.call is not None:
         data["call"] = _call_to_dict(entry.call)
-    if entry.late:
+    if isinstance(entry, ToolResultEntry) and entry.late:
         data["late"] = True
-    if entry.is_error:
+    if isinstance(entry, (ToolResultEntry, NotRunEntry)) and entry.is_error:
         data["is_error"] = True
     return data
 
 
 def entry_from_dict(data: Mapping[str, Any]) -> HistoryEntry:
-    call = data.get("call")
-    return HistoryEntry(
-        data["kind"],
-        _content_from_plain(data["kind"], data["content"]),
-        turn=data["turn"],
-        call=_call_from_dict(call) if call is not None else None,
-        late=bool(data.get("late", False)),
-        is_error=bool(data.get("is_error", False)),
-        at=time_from_str(data["at"]),
-    )
+    kind = data["kind"]
+    content = data["content"]
+    turn = data["turn"]
+    at = time_from_str(data["at"])
+    call = _call_from_dict(data["call"]) if data.get("call") is not None else None
+    if kind in ("user", "notice"):
+        return MessageEntry(kind=kind, content=content, turn=turn, at=at)
+    if kind == "reply":
+        return ReplyEntry(content=_reply_from_plain(content), turn=turn, at=at)
+    if kind == "tool_result":
+        return ToolResultEntry(
+            content=_result_from_plain(content),
+            call=_needs_call(kind, call),
+            is_error=bool(data.get("is_error", False)),
+            late=bool(data.get("late", False)),
+            turn=turn,
+            at=at,
+        )
+    if kind in ("denied", "cancelled"):
+        return NotRunEntry(kind=kind, content=content, call=_needs_call(kind, call), turn=turn, at=at)
+    if kind in ("ask", "human"):
+        return ExchangeEntry(kind=kind, content=Exchange(content["question"], content["answer"]), turn=turn, at=at)
+    if kind == "context_change":
+        return ContextChangeEntry(content=ContextChange(**content), turn=turn, at=at)
+    if kind == "model_event":
+        event = ModelEvent(content["kind"], content["message"], dict(content["data"]))
+        return ModelEventEntry(content=event, turn=turn, at=at)
+    if kind == "error":
+        return ErrorEntry(content=content, call=call, turn=turn, at=at)
+    raise ValueError(f"unknown history entry kind {kind!r}")
+
+
+def _needs_call(kind: str, call: ToolCall | None) -> ToolCall:
+    if call is None:
+        raise ValueError(f"a saved {kind} history entry has no call")
+    return call

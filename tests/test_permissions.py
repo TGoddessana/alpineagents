@@ -111,7 +111,7 @@ def results(state: State) -> list[ToolResultBlock]:
 
 
 def kinds(state: State) -> list[tuple[str, str]]:
-    return [(e.kind, e.call.name) for e in state.history if e.call is not None and e.kind != "error"]
+    return [(e.kind, e.call.name) for e in state.history if e.kind in ("tool_result", "denied", "cancelled")]
 
 
 class Spy(Reporter):
@@ -1129,7 +1129,7 @@ async def test_ause_tools_matches_use_tools():
         agent.think(state)
         with pytest.warns(PermissionWarning):
             agent.use_tools(state)
-        return [(e.kind, e.content, e.call.name) for e in state.history if e.call is not None]
+        return [(e.kind, e.content, e.call.name) for e in state.history if e.kind in ("tool_result", "denied", "cancelled")]
 
     sync_history = run_sync()  # no async run is going on, so the sync API may be called here
     sync_ran = sorted(ran)
@@ -1139,7 +1139,7 @@ async def test_ause_tools_matches_use_tools():
     await agent.athink(state)
     with pytest.warns(PermissionWarning):
         await agent.ause_tools(state)
-    assert [(e.kind, e.content, e.call.name) for e in state.history if e.call is not None] == sync_history
+    assert [(e.kind, e.content, e.call.name) for e in state.history if e.kind in ("tool_result", "denied", "cancelled")] == sync_history
     assert sorted(ran) == sync_ran == ["deploy prod", "read_file a"]
 
 

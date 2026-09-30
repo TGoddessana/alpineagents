@@ -177,7 +177,7 @@ def test_approval_permission_reads_the_hints():
     agent.run(state)
 
     assert asked == ["bash"]
-    results = [(e.kind, e.call.name) for e in state.history if e.call is not None]
+    results = [(e.kind, e.call.name) for e in state.history if e.kind in ("tool_result", "denied", "cancelled")]
     assert results == [("denied", "bash"), ("tool_result", "read_file")]  # denied first, then the tools run
 
 
