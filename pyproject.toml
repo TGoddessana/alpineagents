@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alpineagents"
-version = "0.3.0"
+version = "0.4.0"
 readme = "README.md"
 description = "An agent framework that keeps configuration (Agent) and history (State) apart, with a plain Python function as the loop"
 requires-python = ">=3.11"
