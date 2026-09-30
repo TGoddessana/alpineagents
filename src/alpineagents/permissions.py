@@ -20,7 +20,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Generator, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self
 
 from ._async import run_in_thread
 from .errors import ToolError, fix_message
@@ -147,7 +147,7 @@ class Permission:
     #: The verdict types this kind may return (besides ``None``). Set by each kind.
     _verdicts: tuple[type, ...] = ()
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> Permission:
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         # Checked here, not at class creation, so abstract intermediate classes still work (like Human.__new__).
         kinds = [kind.__name__ for kind in _KINDS if issubclass(cls, kind)]
         if len(kinds) != 1:

@@ -288,6 +288,12 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
     _end(state, reporter, job, shown if job.announced else None, outcome)
 
 
+def _thread_future(job: _Job) -> Future[ToolResultContent]:
+    """The sync API's worker thread future. ``submit`` sets it before the thread starts."""
+    assert isinstance(job.future, Future)
+    return job.future
+
+
 def _collect(
     state: State,
     reporter: Reporter | None,
@@ -302,7 +308,7 @@ def _collect(
     ``_abandon`` still sees that call.
     """
     while running:
-        done, _ = wait([job.future for job in running], timeout=_POLL, return_when=FIRST_COMPLETED)
+        done, _ = wait([_thread_future(job) for job in running], timeout=_POLL, return_when=FIRST_COMPLETED)
         if not done:
             continue
         finished = sorted((job for job in running if job.future in done), key=lambda job: job.seq)
