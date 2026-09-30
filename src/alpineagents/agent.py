@@ -1247,7 +1247,7 @@ class Agent:
     async def _aask_human(self, state: State, prompt: str, returns: Any, method: str, human: Any = None) -> Any:
         """The async version of ``_ask_human``."""
         human = self._human_to_ask(state, prompt, returns, method, human)
-        aask = getattr(human, "aask", None)
+        aask: Callable[..., Awaitable[Any]] | None = getattr(human, "aask", None)
         if callable(aask):
             value = await aask(state, prompt, returns)
         else:

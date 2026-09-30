@@ -13,7 +13,7 @@ import inspect
 import warnings
 from collections.abc import Callable
 from types import MethodType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ._async import ASYNC_RUN, is_async_callable
 from .blocks import acompact_if_full, compact_if_full
@@ -134,7 +134,8 @@ class Loop:
                     UserWarning,
                     stacklevel=3,
                 )
-            checked.append(item)
+            # Checked above as far as it can be: the bool return is the caller's side of the contract.
+            checked.append(cast(Condition, item))
 
         if isinstance(limit, bool) or not isinstance(limit, int):
             raise TypeError(

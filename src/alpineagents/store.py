@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from . import _serial
 from ._async import run_in_thread
@@ -106,7 +106,7 @@ class Store(ABC):
         ```
     """
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> Store:
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         for sync, asynchronous in (("write", "awrite"), ("read", "aread")):
             inherited = getattr(cls, sync) is getattr(Store, sync)
             if inherited and getattr(cls, asynchronous) is getattr(Store, asynchronous):

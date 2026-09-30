@@ -191,20 +191,20 @@ class Terminal(Reporter, Human):
         # cancelled "  cancelled {call.name}: {result}"; error "  error {call.name}: {first line of result, at most
         # 100 characters}"; done "  done {size}" (UTF-8 bytes: 512B, 1.2KB, 3.4MB).
         kind = outcome.kind
-        if kind != ToolOutcomeKind.DONE:
-            result = result_text(result)
+        if kind == ToolOutcomeKind.DONE:
+            self._write_line(state, f"  done {_format_size(result)}")
+            return
+        shown = result_text(result)
         if kind == ToolOutcomeKind.INPUT_ERROR:
-            text = f"  {result}"
+            text = f"  {shown}"
         elif kind == ToolOutcomeKind.ERROR:
-            text = f"  error {call.name}: {_first_line(result)}"
+            text = f"  error {call.name}: {_first_line(shown)}"
         elif kind in (ToolOutcomeKind.ABORTED, ToolOutcomeKind.INTERRUPTED):
-            text = f"  aborted {call.name}: {result}"
+            text = f"  aborted {call.name}: {shown}"
         elif kind == ToolOutcomeKind.DENIED:
-            text = f"  denied {call.name}: {result}"
-        elif kind == ToolOutcomeKind.CANCELLED:
-            text = f"  cancelled {call.name}: {result}"
+            text = f"  denied {call.name}: {shown}"
         else:
-            text = f"  done {_format_size(result)}"
+            text = f"  cancelled {call.name}: {shown}"
         self._write_line(state, text)
 
     def on_context_change(self, state: State, change: ContextChange) -> None:

@@ -19,7 +19,7 @@ from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints, overload
 
 from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, create_model
-from pydantic_core import to_jsonable_python
+from pydantic_core import ErrorDetails, to_jsonable_python
 
 # On 3.11 and 3.12, typing.is_typeddict does not recognize classes made with typing_extensions.TypedDict.
 # typing_extensions is a required dependency of pydantic.
@@ -466,7 +466,7 @@ _MISUSE_KIND_TEXT = {
 }
 
 
-def _describe_validation_error(err: dict[str, Any]) -> str:
+def _describe_validation_error(err: ErrorDetails) -> str:
     loc = ".".join(str(p) for p in err["loc"]) or "(value)"
     text = _MISUSE_KIND_TEXT.get(err["type"], err["msg"])
     return f"{loc}: {text}"
@@ -838,7 +838,8 @@ class FunctionTool(Tool):
             ) from e
 
         state_params: list[str] = []
-        fields: dict[str, tuple[Any, Any]] = {}
+        # (type, Field) per internal name. dict[str, Any] because create_model takes them as **kwargs.
+        fields: dict[str, Any] = {}
         param_names: list[tuple[str, str]] = []
         for p in positional:
             if p.name not in hints:
@@ -1016,7 +1017,7 @@ class FunctionTool(Tool):
         """
         if self._hints_function is None:
             return super().hints_for(args)
-        hints = self._hints_function(args)
+        hints = self._hints_function(dict(args))
         if hints is None:
             return super().hints_for(args)
         if not isinstance(hints, Hints):
@@ -1292,7 +1293,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
                 )
         found = False
         seen_names: set[str] = set()
-        for klass in type(item).__mro__:
+        for klass in inspect.getmro(type(item)):
             for attr_name, attr in vars(klass).items():
                 if attr_name in seen_names:
                     continue

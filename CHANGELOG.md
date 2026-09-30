@@ -184,6 +184,12 @@ All notable changes to alpineagents are listed here. The format follows
 - The planned `alpineagents[prices]` extra (cost from genai-prices) is dropped, and the README no longer mentions it.
   Pass `price=Price(...)` to the Model, as before.
 
+### Fixed
+
+- Type checkers see `FileStore(...)`, `DenyByName(...)`, `Terminal()` and your own `Store`, `Permission` and `Human`
+  subclasses as their own class. They saw the base class before (`Store`, `Permission`, `Human`), so methods of the
+  subclass were unknown to them.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added

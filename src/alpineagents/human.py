@@ -11,7 +11,7 @@ Every implementation (Terminal, FakeHuman) shares one answer conversion rule: :f
 from __future__ import annotations
 
 from abc import ABC
-from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal, Self, get_args, get_origin
 
 from ._async import run_in_thread
 from .errors import fix_message
@@ -43,7 +43,7 @@ class Human(ABC):
         ```
     """
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> Human:
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         # Checked here, not at class creation, so abstract intermediate classes still work.
         if cls.ask is Human.ask and cls.aask is Human.aask:
             raise TypeError(
