@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from .._frozen import thaw
 from ..errors import AuthError, ContextTooLongError, ProviderError, RateLimitError
 from ..types import (
     INVALID_ARGS_KEY,
@@ -272,10 +273,14 @@ class OpenAICompatible(Model):
           ``{"reasoning_content": ...}``). RawBlocks of other providers are dropped.
         - user ``Message``: one ``{"role": "tool", "tool_call_id", "content"}`` per ``ToolResultBlock`` in block
           order (an error result's content starts with ``"Error: "``, since the tool message has no error flag),
-          then the remaining text as one ``{"role": "user", "content": text}``. Tool messages take text only, so
-          a result's images go at the start of that user message instead, each result's between
-          ``<tool_result tool_name=... tool_call_id=...>`` and ``</tool_result>`` text parts (so the model does not
-          take them for images the user sent) as ``image_url`` data URLs; the tool message says they are there.
+          then the rest as one ``{"role": "user", "content": ...}``: a plain string when it is text only. Images
+          the user sent (``Message.user(text, image)``) make it a list of parts in block order, ``{"type": "text",
+          "text"}`` and ``{"type": "image_url", "image_url": {"url": "data:<media_type>;base64,<data>"}}``. Tool
+          messages take text only, so a result's images go at the start of that user message instead, each
+          result's between ``<tool_result tool_name=... tool_call_id=...>`` and ``</tool_result>`` text parts (so
+          the model does not take them for images the user sent); the tool message says they are there. Images
+          are sent whether or not ``supports`` lists ``"vision"``, as tool-result images are: a server that cannot
+          read images answers with its own error.
         - ``tools`` -> ``[{"type": "function", "function": {"name", "description", "parameters"}}]`` (omitted if
           empty). ``tool_choice="none"`` only when there are tools.
         - ``max_tokens`` and ``temperature`` only when not None. For o-series names, ``max_completion_tokens``
@@ -439,13 +444,13 @@ class OpenAICompatible(Model):
         result: dict[str, Any] = {"role": "assistant", "content": content}
         for block in message.content:
             if isinstance(block, RawBlock) and block.provider == self.provider:
-                result.update(block.data)
+                result.update(thaw(block.data))
         if calls:
             result["tool_calls"] = [
                 {
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": json.dumps(call.args, ensure_ascii=False)},
+                    "function": {"name": call.name, "arguments": json.dumps(thaw(call.args), ensure_ascii=False)},
                 }
                 for call in calls
             ]
@@ -453,21 +458,33 @@ class OpenAICompatible(Model):
 
     def _user_messages(self, message: Message) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        images: list[dict[str, Any]] = []
-        text_parts: list[str] = []
+        result_images: list[dict[str, Any]] = []
+        # The user's own content in block order: text parts, and images the user sent as image_url parts.
+        parts: list[dict[str, Any]] = []
+        has_user_image = False
         for block in message.content:
             if isinstance(block, ToolResultBlock):
                 text = _tool_result_text(block)
                 content = _ERROR_PREFIX + text if block.is_error else text
                 out.append({"role": "tool", "tool_call_id": block.call_id, "content": content})
-                images.extend(_tool_result_images(block))
+                result_images.extend(_tool_result_images(block))
             elif isinstance(block, TextBlock):
-                text_parts.append(block.text)
-        text = "".join(text_parts)
-        if images:
-            out.append({"role": "user", "content": images + ([{"type": "text", "text": text}] if text else [])})
-        elif text:
-            out.append({"role": "user", "content": text})
+                if parts and parts[-1]["type"] == "text":
+                    # Adjacent text is one part (and one string when there are no images at all).
+                    parts[-1]["text"] += block.text
+                else:
+                    parts.append({"type": "text", "text": block.text})
+            elif isinstance(block, Image):
+                has_user_image = True
+                parts.append(_image_part(block))
+        parts = [p for p in parts if p["type"] != "text" or p["text"]]
+        if result_images or has_user_image:
+            # Parts, not a string: tool-result images first (each between its <tool_result> tags), then the user's
+            # own text and images in the order they were given.
+            out.append({"role": "user", "content": result_images + parts})
+        elif parts:
+            # Text only stays a plain string, which every OpenAI-compatible server accepts.
+            out.append({"role": "user", "content": "".join(p["text"] for p in parts)})
         return out
 
     def _to_openai_tools(self, request: Request) -> list[dict[str, Any]] | None:
@@ -521,6 +538,11 @@ class OpenAICompatible(Model):
         return kwargs
 
 
+def _image_part(image: Image) -> dict[str, Any]:
+    """An ``image_url`` content part holding the image as a data URL."""
+    return {"type": "image_url", "image_url": {"url": f"data:{image.media_type};base64,{image.base64}"}}
+
+
 def _tool_result_text(block: ToolResultBlock) -> str:
     """A tool message's text: the result, or its text blocks and a line saying where its images went."""
     if isinstance(block.content, str):
@@ -540,6 +562,6 @@ def _tool_result_images(block: ToolResultBlock) -> list[dict[str, Any]]:
     opening = f'<tool_result tool_name="{block.name}" tool_call_id="{block.call_id}">'
     return [
         {"type": "text", "text": opening},
-        *({"type": "image_url", "image_url": {"url": f"data:{i.media_type};base64,{i.base64}"}} for i in images),
+        *(_image_part(i) for i in images),
         {"type": "text", "text": "</tool_result>"},
     ]

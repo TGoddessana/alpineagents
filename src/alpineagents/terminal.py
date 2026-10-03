@@ -34,12 +34,12 @@ __all__ = ["Terminal", "default_terminal"]
 #: on_context_change kind → display name.
 _CHANGE_NAMES: dict[str, str] = {
     "compact": "context compacted",
-    "start_from": "context restarted",
     "clear_tool_results": "tool results cleared",
-    "rollback": "context rolled back",
+    "import": "context imported",
+    "restore": "context restored",
 }
 #: Kinds that get the "cache rebuilds" note (the ones that replace the whole context).
-_CACHE_RESET_KINDS = {"compact", "start_from"}
+_CACHE_RESET_KINDS = {"compact"}
 
 
 def _format_tokens(n: int) -> str:
@@ -210,8 +210,8 @@ class Terminal(Reporter, Human):
     def on_context_change(self, state: State, change: ContextChange) -> None:
         """Writes ``context compacted: 121k → 18k tokens (cache rebuilds)`` and similar lines, under the next turn
         header."""
-        # Names: compact "context compacted" (followed by " (cache rebuilds)"), start_from "context restarted"
-        # (same tail), clear_tool_results "tool results cleared", rollback "context rolled back".
+        # Names: compact "context compacted" (followed by " (cache rebuilds)"), clear_tool_results "tool results
+        # cleared", restore "context restored". (import has a name too, but State does not notify for it.)
         #
         # Queued instead of written right away: many calls, like compact_if_full, change the context just before
         # the next think, so writing immediately would attach the line to the previous turn's output (it belongs

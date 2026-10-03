@@ -72,7 +72,7 @@ class Model(ABC):
     @property
     @abstractmethod
     def context_window(self) -> int:
-        """Required. The context window size in tokens. ``state.context_used`` is measured against it."""
+        """Required. The context window size in tokens. ``agent.context_used(state)`` is measured against it."""
 
     @abstractmethod
     def respond(
@@ -101,7 +101,7 @@ class Model(ABC):
         """Estimates the size of ``request`` in tokens.
 
         A utility for your own code. The framework never calls it, so overriding it does not change
-        ``state.context_used`` or when ``compact_if_full`` fires.
+        ``agent.context_used(state)`` or when ``compact_if_full`` fires.
         """
         # Default: the token count of the last reply (Message.tokens) plus an estimate for what came after it.
         # State uses the same rule (_tokens) directly.

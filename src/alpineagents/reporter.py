@@ -9,7 +9,8 @@ Who calls what, and when (ARCHITECTURE.md "Reporter notifications: who and when"
 - ``on_think_start``/``on_text``/``on_think_end``: ``Agent.think``, ``Agent.ask``
 - ``on_tool_start``/``on_tool_end``: ``Agent.use_tools`` (on the main thread). A call a permission denied or
   cancelled gets ``on_tool_end`` without ``on_tool_start``.
-- ``on_context_change``: called inside the State method that changed the context, after releasing the lock.
+- ``on_context_change``: called inside the State method that changed the messages, after releasing the lock, on
+  the Reporter of the Agent linked to the State.
 - ``on_model_event``: when the Model reports via ``on_event`` during ``respond``/``compact``, right after the
   Agent records it.
 
@@ -77,8 +78,8 @@ class Reporter:
         """
 
     def on_context_change(self, state: State, change: ContextChange) -> None:
-        """When the context changes: compaction, ``start_from``, ``clear_tool_results``, or a rollback after
-        ``think`` fails."""
+        """When the messages change: ``compact`` (by the model or ``state.compact``), ``clear_tool_results`` or
+        ``restore``. Not for the import of ``State(messages=...)``, and not when a failed ``think`` is taken back."""
 
     def on_model_event(self, state: State, event: ModelEvent) -> None:
         """When the Model reports something outside the reply, such as falling back to another model. Called

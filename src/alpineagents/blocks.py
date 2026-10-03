@@ -12,7 +12,7 @@ __all__ = ["CompactIfFull", "compact_if_full", "acompact_if_full"]
 
 
 class CompactIfFull:
-    """A block that compacts the context when it is fuller than ``at``.
+    """A block that compacts the messages when the context is fuller than ``at``.
 
     Call it at the start of a turn, before ``agent.think``. ``compact_if_full`` is one with the defaults.
 
@@ -23,7 +23,7 @@ class CompactIfFull:
     def __init__(self, at: float = 0.6, instructions: str | None = None):
         """
         Args:
-            at: The fraction of the model's context window (``state.context_used``) above which to compact.
+            at: The fraction of the model's context window (``agent.context_used(state)``) above which to compact.
             instructions: What the summary must keep, added to the default summary prompt.
         """
         self.at = at
@@ -32,12 +32,12 @@ class CompactIfFull:
         """What the summary should keep, or ``None``."""
 
     def __call__(self, agent: Agent, state: State):
-        if state.context_used > self.at:
+        if agent.context_used(state) > self.at:
             agent.compact(state, instructions=self.instructions)
 
     async def acall(self, agent: Agent, state: State):
         """The async version, for async loops: ``await CompactIfFull(at=0.5).acall(agent, state)``."""
-        if state.context_used > self.at:
+        if agent.context_used(state) > self.at:
             await agent.acompact(state, instructions=self.instructions)
 
     def __repr__(self) -> str:

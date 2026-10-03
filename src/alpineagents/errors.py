@@ -169,8 +169,8 @@ class ToolInputError(Exception):
 def fix_message(problem: str, fix: str, example: str | None = None) -> str:
     """Give every mistake-proofing error message the same format.
 
-    >>> fix_message("until got a call result", "pass the function, no parens", "@loop(until=State.is_answered)")
-    'until got a call result\\nFix: pass the function, no parens\\nExample:\\n    @loop(until=State.is_answered)'
+    >>> fix_message("until got a call result", "pass the function, no parens", "@loop(until=waiting_for_user)")
+    'until got a call result\\nFix: pass the function, no parens\\nExample:\\n    @loop(until=waiting_for_user)'
     """
     message = f"{problem}\nFix: {fix}"
     if example:

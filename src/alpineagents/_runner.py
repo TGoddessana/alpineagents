@@ -15,6 +15,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, wait
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from ._frozen import thaw
 from .errors import PermissionWarning, ToolError, ToolInputError
 from .permissions import Allowed, Denied, _acheck_call, _check_call, _Decision
 from .state import STOPPED_TURN, closed_outcome, closed_result
@@ -68,8 +69,9 @@ class _Job:
     def __init__(self, call: ToolCall, tool: Tool) -> None:
         self.call = call
         self.tool = tool
-        #: What ``tool.run`` gets: a copy of the model's arguments.
-        self.args: dict[str, Any] = dict(call.args)
+        #: What ``tool.run`` gets: an editable deep copy of the model's arguments (``call.args`` is read-only, and a
+        #: tool may change what it is given).
+        self.args: dict[str, Any] = thaw(call.args)
         #: The sync API's worker thread future. In the async API, the asyncio Task of an ``async def`` tool.
         self.future: Future[ToolResultContent] | asyncio.Task[ToolResultContent] | None = None
         #: Async API only: what the event loop awaits (the Task itself, or the wrapped thread future).
@@ -205,34 +207,26 @@ def _late(state: State, job: _Job, future: Future[ToolResultContent] | asyncio.T
         return
     error = future.exception()
     if error is None:
-        text = future.result()
+        state._late_result(job.call, future.result(), _success_kind(job), error=job.tool_error)
     else:
         if isinstance(error, asyncio.CancelledError) and job.cancel_requested:
             return  # a coroutine we cancelled; nothing new to report
-        text = LATE_EXCEPTION.format(type(error).__name__, error)
-    if error is None:
-        state._record_late_result(job.call, text, is_error=job.is_error, error=job.tool_error)
-    else:
-        state._record_late_result(job.call, text)
+        state._late_result(
+            job.call, LATE_EXCEPTION.format(type(error).__name__, error), closed_outcome(error).kind, error=error
+        )
 
 
 # ---------------------------------------------------------------- main thread
 
 
-def _is_pending(state: State, call: ToolCall) -> bool:
-    return any(c.id == call.id for c in state.pending_calls)
-
-
-def _record_if_pending(
-    state: State, call: ToolCall, text: ToolResultContent, is_error: bool = False, error: ToolError | None = None
-) -> bool:
-    """If ``call`` is still a pending call, records the result and returns true. The check and the record
-    happen under one ``state.lock`` (so nothing can close it in between)."""
-    with state.lock:
-        if not _is_pending(state, call):
-            return False
-        state._record_tool_result(call, text, is_error=is_error, error=error)
-        return True
+def _success_kind(job: _Job) -> ToolOutcomeKind:
+    """The outcome of a call whose tool returned: an error result the tool raised as ``ToolError`` or
+    ``ToolInputError``, or a normal result."""
+    if job.input_error:
+        return ToolOutcomeKind.INPUT_ERROR
+    if job.is_error:
+        return ToolOutcomeKind.ERROR
+    return ToolOutcomeKind.DONE
 
 
 def _exception(job: _Job) -> BaseException | None:
@@ -272,13 +266,11 @@ def _finish(state: State, reporter: Reporter | None, job: _Job, failures: list[_
     error = _exception(job)
     if error is None:
         text = job.future.result()
-        recorded = _record_if_pending(state, job.call, text, job.is_error, job.tool_error)
+        kind = _success_kind(job)
+        # Only if the call is still pending (the check and the record are one step, so nothing can close it in between).
+        recorded = state._tool_result(job.call, text, kind, error=job.tool_error, if_pending=True)
         shown: ToolResultContent | None = text if recorded else None
-        outcome = ToolOutcome(
-            ToolOutcomeKind.INPUT_ERROR if job.input_error
-            else ToolOutcomeKind.ERROR if job.is_error
-            else ToolOutcomeKind.DONE
-        )
+        outcome = ToolOutcome(kind)
     else:
         state._record_error(error, job.call)
         if job not in failures:
@@ -348,7 +340,7 @@ def _record_now(state: State, reporter: Reporter | None, call: ToolCall, text: s
     """A call whose result is decided right away without calling the tool (unknown tool, input error)."""
     if reporter is not None:
         reporter.on_tool_start(state, call)
-    state._record_tool_result(call, text, is_error=True)
+    state._tool_result(call, text, ToolOutcomeKind.INPUT_ERROR)
     if reporter is not None:
         reporter.on_tool_end(state, call, text, ToolOutcome(ToolOutcomeKind.INPUT_ERROR))
 
@@ -380,31 +372,33 @@ def run_calls(
 
     1. Prepare (in request order): if the tool does not exist the result is ``UNKNOWN_TOOL``; if the arguments
        were not valid JSON (``invalid_args_message``) it is ``INPUT_ERROR``: ``on_tool_start`` →
-       ``state._record_tool_result(call, result, is_error=True)`` → ``on_tool_end``. The tool is not called.
+       ``state._tool_result(call, result, INPUT_ERROR)`` → ``on_tool_end``. The tool is not called.
     1b. Permissions (unless ``permissions`` is ``None``; an empty tuple denies every call), for every remaining call in request order, before any tool runs
        (``permissions._check_call``: deny permissions first, then the rest in list order; the first verdict
        decides). Allowed → the call goes on to step 2. Otherwise the call is closed with
-       ``state._deny(call, reason)`` and gets ``on_tool_end(reason, ToolOutcome(DENIED, decided_by=repr(p)))``
+       ``state._tool_result(call, reason, DENIED)`` and gets ``on_tool_end(reason, ToolOutcome(DENIED, decided_by=repr(p)))``
        (no ``on_tool_start``):
        - ``Denied(reason)``: that reason.
        - The permission raised ``ToolError``: its message, with the ``ToolError`` as the entry's and the outcome's
          ``error``.
        - Nobody decided: ``NO_PERMISSION`` and a ``PermissionWarning``; ``decided_by`` is ``None``.
        - ``Denied(reason, stop=True)``: ``state._stop_turn`` denies the call, cancels every other pending call of
-         the turn with ``STOPPED_TURN`` (``CANCELLED`` outcomes, same ``decided_by``) and sets ``state.stopped``
-         to ``StoppedByPermission``, all under one lock. No tool of the turn runs: this function returns after ``on_record()``.
+         the turn with ``STOPPED_TURN`` (``CANCELLED`` outcomes, same ``decided_by``) and records
+         ``StopEntry(StoppedByPermission)`` (unless ``finish()`` came first), all under one lock. No tool of the turn
+         runs: this function returns after ``on_record()``.
        Any other exception from a permission is recorded as an ``error`` entry with the call and propagates;
        the calls denied before it stay closed, the rest stay pending. If this step recorded anything (a closed call,
        or a ``DecideByHuman`` question and answer), ``on_record()`` runs once after it, so an approval is saved
        before the tool it approved starts.
     2. Parallel group (``tool.parallel``): for each call, ``on_tool_start``, then hand it to ``_Executor``
        (daemon worker threads, at most ``_MAX_WORKERS`` at once).
-       The worker thread runs ``value = tool.run(dict(call.args), state)``; if it is a coroutine, it creates a new
+       The worker thread runs ``value = tool.run(thaw(call.args), state)``; if it is a coroutine, it creates a new
        event loop in that thread and runs it as a Task (keeping the loop and Task so it can be cancelled).
        The result is ``format_result(value)`` (on the worker thread). A ``ToolError`` or ``ToolInputError`` the
        tool raises is not an exception here: it becomes an error result (``(input error: ...)`` for the latter).
-    3. As they finish (completion order), on the main thread: success → ``state._record_tool_result(call, text)``
-       → ``on_tool_end`` (check and record under one ``state.lock``; a call already closed is not recorded).
+    3. As they finish (completion order), on the main thread: success → ``state._tool_result(call, text, kind,
+       if_pending=True)`` → ``on_tool_end`` (the check and the record are one step; a call already closed is not
+       recorded).
        Exception → ``state._record_error(e, call)`` →
        ``on_tool_end(state, call, closed_result(e), closed_outcome(e))``, and the first exception is remembered
        (no result is recorded, so the call stays in ``pending_calls``).
@@ -422,7 +416,7 @@ def run_calls(
 
     - Running coroutine Tasks are cancelled with ``loop.call_soon_threadsafe(task.cancel)``.
     - Unfinished sync calls are not waited for. A done callback is attached to their future, and when they
-      finish later, ``state._record_late_result(call, text)`` (if they ended in an exception,
+      finish later, ``state._late_result(call, text, outcome)`` (if they ended in an exception,
       ``LATE_EXCEPTION``).
     - Futures that have not started are cancelled.
     - Calls that got ``on_tool_start`` but did not finish get
@@ -513,7 +507,7 @@ def _apply(state: State, reporter: Reporter | None, job: _Job, decision: _Decisi
     call = job.call
     decided_by = repr(permission) if permission is not None else None
     if error is not None:
-        state._deny(call, str(error), error=error)
+        state._tool_result(call, str(error), ToolOutcomeKind.DENIED, error=error)
         _notify(state, reporter, call, str(error), ToolOutcome(ToolOutcomeKind.DENIED, error, decided_by))
         return False
     if verdict is None:
@@ -524,7 +518,7 @@ def _apply(state: State, reporter: Reporter | None, job: _Job, decision: _Decisi
             ),
             stacklevel=2,
         )
-        state._deny(call, NO_PERMISSION)
+        state._tool_result(call, NO_PERMISSION, ToolOutcomeKind.DENIED)
         _notify(state, reporter, call, NO_PERMISSION, ToolOutcome(ToolOutcomeKind.DENIED))
         return False
     assert decided_by is not None
@@ -535,7 +529,7 @@ def _apply(state: State, reporter: Reporter | None, job: _Job, decision: _Decisi
             outcome = ToolOutcome(ToolOutcomeKind.CANCELLED, decided_by=decided_by)
             _notify(state, reporter, other, STOPPED_TURN, outcome)
         return False
-    state._deny(call, verdict.reason)
+    state._tool_result(call, verdict.reason, ToolOutcomeKind.DENIED)
     _notify(state, reporter, call, verdict.reason, ToolOutcome(ToolOutcomeKind.DENIED, decided_by=decided_by))
     return False
 

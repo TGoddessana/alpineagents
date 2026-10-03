@@ -12,7 +12,7 @@ A denied call does not run and the model gets the reason as its error result. ``
 cancels the other calls of the turn and sets ``state.stopped`` to ``StoppedByPermission`` right away, so the loop
 stops before its next turn. The runner (``_runner.run_calls``) applies the verdicts; this module only asks.
 
-Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._owner.agent``).
+Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._agent``).
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class Denied:
     stop: bool = False
     """Also stop the turn: the other calls of the turn are cancelled (not run, not asked about), and
     ``state.stopped`` becomes ``StoppedByPermission(call, permission)`` right away, so the loop stops before its next
-    turn. The run ends normally; ``state.add_user_message(...)`` and ``run`` again continue it. A ``@loop`` stops by
+    turn. The run ends normally; ``state.add_message(Message.user(...))`` and ``run`` again continue it. A ``@loop`` stops by
     itself; a loop written without ``@loop`` checks ``state.stopped is None`` before each turn."""
 
     def __post_init__(self) -> None:
@@ -459,8 +459,9 @@ class DecideByHuman(DecidePermission):
 
 
 def _running_agent(state: State, permission: Permission) -> Any:
-    """The Agent running ``state`` (its owner, set when ``use_tools`` starts)."""
-    agent = state._owner.agent
+    """The Agent running ``state`` (the one linked to it when its run, ``think``, ``use_tools`` or ``compact``
+    started)."""
+    agent = state._agent
     if agent is None:
         raise ValueError(
             fix_message(

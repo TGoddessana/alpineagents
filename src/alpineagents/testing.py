@@ -3,7 +3,7 @@
 ::
 
     fake = FakeModel([tool_call("read_file", path="main.py"), "The bug is on line 3"])
-    agent.copy(model=fake, reporter=None).run(State("Find the bug"))
+    agent.copy(model=fake, reporter=None).run("Find the bug")
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class FakeModel(Model):
     Example:
         ```python
         fake = FakeModel([tool_call("read_file", path="main.py"), "The bug is on line 3"])
-        agent.copy(model=fake, reporter=None).run(State("Find the bug"))
+        agent.copy(model=fake, reporter=None).run("Find the bug")
         assert fake.remaining == 0
         ```
     """

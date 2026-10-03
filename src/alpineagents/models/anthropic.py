@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from .._frozen import thaw
 from ..errors import AuthError, ContextTooLongError, ProviderError, RateLimitError, fix_message
 from ..types import (
     INVALID_ARGS_KEY,
@@ -414,6 +415,8 @@ class Anthropic(Model):
         - ``TextBlock`` -> ``{"type": "text", "text"}``; empty or whitespace-only text is dropped. If the content
           ends up empty (e.g. an assistant reply that ended without tools), one placeholder text
           (``"(empty reply)"``) is added: Anthropic rejects empty content in any message but the last.
+        - ``Image`` (in a user message) -> ``{"type": "image", "source": {"type": "base64", "media_type",
+          "data"}}``, in block order. Sent whether or not ``supports`` lists ``"vision"``, as tool-result images are.
         - ``ToolCall`` -> ``{"type": "tool_use", "id", "name", "input": args}``
         - ``ToolResultBlock`` -> ``{"type": "tool_result", "tool_use_id", "content", "is_error"}``. With images,
           ``content`` is a list of ``{"type": "text"}`` and ``{"type": "image", "source": {"type": "base64",
@@ -431,8 +434,19 @@ class Anthropic(Model):
                 # Drop whitespace-only text too -- Anthropic requires non-whitespace characters in text blocks.
                 if block.text.strip():
                     out.append({"type": "text", "text": block.text})
+            elif isinstance(block, Image):
+                # An image the user sent, in block order. (Only user messages hold them; Anthropic rejects an
+                # image in an assistant message, so one imported there is dropped.)
+                if message.role == "user":
+                    out.append(
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": block.media_type, "data": block.base64},
+                        }
+                    )
             elif isinstance(block, ToolCall):
-                out.append({"type": "tool_use", "id": block.id, "name": block.name, "input": dict(block.args)})
+                # thaw: the SDK gets plain dicts, not the frozen containers a ToolCall holds.
+                out.append({"type": "tool_use", "id": block.id, "name": block.name, "input": thaw(block.args)})
             elif isinstance(block, ToolResultBlock):
                 out.append(
                     {
@@ -444,7 +458,7 @@ class Anthropic(Model):
                 )
             elif isinstance(block, RawBlock):
                 if block.provider == self.provider:
-                    out.append(dict(block.data))
+                    out.append(thaw(block.data))
                 # RawBlocks of other providers are dropped.
         if not out and self._should_placeholder_empty_content(blocks):
             # Anthropic rejects empty ([]) or whitespace-only content (especially when it is not the last

@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
-from . import _structured
+from . import _structured, _tokens
 from ._async import ASYNC_RUN, check_sync_call, is_async_callable, run_in_thread
 from ._runner import arun_calls, run_calls
 from ._tokens import estimate_overhead_tokens
@@ -29,7 +29,7 @@ from .reporter import Reporter
 from .state import State
 from .store import Store
 from .tool import FunctionTool, Tool, ToolMap, collect_tools
-from .types import Message, ModelEvent, Request, TextBlock
+from .types import AgentInfo, Message, ModelEvent, Request, TextBlock, Usage
 
 if TYPE_CHECKING:
     from .human import Human
@@ -261,10 +261,10 @@ class Agent:
                 fix_message(
                     f"loop= takes a function that receives (agent, state) (got: {loop!r})",
                     "Pass a function decorated with @loop(until=..., limit=...) or a callable taking (agent, state)",
-                    "@loop(until=State.is_answered, limit=50)\n"
+                    "@loop(until=waiting_for_user, limit=50)\n"
                     "def coding(agent: Agent, state: State):\n"
                     "    agent.think(state)\n"
-                    "    if state.wants_tools():\n"
+                    "    if state.pending_calls:\n"
                     "        agent.use_tools(state)\n"
                     "\n"
                     "agent = Agent(model=..., loop=coding)",
@@ -327,8 +327,8 @@ class Agent:
                 )
         # None: no checks at all. A tuple (even empty) goes through the check phase of use_tools.
         self._permissions: tuple[Permission, ...] | None = checks
-        # Agent._summary() for snapshots, computed at the first save (settings do not change).
-        self._saved_summary: dict[str, Any] | None = None
+        # The AgentInfo every run records (settings do not change, so it is built once, at the first run).
+        self._agent_info: AgentInfo | None = None
 
     # ------------------------------------------------------------ settings (read-only)
 
@@ -422,8 +422,12 @@ class Agent:
 
     # ------------------------------------------------------------ actions
 
-    def run(self, task: str | State) -> Any:
-        """Runs the loop on a task and returns what the loop returns, usually the answer.
+    def run(self, prompt_or_state: str | State, /) -> Any:
+        """Runs the loop on a prompt or a State and returns what the loop returns, usually the answer.
+
+        A prompt string starts a new ``State`` with that one user message. Any Agent can continue any State, so
+        ``agent.copy(model=...)`` can carry on where another model left off. A State is run by one ``run`` or
+        ``arun`` at a time.
 
         MCP servers in ``tools=`` connect for the run and disconnect after it, unless ``with agent:`` keeps
         them open. If an exception leaves the run, it is recorded in ``state.history``, tool calls still
@@ -435,38 +439,40 @@ class Agent:
         the run is already failing, the original exception is raised with a note about the failed save.
 
         Args:
-            task: A task string, which starts a new ``State``, or a ``State`` to continue.
+            prompt_or_state: A prompt string, which starts a new ``State``, or a ``State`` to continue.
 
         Returns:
             What the loop returns. The default loop returns ``state.answer``.
 
         Raises:
-            TypeError: The loop is async (use ``arun``), ``task`` is neither a string nor a State, a value in the
-                State cannot be saved as JSON, the store only works asynchronously, or a permission only checks
-                asynchronously (implements ``acheck`` but not ``check``).
+            TypeError: The loop is async (use ``arun``), the argument is neither a string nor a State, a value
+                in the State cannot be saved as JSON, the store only works asynchronously, or a permission only
+                checks asynchronously (implements ``acheck`` but not ``check``).
             NoHumanError: A ``DecideByHuman()`` permission would ask the Agent's human, and the Agent has
                 ``human=None``.
-            ValueError: The State was already ended with ``state.finish()``, or it is new and the store already
-                has a State with its id.
+            ValueError: The prompt is empty, the State was already ended with ``state.finish()``, another
+                ``run``/``arun`` is running it right now, or it is new and the store already has a State with
+                its id.
 
         Warns:
-            ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
-                or MCP servers.
+            ResumeWarning: The State was loaded from a store, and it was last run by an Agent with a different
+                name, model, system prompt, tools or MCP servers. Only the first run after ``store.load``
+                compares.
 
         Example:
             ```python
-            state = State("Find the bug in this repo")
+            state = State(messages=[Message.user("Find the bug in this repo")])
             answer = agent.run(state)
             print(state.stopped, state.usage.cost)
             ```
         """
         # Order (ARCHITECTURE.md "run order and the context rules after exceptions"):
-        # 1. _start_run: str -> State(task); State as is; anything else TypeError. A finish()ed State is a
-        #    ValueError. Clears state.stopped, so the previous run's reason (possibly restored by a Store) does not
-        #    stop this run. A loaded State saved by a different Agent gives a ResumeWarning (once, outside the
-        #    State lock).
-        # 2. try: on_run_start; connect MCP (_mcp_open); state._note_window(...) records the window size with the
-        #    full tool list so compact_if_full works on the first turn (the owner is not set); return loop(...)
+        # 1. _start_run: str -> State(messages=[Message.user(text)]); State as is; anything else TypeError. A
+        #    finish()ed State is a ValueError. A State that is already being run is a ValueError. A loaded State last
+        #    run by a different Agent gives a ResumeWarning (once, outside the State lock). Then
+        #    state._start_run records RunStartEntry (which clears state.stopped, so the previous run's reason does
+        #    not stop this run) and sets the "being run" flag; state._end_run clears it in the finally below.
+        # 2. try: on_run_start; connect MCP (_mcp_open); return loop(...)
         #    on_run_start is inside the try, so on_run_end is called whichever step raises.
         # 3. except BaseException: state._record_error(e); state._close_pending(e); state._clear_stop() (a run
         #    ending in an exception has no stop reason, even if finish() or a permission set one); raise
@@ -488,149 +494,160 @@ class Agent:
         if self._store is not None and type(self._store).write is Store.write:
             raise self._store._async_only("write", "awrite")
         self._check_permissions("run")
-        state = self._start_run(task)
-        self._save(state)
-        reporter = self.reporter
-        error: BaseException | None = None
-        connected = False
+        state = self._start_run(prompt_or_state, "run")
         try:
-            if reporter is not None:
-                reporter.on_run_start(state)
-            self._mcp_open()
-            connected = True
-            self._note_window(state)
-            result = self._loop(self, state)
             self._save(state)
-            return result
-        except BaseException as e:
-            error = e
-            state._record_error(e)
-            state._close_pending(e)
-            state._clear_stop()
-            self._save_after(state, e)
-            raise
-        finally:
+            reporter = self.reporter
+            error: BaseException | None = None
+            connected = False
             try:
-                if connected:
-                    self._mcp_close()
-            finally:
                 if reporter is not None:
-                    reporter.on_run_end(state, error)
+                    reporter.on_run_start(state)
+                self._mcp_open()
+                connected = True
+                result = self._loop(self, state)
+                self._save(state)
+                return result
+            except BaseException as e:
+                error = e
+                state._record_error(e)
+                state._close_pending(e)
+                state._clear_stop()
+                self._save_after(state, e)
+                raise
+            finally:
+                try:
+                    if connected:
+                        self._mcp_close()
+                finally:
+                    if reporter is not None:
+                        reporter.on_run_end(state, error)
+        finally:
+            state._end_run()
 
-    async def arun(self, task: str | State) -> Any:
+    async def arun(self, prompt_or_state: str | State, /) -> Any:
         """The async version of ``run``.
 
         Uses this Agent's loop if it is async, or ``adefault_loop`` if the Agent uses the default loop.
         Cancelling the task follows the same rules as Ctrl+C in ``run``.
 
         Args:
-            task: A task string, which starts a new ``State``, or a ``State`` to continue.
+            prompt_or_state: A prompt string, which starts a new ``State``, or a ``State`` to continue.
 
         Returns:
             What the loop returns. The default loop returns ``state.answer``.
 
         Raises:
             TypeError: The loop is a sync loop other than ``default_loop``, which would block the event loop.
-            ValueError: The State was already ended with ``state.finish()``.
+            ValueError: The prompt is empty, the State was already ended with ``state.finish()``, or another
+                ``run``/``arun`` is running it right now.
             NoHumanError: A ``DecideByHuman()`` permission would ask the Agent's human, and the Agent has
                 ``human=None``.
 
         Warns:
-            ResumeWarning: The State was saved by an Agent with a different name, model, system prompt, tools
-                or MCP servers.
+            ResumeWarning: The State was loaded from a store, and it was last run by an Agent with a different
+                name, model, system prompt, tools or MCP servers. Only the first run after ``store.load``
+                compares.
         """
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
         self._check_permissions("arun")
-        state = self._start_run(task)
-        await self._asave(state)
-        reporter = self.reporter
-        error: BaseException | None = None
-        token = ASYNC_RUN.set(asyncio.get_running_loop())
-        connected = False
+        state = self._start_run(prompt_or_state, "arun")
         try:
-            if reporter is not None:
-                reporter.on_run_start(state)
-            await self._amcp_open()
-            connected = True
-            self._note_window(state)
-            result = await loop(self, state)
             await self._asave(state)
-            return result
-        except BaseException as e:
-            error = e
-            state._record_error(e)
-            state._close_pending(e)
-            state._clear_stop()
-            await self._asave_after(state, e)
-            raise
-        finally:
-            ASYNC_RUN.reset(token)
+            reporter = self.reporter
+            error: BaseException | None = None
+            token = ASYNC_RUN.set(asyncio.get_running_loop())
+            connected = False
             try:
-                if connected:
-                    await self._amcp_close()
-            finally:
                 if reporter is not None:
-                    reporter.on_run_end(state, error)
+                    reporter.on_run_start(state)
+                await self._amcp_open()
+                connected = True
+                result = await loop(self, state)
+                await self._asave(state)
+                return result
+            except BaseException as e:
+                error = e
+                state._record_error(e)
+                state._close_pending(e)
+                state._clear_stop()
+                await self._asave_after(state, e)
+                raise
+            finally:
+                ASYNC_RUN.reset(token)
+                try:
+                    if connected:
+                        await self._amcp_close()
+                finally:
+                    if reporter is not None:
+                        reporter.on_run_end(state, error)
+        finally:
+            state._end_run()
 
     def think(self, state: State, tools: Iterable[Any] | None = None) -> None:
-        """Sends the context to the model once and records its reply in the State.
+        """Sends the messages to the model once and records its reply in the State.
 
-        The reply may ask for tool calls. Check ``state.wants_tools()`` and run them with ``use_tools``.
-        If anything fails, the context goes back to how it was before this call, and the error is raised.
+        The reply may ask for tool calls. Check ``state.pending_calls`` and run them with ``use_tools``.
+        If the model call fails, the request is taken back (``state.messages`` and ``state.turn`` are as they
+        were before this call) and the error is raised and recorded in the history. Once the reply is recorded,
+        nothing undoes it.
+
+        Any Agent can think on any State, so a State can be continued with another model.
 
         Args:
-            state: The State to continue. The first Agent that thinks on a State owns it.
+            state: The State to continue.
             tools: Which of this Agent's tools the model may see this turn. ``None`` shows all of them,
                 ``[]`` shows none. Takes the items of ``tools=`` and the values of ``tool_map``, so
                 ``[t for t in agent.tool_map.values() if t.read_only]`` works.
 
         Raises:
-            ValueError: The State is finished, still has tool calls waiting for results, belongs to another
-                Agent, or ``tools`` has a tool this Agent does not have.
+            ValueError: The State is finished, has no messages, still has tool calls waiting for results, is
+                already waiting on a model, or ``tools`` has a tool this Agent does not have.
             ProviderError: The model provider failed (``RateLimitError``, ``AuthError``,
                 ``ContextTooLongError`` or another ``ProviderError``).
         """
-        # 1. _begin_think: state._claim(self, context_window=, overhead_tokens=estimate_overhead_tokens(system,
-        #    specs shown)); cp = state._begin_think() (finish and pending checks, late result notices, turn + 1).
-        # 2. try: request = model.mark_cache(Request(system, state.context, specs)); on_think_start;
+        # 1. _prepare_think: check the State, pick the specs, link the State to this Agent (state._attach).
+        #    state._begin_think(model name) records ModelRequestEntry (finish, pending, waiting and no-messages
+        #    checks; late result notices enter the messages; turn + 1; add_message is held until the reply or error).
+        # 2. try: save (so a process that dies while waiting leaves the request on record); request =
+        #    model.mark_cache(Request(system, state.messages, specs)); on_think_start;
         #    reply = model.respond(request, on_text, on_event); state._record_reply(reply); on_think_end.
-        # 3. except BaseException: state._rollback(cp, e); _save_after; raise.
-        # With a store: save between _claim and state._begin_think (the snapshot _replay starts from), and after
-        # step 2 outside its try, so a failed save never rolls back a reply that already arrived.
+        # 3. except BaseException: state._record_error(e) (takes the request back if no reply came; after the
+        #    reply it only records, so a failing Reporter never undoes a reply that arrived); _save_after; raise.
         # tools= items are flattened with collect_tools and looked up by name; each must be the same tool.
         check_sync_call("think")
         self._mcp_ensure()
         specs = self._prepare_think(state, tools, "think")
-        self._save(state)
-        checkpoint = state._begin_think()
+        state._begin_think(self._model_name())
         reporter = self.reporter
         try:
+            self._save(state)
             request = self._think_request(state, specs, reporter)
             reply = self._model.respond(request, self._on_text(state, reporter), self._on_event(state, reporter))
             self._end_think(state, reply, reporter)
         except BaseException as e:
-            state._rollback(checkpoint, e)
+            state._record_error(e)
             self._save_after(state, e)
             raise
         self._save(state)
 
     async def athink(self, state: State, tools: Iterable[Any] | None = None) -> None:
-        """The async version of ``think``. Cancelling it rolls the context back like any other failure."""
+        """The async version of ``think``. Cancelling it takes the request back like any other failure."""
         # Same steps as think, with model.arespond.
         await self._amcp_ensure()
         specs = self._prepare_think(state, tools, "athink")
-        await self._asave(state)
-        checkpoint = state._begin_think()
+        state._begin_think(self._model_name())
         reporter = self.reporter
         try:
+            await self._asave(state)
             request = self._think_request(state, specs, reporter)
             reply = await self._model.arespond(
                 request, self._on_text(state, reporter), self._on_event(state, reporter)
             )
             self._end_think(state, reply, reporter)
         except BaseException as e:
-            state._rollback(checkpoint, e)
+            state._record_error(e)
             await self._asave_after(state, e)
             raise
         await self._asave(state)
@@ -647,13 +664,16 @@ class Agent:
         model gets the reason as its error result. A denial with ``stop=True`` cancels the other calls of the
         turn too, so no tool of the turn runs, and the loop stops before its next turn.
 
+        Every call ends as one ``ToolResultEntry`` whose ``outcome`` says how: done, error, input_error, aborted,
+        interrupted, denied or cancelled.
+
         Args:
             state: The State whose ``pending_calls`` to run.
 
         Raises:
-            ValueError: The State is finished or belongs to another Agent.
+            ValueError: The State is finished.
         """
-        # state._ensure_open("use_tools") and state._claim(...) in _begin_use_tools, then _runner.run_calls.
+        # state._ensure_open("use_tools") and state._attach(self) in _begin_use_tools, then _runner.run_calls.
         # Permission, concurrency, exception and interrupt rules are in _runner.run_calls.
         # With a store: save after each batch of recorded results. Those saves do not stop the tools: an
         # Exception is dropped, and the save at the end (which writes everything not saved yet) raises instead.
@@ -721,18 +741,19 @@ class Agent:
             review = agent.ask(state, "Is this change safe to merge?", returns=Review)
             ```
         """
-        # - state._ensure_open("ask"). No owner check.
+        # - state._ensure_open("ask").
         # - _structured.check_returns(returns) (TypeError if unsupported).
         # - messages = state._context_for_question() + Message.user(_structured.question_text(prompt, returns)).
         # - Request(system, messages, tools=all of this Agent's specs, tool_choice="none").
         #   on_think_start -> respond(request, on_text, on_event) -> on_think_end (no _record_reply).
-        # - state._add_usage(reply.usage) for every reply.
+        # - The usage of every reply is summed; it rides on the ExchangeEntry, which is where the State adds it.
         # - If _structured.parse_reply(reply.text, returns) raises ValueError: append that reply (text only, so
         #   no tool_use without a result goes into the request) and Message.user(_structured.retry_text(err)),
         #   then ask again, up to retries more times.
-        # - Success: state._record_ask(prompt, value). Failure: state._record_ask(prompt, None), then
+        # - Success: state._record_ask(prompt, value, usage). Failure: state._record_ask(prompt, None, usage), then
         #   OutputError with the last ValueError as __cause__.
-        # - Model exceptions propagate as is (the context was not changed, so there is nothing to roll back).
+        # - A model exception propagates as is. The messages did not change, so there is nothing to take back; if
+        #   an earlier try of this ask already cost tokens, they are recorded with answer None (steps.throw).
         # The steps live in _ask_steps, shared with aask.
         check_sync_call("ask")
         self._mcp_ensure()
@@ -741,7 +762,11 @@ class Agent:
         steps = self._ask_steps(state, prompt, returns, retries, reporter, "ask")
         request = next(steps)
         while True:
-            reply = self._model.respond(request, on_text, on_event)
+            try:
+                reply = self._model.respond(request, on_text, on_event)
+            except BaseException as e:
+                steps.throw(e)  # records what was spent, then raises e again
+                raise
             try:
                 request = steps.send(reply)
             except StopIteration as done:
@@ -756,7 +781,11 @@ class Agent:
         steps = self._ask_steps(state, prompt, returns, retries, reporter, "aask")
         request = next(steps)
         while True:
-            reply = await self._model.arespond(request, on_text, on_event)
+            try:
+                reply = await self._model.arespond(request, on_text, on_event)
+            except BaseException as e:
+                steps.throw(e)
+                raise
             try:
                 request = steps.send(reply)
             except StopIteration as done:
@@ -800,9 +829,11 @@ class Agent:
         return await self._aask_human(state, prompt, returns, "aask_human")
 
     def compact(self, state: State, instructions: str | None = None) -> None:
-        """Asks the model to summarize the context, then replaces the context with the task and that summary.
+        """Asks the model to summarize the messages, then replaces them with the first user message and that summary.
 
-        ``state.history`` keeps everything. If anything fails, the context is left unchanged.
+        It is the same change as ``state.compact(summary)`` with the model's summary, and the usage of the
+        request is added to ``state.usage``. Messages added while the model was writing the summary stay after it.
+        ``state.history`` keeps everything. If anything fails, the messages are left unchanged.
         In a loop, ``compact_if_full`` calls this only when the context is getting full.
 
         Args:
@@ -810,15 +841,18 @@ class Agent:
             instructions: What the summary should keep, for example ``"Keep file paths and failing tests"``.
 
         Raises:
-            ValueError: The State still has tool calls waiting for results, or belongs to another Agent.
+            ValueError: The State still has tool calls waiting for results, or another compaction of it is
+                under way.
             OutputError: The model returned an empty summary.
             ProviderError: The model provider failed.
         """
-        # 1. _begin_compact: state._claim(...); state._begin_compact()
-        # 2. reply = model.compact(mark_cache(Request(system, state.context, all specs, tool_choice="none")),
+        # 1. _begin_compact: state._attach(self); state._begin_compact() (starts counting the messages add_message
+        #    puts in while the model works)
+        # 2. reply = model.compact(mark_cache(Request(system, state.messages, all specs, tool_choice="none")),
         #    instructions, on_event)
-        # 3. _apply_summary: state._add_usage(reply.usage); empty summary -> OutputError with the context
-        #    unchanged; otherwise state._replace_context(reply.text, "compact") (records, on_context_change)
+        # 3. _apply_summary: empty summary -> OutputError with the messages unchanged; otherwise
+        #    state._compact_done(summary, reply.usage) (records ContextChange(kind="compact", kept=, usage=) and
+        #    tells the Reporter)
         # 4. state._end_compact(), also when a step above raised
         # 5. With a store: save (_save_after if a step above raised)
         check_sync_call("compact", " (in a loop: await acompact_if_full(agent, state))")
@@ -853,36 +887,35 @@ class Agent:
             raise
         await self._asave(state)
 
-    def save(self, state: State) -> None:
-        """Saves what the store does not have yet. For changes made outside the Agent's own steps.
+    def context_tokens(self, state: State) -> int:
+        """Estimated size of what the model would receive next, in tokens: the State's messages plus this Agent's
+        system prompt and tool definitions.
 
-        ``run``, ``think``, ``use_tools`` and ``compact`` save by themselves. Call this to save something else
-        right away, such as the person's next message in a chat loop, before the next ``run``.
-
-        Args:
-            state: The State to save.
-
-        Raises:
-            ValueError: The Agent has no store, the State is saved in another store, or it is new and the store
-                already has a State with its id.
-            TypeError: A value in the State cannot be saved as JSON, or the store only works asynchronously.
+        An estimate: it starts from the token count the provider reported for the last reply and adds a
+        character-count guess for the messages after it.
 
         Example:
             ```python
-            state.add_user_message(input("> "))
-            agent.save(state)
+            print(f"{agent.context_tokens(state):,} tokens")
             ```
         """
-        check_sync_call("save")
-        _check_state(state, "save")
-        self._need_store("save")
-        self._save(state)
+        _check_state(state, "context_tokens")
+        return _tokens.context_tokens(state.messages, estimate_overhead_tokens(self._system, self._specs(None)))
 
-    async def asave(self, state: State) -> None:
-        """The async version of ``save``."""
-        _check_state(state, "asave")
-        self._need_store("asave")
-        await self._asave(state)
+    def context_used(self, state: State) -> float:
+        """The fraction of this Agent's model's context window that ``context_tokens(state)`` fills. Can go above
+        1.0. ``compact_if_full`` compares it with its ``at``.
+
+        Example:
+            ```python
+            if agent.context_used(state) > 0.8:
+                agent.compact(state)
+            ```
+        """
+        window = self._model.context_window
+        if not window or window <= 0:
+            return 0.0
+        return self.context_tokens(state) / window
 
     def copy(self, **changes: Any) -> Agent:
         """Returns a new Agent with some settings changed. The original Agent does not change.
@@ -944,44 +977,59 @@ class Agent:
 
     # ------------------------------------------------------------ steps shared by the sync and async versions
 
-    def _start_run(self, task: str | State) -> State:
-        """Step 1 of ``run``: the State to run, checked and prepared. Warns with ``ResumeWarning`` if the State
-        was saved by a different Agent."""
-        if isinstance(task, str):
-            state = State(task)
-        elif isinstance(task, State):
-            state = task
+    def _start_run(self, prompt_or_state: str | State, method: str) -> State:
+        """Step 1 of ``run``: the State to run, checked, compared with the Agent that last ran it (``ResumeWarning``)
+        and started (``state._start_run``: ``RunStartEntry``, and the one-run-at-a-time flag, which the caller clears
+        with ``state._end_run()`` in a ``finally``)."""
+        example = (
+            'agent.run("Find the bug in this repo")  # or\n'
+            'state = State(messages=[Message.user("Find the bug in this repo")])\n'
+            "answer = agent.run(state)"
+        )
+        if isinstance(prompt_or_state, str):
+            if not prompt_or_state.strip():
+                raise ValueError(
+                    fix_message(
+                        f"{method}() got an empty prompt (got: {prompt_or_state!r}). Providers reject empty messages",
+                        "Pass the task as a sentence",
+                        example,
+                    )
+                )
+            state = State(messages=[Message.user(prompt_or_state)])
+        elif isinstance(prompt_or_state, State):
+            state = prompt_or_state
         else:
             raise TypeError(
                 fix_message(
-                    f"run() takes a task string or a State (got: {task!r})",
-                    "agent.run(\"...\") or agent.run(State(\"...\"))",
-                    'state = State("Find the bug in this repo")\nanswer = agent.run(state)',
+                    f"{method}() takes a prompt string or a State (got: {prompt_or_state!r})",
+                    "Pass the text, or a State holding the messages",
+                    example,
                 )
             )
-        if state.is_finished():
+        if state.finished:
             raise ValueError(
                 fix_message(
-                    "Cannot run() again with a State that was finish()ed",
-                    "Create a new State and pass that",
-                    'agent.run(State("Next task"))',
+                    f"Cannot {method}() a State that was finish()ed",
+                    "Create a new State and pass that, or state.fork() to start again from this one's content",
+                    'agent.run("Next task")',
                 )
             )
 
-        state._clear_stop()
-
+        info = self._agent_info_now()
         saved = state._take_saved_agent()
-        if saved is not None:
-            changes = _resume_changes(saved, self._summary())
-            if changes:
-                try:
+        try:
+            if saved is not None:
+                changes = _resume_changes(saved, info)
+                if changes:
                     # stacklevel 3: the user's run()/arun() call (warn <- _start_run <- run <- caller).
                     warnings.warn(ResumeWarning(_describe_changes(changes), changes), stacklevel=3)
-                except BaseException:
-                    # A warnings filter turned it into an exception: the run did not start, so the next run
-                    # compares again.
-                    state._set_saved_agent(saved)
-                    raise
+            state._start_run(self, info)
+        except BaseException:
+            # A warnings filter turned the warning into an exception, or the State is being run already: the run did
+            # not start, so the next run compares again.
+            if saved is not None:
+                state._set_saved_agent(saved)
+            raise
         return state
 
     def _check_permissions(self, method: str) -> None:
@@ -1020,39 +1068,22 @@ class Agent:
                     )
                 )
 
-    def _note_window(self, state: State) -> None:
-        """Records the context window size so context_used means something even before the first turn (the owner
-        is not set). After connecting, so MCP tools count toward the overhead."""
-        state._note_window(
-            self,
-            context_window=self._model.context_window,
-            overhead_tokens=estimate_overhead_tokens(self._system, self._specs(None)),
-        )
-
     # ------------------------------------------------------------ saving to the store
 
     def _save(self, state: State) -> None:
-        """A save point: writes what the store does not have yet. Nothing without a store, or when the store has
-        everything. The State is marked saved only after the write returns."""
+        """A save point: writes what the store does not have yet (``store.save``). Nothing without a store, or when
+        the store has everything. The State is marked saved only after the write returns."""
         store = self._store
         if store is None:
             return
-        batch = state._unsaved(store, self._store_summary())
-        if batch is None:
-            return
-        store.write(state.id, batch.entries, batch.snapshot, create=batch.create)
-        state._mark_saved(store, batch)
+        store.save(state)
 
     async def _asave(self, state: State) -> None:
         """The async version of ``_save``."""
         store = self._store
         if store is None:
             return
-        batch = state._unsaved(store, self._store_summary())
-        if batch is None:
-            return
-        await store.awrite(state.id, batch.entries, batch.snapshot, create=batch.create)
-        state._mark_saved(store, batch)
+        await store.asave(state)
 
     def _save_after(self, state: State, error: BaseException) -> None:
         """A save point while ``error`` is being raised (called in the ``except`` block that re-raises it).
@@ -1100,22 +1131,6 @@ class Agent:
 
         return save
 
-    def _store_summary(self) -> dict[str, Any]:
-        """``_summary()`` for snapshots, computed once."""
-        if self._saved_summary is None:
-            self._saved_summary = self._summary()
-        return self._saved_summary
-
-    def _need_store(self, method: str) -> None:
-        if self._store is None:
-            raise ValueError(
-                fix_message(
-                    f"{method}() needs a store, and this Agent has none",
-                    "create the Agent with store=",
-                    'agent = Agent(model=..., store=FileStore(".agent-runs"))',
-                )
-            )
-
     def _async_loop(self) -> Any:
         """The loop ``arun`` awaits: this Agent's loop if async, ``adefault_loop`` for the default loop."""
         from .loop import adefault_loop, default_loop
@@ -1130,28 +1145,24 @@ class Agent:
                 "Write the loop as async def and await the agent.a* methods and async blocks in it "
                 "(the async default loop is adefault_loop; adefault_loop.copy(limit=...) changes its limit), "
                 "or call run() instead",
-                "@loop(until=State.is_answered, limit=50)\n"
+                "@loop(until=waiting_for_user, limit=50)\n"
                 "async def coding(agent: Agent, state: State):\n"
                 "    await acompact_if_full(agent, state)\n"
                 "    await agent.athink(state)\n"
-                "    if state.wants_tools():\n"
+                "    if state.pending_calls:\n"
                 "        await agent.ause_tools(state)",
             )
         )
 
     def _prepare_think(self, state: State, tools: Iterable[Any] | None, method: str) -> tuple[ToolSpec, ...]:
-        """Step 1 of ``think`` up to ``state._begin_think``: the specs to show."""
+        """Step 1 of ``think`` up to ``state._begin_think``: the specs to show. Links the State to this Agent."""
         _check_state(state, method)
         specs = self._specs(tools)
-        state._claim(
-            self,
-            context_window=self._model.context_window,
-            overhead_tokens=estimate_overhead_tokens(self._system, specs),
-        )
+        state._attach(self)
         return specs
 
     def _think_request(self, state: State, specs: tuple[ToolSpec, ...], reporter: Reporter | None) -> Request:
-        request = self._model.mark_cache(Request(self._system, state.context, specs))
+        request = self._model.mark_cache(Request(self._system, state.messages, specs))
         if reporter is not None:
             reporter.on_think_start(state)
         return request
@@ -1166,8 +1177,7 @@ class Agent:
         """The checks of ``use_tools``; returns the calls to run."""
         _check_state(state, method)
         state._ensure_open(method)
-        # Keep the overhead as computed for the tools the last think showed.
-        state._claim(self, context_window=self._model.context_window)
+        state._attach(self)
         return state.pending_calls
 
     def _ask_steps(
@@ -1200,12 +1210,18 @@ class Agent:
         messages.append(Message.user(_structured.question_text(prompt, returns)))
 
         last_error: ValueError | None = None
+        spent: Usage | None = None
         for _ in range(retries + 1):
             request = self._model.mark_cache(Request(self._system, tuple(messages), specs, tool_choice="none"))
             if reporter is not None:
                 reporter.on_think_start(state)
-            reply = yield request
-            state._add_usage(reply.usage)
+            try:
+                reply = yield request
+            except BaseException:
+                if spent is not None:
+                    state._record_ask(prompt, None, spent)
+                raise
+            spent = reply.usage if spent is None else spent + reply.usage
             if reporter is not None:
                 reporter.on_think_end(state, reply)
             try:
@@ -1215,10 +1231,10 @@ class Agent:
                 messages.append(Message("assistant", (TextBlock(reply.text or "(empty reply)"),)))
                 messages.append(Message.user(_structured.retry_text(err)))
                 continue
-            state._record_ask(prompt, value)
+            state._record_ask(prompt, value, spent)
             return value
 
-        state._record_ask(prompt, None)
+        state._record_ask(prompt, None, spent)
         raise OutputError(
             fix_message(
                 f"All {retries + 1} answers from {method}() failed to match returns={_type_name(returns)}: "
@@ -1284,30 +1300,25 @@ class Agent:
                     'agent.compact(state, instructions="Keep architecture decisions and remaining bugs")',
                 )
             )
-        specs = self._specs(None)
-        state._claim(
-            self,
-            context_window=self._model.context_window,
-            overhead_tokens=estimate_overhead_tokens(self._system, specs),
-        )
+        state._attach(self)
         state._begin_compact()
 
     def _compact_request(self, state: State) -> Request:
-        return self._model.mark_cache(Request(self._system, state.context, self._specs(None), tool_choice="none"))
+        return self._model.mark_cache(Request(self._system, state.messages, self._specs(None), tool_choice="none"))
 
     @staticmethod
     def _apply_summary(state: State, reply: Reply) -> None:
-        """Steps 3 and 4 of ``compact``: an empty summary leaves the context unchanged and raises ``OutputError``."""
-        state._add_usage(reply.usage)
+        """Steps 3 and 4 of ``compact``: an empty summary leaves the messages unchanged and raises ``OutputError``.
+        Otherwise the summary is recorded with the usage of the request that wrote it."""
         summary = reply.text.strip()
         if not summary:
             raise OutputError(
                 fix_message(
-                    "compact() got an empty summary, so the context was not changed",
-                    "Call it again, or get a summary with agent.ask(state, ...) and use state.start_from(summary)",
+                    "compact() got an empty summary, so the messages were not changed",
+                    "Call it again, or get a summary with agent.ask(state, ...) and use state.compact(summary)",
                 )
             )
-        state._replace_context(summary, "compact")
+        state._compact_done(summary, reply.usage)
 
     # ------------------------------------------------------------ internal
 
@@ -1435,22 +1446,28 @@ class Agent:
 
         return on_event
 
-    def _summary(self) -> dict[str, Any]:
-        """What a saved State records about the Agent that saved it, compared when the State is resumed
-        (``_start_run``). Plain JSON values only. Needs no MCP connection."""
+    def _model_name(self) -> str:
+        """``provider/name`` of this Agent's model (``ModelRequestEntry`` and ``AgentInfo`` record it)."""
         model = self._model
-        return {
-            "name": self._name,
-            "model": f"{model.provider}/{model.name}" if model.provider else model.name,
-            # A hash, not the text: enough to see that the prompt changed, without copying long prompts or
-            # internal instructions into storage.
-            "system_sha256": (
-                hashlib.sha256(self._system.encode("utf-8")).hexdigest() if self._system is not None else None
-            ),
-            # Only this Agent's own tools (MCP tools are known only while connected); servers are listed by name.
-            "tools": sorted(self._tool_by_name),
-            "mcp_servers": sorted(use.server.name for use in self._mcp_uses),
-        }
+        return f"{model.provider}/{model.name}" if model.provider else model.name
+
+    def _agent_info_now(self) -> AgentInfo:
+        """What a run records about this Agent (``RunStartEntry``), compared when a loaded State is resumed
+        (``_start_run``). Needs no MCP connection."""
+        if self._agent_info is None:
+            self._agent_info = AgentInfo(
+                name=self._name,
+                model=self._model_name(),
+                # A hash, not the text: enough to see that the prompt changed, without copying long prompts or
+                # internal instructions into storage.
+                system_sha256=(
+                    hashlib.sha256(self._system.encode("utf-8")).hexdigest() if self._system is not None else None
+                ),
+                # Only this Agent's own tools (MCP tools are known only while connected); servers are listed by name.
+                tools=tuple(sorted(self._tool_by_name)),
+                mcp_servers=tuple(sorted(use.server.name for use in self._mcp_uses)),
+            )
+        return self._agent_info
 
     def _tool_map(self) -> dict[str, Any]:
         """Name → Tool: the ``collect_tools`` result, then the connected MCP servers' tools."""
@@ -1560,24 +1577,19 @@ def _add_mcp(uses: dict[str, _MCPUse], item: MCP | MCPToolRef) -> None:
     use.add(item)
 
 
-#: Keys of ``Agent._summary`` that hold lists of names. Their changes are shown as removed and added names.
-_SUMMARY_LISTS = ("tools", "mcp_servers")
+#: Keys of ``AgentInfo`` that hold lists of names. Their changes are shown as removed and added names.
+_INFO_LISTS = ("tools", "mcp_servers")
+#: The ``AgentInfo`` fields a resume compares.
+_INFO_KEYS = ("name", "model", "system_sha256", "tools", "mcp_servers")
 
 
-def _resume_changes(saved: dict[str, Any], current: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
-    """``{key: (saved, current)}`` for each ``Agent._summary`` key that differs. A key missing from ``saved`` is
-    not compared, so an older or partial summary does not warn."""
+def _resume_changes(saved: AgentInfo, current: AgentInfo) -> dict[str, tuple[Any, Any]]:
+    """``{key: (saved, current)}`` for each ``AgentInfo`` field that differs. Tools and servers compare as sets."""
     changes: dict[str, tuple[Any, Any]] = {}
-    if not isinstance(saved, dict):
-        return changes
-    for key, now in current.items():
-        if key not in saved:
-            continue
-        before = saved[key]
-        if key in _SUMMARY_LISTS and _is_name_list(before):
-            same = set(before) == set(now)
-        else:
-            same = before == now
+    for key in _INFO_KEYS:
+        before = getattr(saved, key)
+        now = getattr(current, key)
+        same = set(before) == set(now) if key in _INFO_LISTS else before == now
         if not same:
             changes[key] = (before, now)
     return changes
@@ -1590,7 +1602,7 @@ def _describe_changes(changes: dict[str, tuple[Any, Any]]) -> str:
     for key, (before, now) in changes.items():
         if key == "system_sha256":
             parts.append("system prompt changed")
-        elif key in _SUMMARY_LISTS and _is_name_list(before):
+        elif key in _INFO_LISTS:
             moves = []
             removed = [name for name in before if name not in now]
             added = [name for name in now if name not in before]
@@ -1615,11 +1627,6 @@ def _note_failed_save(error: BaseException, failure: Exception) -> None:
     note = f"saving the state also failed: {type(failure).__name__}: {failure}"
     if note not in getattr(error, "__notes__", ()):  # think and then run both try to save
         error.add_note(note)
-
-
-def _is_name_list(value: Any) -> bool:
-    """A saved summary comes from storage, so a list of names is checked before it is compared as a set."""
-    return isinstance(value, list) and all(isinstance(name, str) for name in value)
 
 
 def _or_none(value: Any) -> str:

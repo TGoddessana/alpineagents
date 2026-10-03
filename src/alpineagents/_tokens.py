@@ -1,4 +1,4 @@
-"""Context size estimation. The only rule the core uses: State (``context_tokens``) calls it directly, and the
+"""Context size estimation. The only rule the core uses: the Agent (``context_tokens``) calls it directly, and the
 default Model ``count_tokens`` (a utility the core never calls) shares it.
 
 Rule (the default ``count_tokens`` implementation): take the last message whose API usage is known
@@ -34,6 +34,8 @@ def estimate_text_tokens(text: str) -> int:
 def _block_text(block: object) -> str:
     if isinstance(block, TextBlock):
         return block.text
+    if isinstance(block, Image):
+        return ""  # counted by IMAGE_TOKENS, not by the characters of its repr
     if isinstance(block, ToolCall):
         return block.name + json.dumps(block.args, ensure_ascii=False, default=str)
     if isinstance(block, ToolResultBlock):
@@ -46,6 +48,8 @@ def _block_text(block: object) -> str:
 
 
 def _image_count(block: object) -> int:
+    if isinstance(block, Image):  # an image in a user message
+        return 1
     if isinstance(block, ToolResultBlock) and not isinstance(block.content, str):
         return sum(isinstance(b, Image) for b in block.content)
     return 0

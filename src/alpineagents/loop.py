@@ -12,7 +12,6 @@ import functools
 import inspect
 import warnings
 from collections.abc import Callable
-from types import MethodType
 from typing import TYPE_CHECKING, Any, cast
 
 from ._async import ASYNC_RUN, is_async_callable
@@ -32,16 +31,38 @@ Condition = Callable[[State], bool]
 #: them, an outer loop too. An until/limit stop in state.stopped is a nested loop's, and ends only that loop.
 _DECIDED_BY_THE_RUN = (StoppedByFinish, StoppedByPermission)
 
-_LOOP_EXAMPLE = "@loop(until=State.is_answered, limit=50)"
+# An until function is the user's own: it takes the State and says whether to stop.
+_UNTIL_EXAMPLE = (
+    "def waiting_for_user(state: State) -> bool:\n"
+    "    if state.pending_calls or not state.messages:\n"
+    "        return False\n"
+    "    last = state.messages[-1]\n"
+    '    return last.role == "assistant" and not last.tool_calls\n'
+    "\n"
+)
+
+_LOOP_EXAMPLE = _UNTIL_EXAMPLE + "@loop(until=waiting_for_user, limit=50)"
 
 _ASYNC_LOOP_EXAMPLE = (
-    "@loop(until=State.is_answered, limit=50)\n"
+    "@loop(until=waiting_for_user, limit=50)\n"
     "async def coding(agent: Agent, state: State):\n"
     "    await acompact_if_full(agent, state)\n"
     "    await agent.athink(state)\n"
-    "    if state.wants_tools():\n"
+    "    if state.pending_calls:\n"
     "        await agent.ause_tools(state)"
 )
+
+
+def is_answered(state: State) -> bool:
+    """The default loops' ``until``: the last message is the model's reply without tool calls, and nothing waits for
+    a tool result. Not exported. Its name is what ``StoppedByUntil("is_answered")`` and ``str(state.stopped)`` show.
+
+    Reads one snapshot, so the three checks see the same State even while another thread adds a message."""
+    snap = state.snapshot()
+    if snap.pending_calls or not snap.messages:
+        return False
+    last = snap.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
 
 
 def _needs_until_and_limit() -> TypeError:
@@ -60,13 +81,15 @@ class Loop:
 
     Before every turn it checks, in order:
 
-    1. ``state.stopped`` already set by ``state.finish()`` (``StoppedByFinish()``) or by a permission's
+    1. ``state.stopped`` already set by ``state.finish()`` (``StoppedByFinish``) or by a permission's
        ``Denied(..., stop=True)`` (``StoppedByPermission(call, ...)``): stops and keeps it
     2. each ``until`` function: stops with ``state.stopped == StoppedByUntil(name)``, the function's name
     3. the turn count against ``limit``: stops with ``state.stopped == StoppedByLimit(limit)``
 
-    Each call counts turns from zero. A nested loop's ``until``/``limit`` stop ends only that loop: the outer loop
-    checks its own ``until`` and ``limit`` and, if it goes on, ``state.stopped`` goes back to ``None``. Exceptions from the body or the ``until`` functions propagate as is.
+    A stop the loop decides (2 and 3) is recorded in the history as a ``StopEntry``. Each call counts turns from
+    zero. A nested loop's ``until``/``limit`` stop ends only that loop: the outer loop checks its own ``until`` and
+    ``limit`` and, if it goes on, records ``StopEntry(None)``, so ``state.stopped`` goes back to ``None``.
+    Exceptions from the body or the ``until`` functions propagate as is.
     An async loop (``async def`` body) returns a coroutine that does the same; its ``until`` functions stay
     plain functions.
     """
@@ -88,13 +111,12 @@ class Loop:
         Args:
             body: The one-turn function ``(agent, state) -> None``, or an ``async def`` one.
             until: A ``State -> bool`` function or a list of them. Pass the function itself, e.g.
-                ``State.is_answered``. A lambda works but leaves no useful name in ``state.stopped``, so it warns.
+                ``waiting_for_user``. A lambda works but leaves no useful name in ``state.stopped``, so it warns.
             limit: The most turns, an integer of 1 or more.
 
         Raises:
-            TypeError: ``until`` or ``limit`` is missing, ``until`` got a call result (``state.is_answered()``)
-                or a bound method (``state.is_answered``), an ``until`` item is not callable, or ``limit`` is not
-                an integer.
+            TypeError: ``until`` or ``limit`` is missing, ``until`` got a call result (``waiting_for_user(state)``),
+                an ``until`` item is not callable, or ``limit`` is not an integer.
             ValueError: ``limit`` is less than 1.
         """
         if until is None or limit is None:
@@ -108,14 +130,6 @@ class Loop:
                     fix_message(
                         "until got the result of a call (a bool)",
                         "pass the function itself, without parentheses",
-                        _LOOP_EXAMPLE,
-                    )
-                )
-            if isinstance(item, MethodType) and isinstance(item.__self__, State):
-                raise TypeError(
-                    fix_message(
-                        "until got a method bound to a State instance",
-                        "pass the unbound function itself",
                         _LOOP_EXAMPLE,
                     )
                 )
@@ -167,13 +181,13 @@ class Loop:
 
             count = 0
             while True:
-                if state.stopped is StoppedByFinish/StoppedByPermission (or state.is_finished()):  stop(it)
+                if state.stopped is StoppedByFinish/StoppedByPermission (or state.finished):  stop(it)
                 for f in until:           if f(state): stop(StoppedByUntil(f.__name__))
                 if count >= limit:        stop(StoppedByLimit(limit))
-                if state.stopped is set (a nested loop's until/limit): state._clear_stop()
+                if state.stopped is set (a nested loop's until/limit): state._record_stop(None)
                 result = body(agent, state); count += 1
                 if result is not None:    TypeError (return value is ignored; set the answer with state.finish(answer))
-            stop(stopped) = state._set_stopped(stopped), then return state.answer
+            stop(stopped) = StopEntry(stopped) unless state.stopped already is it, then return state.answer
 
         An async loop returns a coroutine doing the same with ``await body(agent, state)`` (``until`` functions
         stay plain functions). Exceptions raised by the body or condition functions propagate as is.
@@ -215,12 +229,12 @@ class Loop:
 
     def _stop_reason(self, state: State, count: int) -> Stopped | None:
         """Checked before every turn, in order: a stop already decided (``finish()`` or a permission's
-        ``stop=True``, both set ``state.stopped`` right away), the first true ``until`` function, the limit.
-        Going on after a nested loop stopped on its own ``until``/limit clears that stale reason."""
+        ``stop=True``, both record a ``StopEntry`` right away), the first true ``until`` function, the limit.
+        Going on after a nested loop stopped on its own ``until``/limit clears that stale reason (``StopEntry(None)``)."""
         stopped = state.stopped
         if isinstance(stopped, _DECIDED_BY_THE_RUN):
             return stopped
-        if state.is_finished():
+        if state.finished:
             # finish() sets stopped, but a run that raised cleared it (the State stays finished).
             return StoppedByFinish()
         for condition in self.until:
@@ -229,7 +243,7 @@ class Loop:
         if count >= self.limit:
             return StoppedByLimit(self.limit)
         if stopped is not None:
-            state._clear_stop()
+            state._record_stop(None)
         return None
 
     def _check_result(self, result: Any) -> None:
@@ -245,7 +259,9 @@ class Loop:
         return getattr(self.body, "__name__", repr(self.body))
 
     def _stop(self, state: State, stopped: Stopped) -> Any:
-        state._set_stopped(stopped)
+        # A stop the run decided is in state.stopped already; recording it again would only add an entry.
+        if state.stopped != stopped:
+            state._record_stop(stopped)
         return state.answer
 
     def copy(self, *, until: Any = ..., limit: Any = ...) -> Loop:
@@ -280,11 +296,17 @@ def loop(fn: Any = None, /, *, until: Any = None, limit: Any = None) -> Any:
 
     Example:
         ```python
-        @loop(until=State.is_answered, limit=50)
+        def waiting_for_user(state: State) -> bool:
+            if state.pending_calls or not state.messages:
+                return False
+            last = state.messages[-1]
+            return last.role == "assistant" and not last.tool_calls
+
+        @loop(until=waiting_for_user, limit=50)
         def coding(agent: Agent, state: State):
             compact_if_full(agent, state)
             agent.think(state)
-            if state.wants_tools():
+            if state.pending_calls:
                 agent.use_tools(state)
         ```
 
@@ -320,24 +342,24 @@ def _condition_name(condition: Any) -> str:
     return getattr(condition, "__name__", None) or type(condition).__name__
 
 
-@loop(until=State.is_answered, limit=50)
+@loop(until=is_answered, limit=50)
 def default_loop(agent: Agent, state: State):
     """The loop ``agent.run`` uses when the Agent has no loop of its own.
 
-    Each turn compacts the context if it is over 60% full, asks the model, and runs the tools it asked for.
-    Stops when the model answers without tool calls (``State.is_answered``) or after 50 turns. Copy it as a
-    starting point for your own loop.
+    Each turn compacts the messages if the context is over 60% full, asks the model, and runs the tools it asked
+    for. Stops when the model answers without tool calls (``stopped by is_answered``) or after 50 turns. Copy it as
+    a starting point for your own loop.
     """
     compact_if_full(agent, state)
     agent.think(state)
-    if state.wants_tools():
+    if state.pending_calls:
         agent.use_tools(state)
 
 
-@loop(until=State.is_answered, limit=50)
+@loop(until=is_answered, limit=50)
 async def adefault_loop(agent: Agent, state: State):
     """The async version of ``default_loop``, used by ``agent.arun`` when the Agent has no loop of its own."""
     await acompact_if_full(agent, state)
     await agent.athink(state)
-    if state.wants_tools():
+    if state.pending_calls:
         await agent.ause_tools(state)

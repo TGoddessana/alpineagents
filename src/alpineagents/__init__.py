@@ -21,26 +21,30 @@ from .loop import Loop, adefault_loop, default_loop, loop
 from .mcp_tools import MCP, MCPTool
 from .models import Anthropic, Model, OpenAICompatible
 from .reporter import Reporter
-from .state import State
-from .store import FileStore, SavedState, Store
+from .state import State, StateSnapshot
+from .store import FileStore, StateInfo, Store
 from .terminal import Terminal
 from .tool import FunctionTool, Hints, Tool, tool
 from .types import (
+    AgentInfo,
     ContextChange,
     ContextChangeEntry,
     ErrorEntry,
     ExchangeEntry,
+    ExtraDataEntry,
     HistoryEntry,
     Image,
     Message,
     MessageEntry,
     ModelEvent,
     ModelEventEntry,
-    NotRunEntry,
+    ModelReplyEntry,
+    ModelRequestEntry,
     Price,
     Reply,
-    ReplyEntry,
     Request,
+    RunStartEntry,
+    StopEntry,
     StoppedByFinish,
     StoppedByLimit,
     StoppedByPermission,
@@ -59,6 +63,7 @@ __all__ = [
     # Objects
     "Agent",
     "State",
+    "StateSnapshot",
     "loop",
     "Loop",
     "default_loop",
@@ -91,12 +96,15 @@ __all__ = [
     "ToolSpec",
     "HistoryEntry",
     "MessageEntry",
-    "ReplyEntry",
+    "ModelRequestEntry",
+    "ModelReplyEntry",
+    "ModelEventEntry",
     "ToolResultEntry",
-    "NotRunEntry",
     "ExchangeEntry",
     "ContextChangeEntry",
-    "ModelEventEntry",
+    "RunStartEntry",
+    "StopEntry",
+    "ExtraDataEntry",
     "ErrorEntry",
     "ContextChange",
     "ModelEvent",
@@ -106,7 +114,8 @@ __all__ = [
     "StoppedByLimit",
     "StoppedByFinish",
     "StoppedByPermission",
-    "SavedState",
+    "StateInfo",
+    "AgentInfo",
     "Image",
     # Errors
     "AlpineAgentsError",

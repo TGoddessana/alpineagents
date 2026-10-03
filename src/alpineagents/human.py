@@ -111,7 +111,7 @@ def parse_answer(answer: Any, returns: Any) -> Any:
     hint shown when asking again).
 
     - ``str``: the string with surrounding whitespace stripped. Asks again when empty (an empty answer cannot go
-      into ``state.add_user_message`` either; this way pressing just Enter in a chat loop does not stop the run)
+      into ``state.add_message(Message.user(...))`` either; this way pressing just Enter in a chat loop does not stop the run)
     - ``bool``: ``y/yes/true/1`` → True, ``n/no/false/0`` → False (case-insensitive)
     - ``Literal[...]``: the choice value, when the answer equals a choice (comparing as strings also works)
     """
