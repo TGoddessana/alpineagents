@@ -195,8 +195,18 @@ def test_tool_supports_the_documented_type_repertoire():
 
     props = rich.input_schema["properties"]
     assert set(props) == {
-        "text", "count", "ratio", "active", "mode", "color",
-        "tags", "meta", "note", "point", "address", "profile",
+        "text",
+        "count",
+        "ratio",
+        "active",
+        "mode",
+        "color",
+        "tags",
+        "meta",
+        "note",
+        "point",
+        "address",
+        "profile",
     }
 
 

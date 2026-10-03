@@ -312,8 +312,9 @@ async def test_a_loop_without_at_loop_stops_on_finish(use_async):
                 await agent.ause_tools(state)
         return state.answer
 
-    agent = make_agent([tool_call("submit", summary="all done"), "never asked"], tools=[submit],
-                       loop=aplain if use_async else plain)
+    agent = make_agent(
+        [tool_call("submit", summary="all done"), "never asked"], tools=[submit], loop=aplain if use_async else plain
+    )
     state = task()
     answer = await agent.arun(state) if use_async else agent.run(state)
     assert answer == "all done"

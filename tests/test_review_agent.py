@@ -147,7 +147,7 @@ except KeyboardInterrupt:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="sends SIGINT to its own process")
 def test_process_exits_promptly_after_ctrlc_during_blocked_sync_tool(tmp_path):
-    """"For a sync tool ... the framework closes the call without waiting": the program also exits without
+    """ "For a sync tool ... the framework closes the call without waiting": the program also exits without
     waiting for that tool."""
     child = tmp_path / "child.py"
     child.write_text(_CHILD.format(src=SRC))
@@ -183,7 +183,7 @@ def _done_job(call, result: str) -> _runner._Job:
 
 
 def test_finish_does_not_raise_when_deny_races_the_check():
-    """"If a finished call is no longer a pending call by then, its result is not recorded": the check and the
+    """ "If a finished call is no longer a pending call by then, its result is not recorded": the check and the
     record are one step (``_tool_result(..., if_pending=True)``), so another thread's denial cannot slip in
     between them. Whoever comes first closes the call; the other one records nothing and raises nothing."""
     for _ in range(25):
@@ -337,7 +337,7 @@ def _interrupt_right_after_submit(monkeypatch, started: threading.Event):
 
 
 def test_late_result_after_submit_interrupt_is_not_lost(monkeypatch):
-    """"If the result arrives later, it is kept in history and put into the context as [notice] ... right before the
+    """ "If the result arrives later, it is kept in history and put into the context as [notice] ... right before the
     next think": an interrupt that comes right after submit does not lose that call either."""
     started = threading.Event()
 
@@ -371,7 +371,7 @@ def test_late_result_after_submit_interrupt_is_not_lost(monkeypatch):
 
 
 def test_async_tool_is_cancelled_after_submit_interrupt(monkeypatch):
-    """"async def tools are cancelled": they are cancelled on an interrupt right after submit too."""
+    """ "async def tools are cancelled": they are cancelled on an interrupt right after submit too."""
     started = threading.Event()
     cancelled = threading.Event()
 

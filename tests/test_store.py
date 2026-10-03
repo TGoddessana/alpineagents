@@ -705,7 +705,9 @@ def test_load_refuses_a_folder_without_info(tmp_path):
 
 def test_load_refuses_entries_with_a_gap():
     store = MemoryStore()
-    entries = entry_dicts(MessageEntry(kind="user", content="a", turn=0), MessageEntry(kind="user", content="b", turn=0))
+    entries = entry_dicts(
+        MessageEntry(kind="user", content="a", turn=0), MessageEntry(kind="user", content="b", turn=0)
+    )
     entries[1]["seq"] = 2
     store.states["gap"] = Record(entries, an_info())
     with pytest.raises(ValueError, match="history entry 1 has seq 2"):

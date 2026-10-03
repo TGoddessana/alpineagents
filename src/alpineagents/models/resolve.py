@@ -121,9 +121,7 @@ def resolve_model(model: Any, **options: Any) -> Model:
     )
 
 
-def _build(
-    adapter: type[Anthropic] | type[OpenAICompatible], model: str, name: str, options: dict[str, Any]
-) -> Model:
+def _build(adapter: type[Anthropic] | type[OpenAICompatible], model: str, name: str, options: dict[str, Any]) -> Model:
     """``adapter(name, **options)``, after checking that ``adapter`` accepts every option name.
 
     ``model`` is the string as given, for the error message. The check runs before the call, so a ``TypeError``

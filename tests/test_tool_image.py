@@ -36,9 +36,7 @@ def make_agent(fake, tools, **settings):
 
 
 def result_block(state):
-    return next(
-        block for message in state.messages for block in message.content if isinstance(block, ToolResultBlock)
-    )
+    return next(block for message in state.messages for block in message.content if isinstance(block, ToolResultBlock))
 
 
 def result_entry(state):

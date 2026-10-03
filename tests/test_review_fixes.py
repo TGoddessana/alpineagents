@@ -118,7 +118,8 @@ def test_filestore_log_stays_readable_utf8(tmp_path):
 
 def test_message_list_content_becomes_a_tuple(tmp_path):
     state = State(
-        id="l2", messages=[Message("user", [TextBlock("hi")]), Message("assistant", [TextBlock("yo")])]  # pyright: ignore[reportArgumentType]
+        id="l2",
+        messages=[Message("user", [TextBlock("hi")]), Message("assistant", [TextBlock("yo")])],  # pyright: ignore[reportArgumentType]
     )
     assert isinstance(state.messages[0].content, tuple)
     store = FileStore(tmp_path)

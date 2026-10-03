@@ -240,8 +240,10 @@ class MCP:
                 await conn.stop.wait()
         except BaseException as e:
             if not ready.done():
-                error = e if isinstance(e, MCPConnectionError) else MCPConnectionError(
-                    f"Could not connect to MCP server {self.name!r} ({self!r}): {_describe(e)}"
+                error = (
+                    e
+                    if isinstance(e, MCPConnectionError)
+                    else MCPConnectionError(f"Could not connect to MCP server {self.name!r} ({self!r}): {_describe(e)}")
                 )
                 if error is not e:
                     error.__cause__ = e
@@ -487,8 +489,14 @@ def _is_transport_error(error: BaseException) -> bool:
         return getattr(error.error, "code", None) == CONNECTION_CLOSED
     return isinstance(
         error,
-        (OSError, EOFError, anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream,
-         httpx2.TransportError),
+        (
+            OSError,
+            EOFError,
+            anyio.ClosedResourceError,
+            anyio.BrokenResourceError,
+            anyio.EndOfStream,
+            httpx2.TransportError,
+        ),
     )
 
 

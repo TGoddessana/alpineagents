@@ -93,9 +93,10 @@ def _result_content(content: ToolResultContent) -> str | list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for block in content:
         if isinstance(block, Image):
-            out.append(
-                {"type": "image", "source": {"type": "base64", "media_type": block.media_type, "data": block.base64}}
-            )
+            out.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": block.media_type, "data": block.base64},
+            })
         elif block.text.strip():
             out.append({"type": "text", "text": block.text})
     return out
@@ -213,9 +214,7 @@ class Anthropic(Model):
         self._context_window = context_window
         self._api_key = api_key
         self._base_url = base_url
-        self.supports = (
-            frozenset(supports) if supports is not None else frozenset({"thinking", "cache", "vision"})
-        )
+        self.supports = frozenset(supports) if supports is not None else frozenset({"thinking", "cache", "vision"})
 
         if thinking is False:
             self._thinking: dict[str, Any] | None = None
@@ -261,9 +260,7 @@ class Anthropic(Model):
             self.cache = False
 
         self._sdk_client: Any = None
-        self._async_clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._async_clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = weakref.WeakKeyDictionary()
         self._client_lock = threading.Lock()
 
     @property
@@ -271,9 +268,7 @@ class Anthropic(Model):
         """Context window size in tokens, as passed to ``context_window=``."""
         return self._context_window
 
-    def respond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    def respond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """Sends one request as a stream and returns the reply.
 
         Text chunks go to ``on_text`` as they arrive. Thinking and other Anthropic-only blocks are kept as
@@ -303,9 +298,7 @@ class Anthropic(Model):
 
         return self._to_reply(message)
 
-    async def arespond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    async def arespond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """The async version of ``respond``, with the same reply and errors. Cancelling it closes the stream."""
         # Uses AsyncAnthropic, one client per event loop (see _async_client).
         client = self._async_client()
@@ -438,24 +431,20 @@ class Anthropic(Model):
                 # An image the user sent, in block order. (Only user messages hold them; Anthropic rejects an
                 # image in an assistant message, so one imported there is dropped.)
                 if message.role == "user":
-                    out.append(
-                        {
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": block.media_type, "data": block.base64},
-                        }
-                    )
+                    out.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": block.media_type, "data": block.base64},
+                    })
             elif isinstance(block, ToolCall):
                 # thaw: the SDK gets plain dicts, not the frozen containers a ToolCall holds.
                 out.append({"type": "tool_use", "id": block.id, "name": block.name, "input": thaw(block.args)})
             elif isinstance(block, ToolResultBlock):
-                out.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.call_id,
-                        "content": _result_content(block.content),
-                        "is_error": block.is_error,
-                    }
-                )
+                out.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.call_id,
+                    "content": _result_content(block.content),
+                    "is_error": block.is_error,
+                })
             elif isinstance(block, RawBlock):
                 if block.provider == self.provider:
                     out.append(thaw(block.data))

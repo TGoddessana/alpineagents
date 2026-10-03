@@ -76,7 +76,9 @@ def block(state) -> ToolResultBlock:
 def test_what_the_model_sees():
     ticket = Ticket()
     assert (ticket.spec.name, ticket.spec.description, ticket.spec.input_schema) == (
-        "create_ticket", "Create a ticket", TICKET_SCHEMA,
+        "create_ticket",
+        "Create a ticket",
+        TICKET_SCHEMA,
     )
     assert ticket.parallel and repr(ticket) == "Ticket('create_ticket')"
     assert (ticket.read_only, ticket.destructive, ticket.idempotent, ticket.open_world) == (False, True, False, True)

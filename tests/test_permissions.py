@@ -319,8 +319,11 @@ def test_every_call_is_checked_in_request_order_before_any_tool_runs():
             seen.append((call.name, [c.name for c in state.pending_calls], list(ran)))
             return None if call.name == "bash" else Allowed()
 
-    calls = [tool_call("read_file", path="a"), tool_call("bash", command="rm"), tool_call("write_file", path="b",
-                                                                                           content="x")]
+    calls = [
+        tool_call("read_file", path="a"),
+        tool_call("bash", command="rm"),
+        tool_call("write_file", path="b", content="x"),
+    ]
     with pytest.warns(PermissionWarning):
         make_agent([calls, "done"], [Look()]).run("Task")
     assert seen == [
@@ -604,11 +607,12 @@ def test_an_exception_from_hints_for_follows_the_permission_rules():
 
     with pytest.raises(ValueError, match="cannot tell") as e:
         make_agent([tool_call("shell", command="ls")], [AllowByReadOnly()], tools=[shell]).run("Task")
-    assert "exception raised in permission AllowByReadOnly() checking shell(command=\"ls\")" in e.value.__notes__
+    assert 'exception raised in permission AllowByReadOnly() checking shell(command="ls")' in e.value.__notes__
 
     state = State(messages=[Message.user("Task")])
-    agent = make_agent([tool_call("shell", command="ls"), "ok"], [AllowByReadOnly()],
-                       tools=[shell.copy(hints_for=refusing_hints)])
+    agent = make_agent(
+        [tool_call("shell", command="ls"), "ok"], [AllowByReadOnly()], tools=[shell.copy(hints_for=refusing_hints)]
+    )
     agent.run(state)
     assert results(state)[0].content == "cannot tell what this command does"
     assert ran == []
@@ -620,9 +624,7 @@ def test_an_exception_from_hints_for_follows_the_permission_rules():
 def test_decide_by_human_yes_runs_and_is_recorded_like_ask_human():
     human = FakeHuman(["yes"])
     state = State(messages=[Message.user("Task")])
-    make_agent(
-        [tool_call("write_file", path="a", content="x"), "done"], [DecideByHuman()], human=human
-    ).run(state)
+    make_agent([tool_call("write_file", path="a", content="x"), "done"], [DecideByHuman()], human=human).run(state)
     question = 'Run write_file(path="a", content="x")?'
     assert human.questions == [question]
     assert ran == ["write_file a"]
@@ -682,8 +684,9 @@ def test_decide_by_human_with_its_own_human():
     assert [h.kind for h in state.history].count("human") == 1  # still recorded
     # works with human=None on the Agent too
     ran.clear()
-    make_agent([tool_call("write_file", path="b", content="x"), "done"], [DecideByHuman(human=FakeHuman(["yes"]))],
-               human=None).run("Task")
+    make_agent(
+        [tool_call("write_file", path="b", content="x"), "done"], [DecideByHuman(human=FakeHuman(["yes"]))], human=None
+    ).run("Task")
     assert ran == ["write_file b"]
     assert repr(DecideByHuman(human=own)).startswith("DecideByHuman(human=")
 
@@ -730,9 +733,9 @@ class AsyncHuman(Human):
 async def test_decide_by_human_asks_asynchronously_in_arun():
     human = AsyncHuman(["yes"])
     state = State(messages=[Message.user("Task")])
-    await make_agent(
-        [tool_call("write_file", path="a", content="x"), "done"], [DecideByHuman()], human=human
-    ).arun(state)
+    await make_agent([tool_call("write_file", path="a", content="x"), "done"], [DecideByHuman()], human=human).arun(
+        state
+    )
     assert human.threads == [threading.get_ident()]  # awaited on the event loop, not on a worker thread
     assert ran == ["write_file a"]
     assert [h.content.answer for h in state.history if h.kind == "human"] == ["yes"]
@@ -823,9 +826,7 @@ def test_sync_run_with_decide_by_human_asking_an_async_only_human_fails_at_run_s
     fake = FakeModel(["never"])
     human = AsyncHuman(["yes"])
     permission = DecideByHuman(human=human) if own else DecideByHuman()
-    agent = Agent(
-        model=fake, tools=[write_file], permissions=[permission], reporter=None, human=None if own else human
-    )
+    agent = Agent(model=fake, tools=[write_file], permissions=[permission], reporter=None, human=None if own else human)
     with pytest.raises(TypeError, match="asks AsyncHuman, which answers only asynchronously") as e:
         agent.run("Task")
     assert "await agent.arun(" in str(e.value) and "aask_human" not in str(e.value)
@@ -837,8 +838,9 @@ def test_sync_run_with_a_decide_by_human_subclass_that_does_not_ask_is_not_check
         def check(self, state, call, tool):
             return Allowed()
 
-    make_agent([tool_call("write_file", path="a", content="x"), "done"], [NeverAsks()],
-               human=AsyncHuman([])).run("Task")
+    make_agent([tool_call("write_file", path="a", content="x"), "done"], [NeverAsks()], human=AsyncHuman([])).run(
+        "Task"
+    )
     assert ran == ["write_file a"]
 
 
@@ -885,9 +887,7 @@ def test_a_decide_by_human_subclass_that_changed_both_methods_still_asks_through
         async def acheck(self, state, call, tool):
             return await super().acheck(state, call, tool)
 
-    make_agent([tool_call("write_file", path="a", content="x"), "done"], [Both()], human=FakeHuman(["yes"])).run(
-        "Task"
-    )
+    make_agent([tool_call("write_file", path="a", content="x"), "done"], [Both()], human=FakeHuman(["yes"])).run("Task")
     assert ran == ["write_file a"]
 
 
@@ -947,10 +947,16 @@ def _assert_stopped_turn(state: State, spy: Spy, stopper: Stopper) -> None:
     assert not state.finished
     assert state.pending_calls == ()
     assert [(b.content, b.is_error) for b in results(state)] == [
-        (STOPPED_TURN, True), ("Stop right there", True), (STOPPED_TURN, True), (STOPPED_TURN, True),
+        (STOPPED_TURN, True),
+        ("Stop right there", True),
+        (STOPPED_TURN, True),
+        (STOPPED_TURN, True),
     ]
     assert kinds(state) == [
-        ("denied", "write_file"), ("cancelled", "read_file"), ("cancelled", "bash"), ("cancelled", "deploy"),
+        ("denied", "write_file"),
+        ("cancelled", "read_file"),
+        ("cancelled", "bash"),
+        ("cancelled", "deploy"),
     ]
     assert not any(e[0] == "start" for e in spy.events)
     denied = ToolOutcome(ToolOutcomeKind.DENIED, decided_by="Stopper()")
@@ -1002,8 +1008,9 @@ def test_a_deny_permission_can_stop_too():
             return Denied("Never deploy", stop=True) if call.name == "deploy" else None
 
     state = State(messages=[Message.user("Task")])
-    make_agent([[tool_call("deploy", target="prod"), tool_call("read_file", path="a")]], [Guard(),
-                                                                                           AllowByDefault()]).run(state)
+    make_agent(
+        [[tool_call("deploy", target="prod"), tool_call("read_file", path="a")]], [Guard(), AllowByDefault()]
+    ).run(state)
     assert ran == []
     assert isinstance(state.stopped, StoppedByPermission) and state.stopped.permission == "Guard()"
     assert kinds(state) == [("denied", "deploy"), ("cancelled", "read_file")]
@@ -1033,7 +1040,11 @@ def test_a_loop_without_at_loop_stops_on_a_permission_stop():
 
     fake = FakeModel([tool_call("write_file", path="a", content="x"), "ok"])
     agent = Agent(
-        model=fake, tools=[write_file], loop=plain, permissions=[DecideByHuman()], human=FakeHuman(["no"]),
+        model=fake,
+        tools=[write_file],
+        loop=plain,
+        permissions=[DecideByHuman()],
+        human=FakeHuman(["no"]),
         reporter=None,
     )
     state = State(messages=[Message.user("Task")])
@@ -1110,7 +1121,10 @@ def test_a_permission_stop_records_denied_cancelled_and_the_stop_as_one_block():
     tail = state.history[-5:]
     assert [e.kind for e in tail] == ["tool_result"] * 4 + ["stop"]
     assert [(e.call.name, str(e.outcome)) for e in tail[:4]] == [
-        ("write_file", "denied"), ("read_file", "cancelled"), ("bash", "cancelled"), ("deploy", "cancelled"),
+        ("write_file", "denied"),
+        ("read_file", "cancelled"),
+        ("bash", "cancelled"),
+        ("deploy", "cancelled"),
     ]
     assert tail[4].content == state.stopped == StoppedByPermission(first_reply(state).tool_calls[1], "Stopper()")
     assert [e.kind for e in state.history].count("stop") == 1
@@ -1140,7 +1154,10 @@ async def test_a_permission_stop_is_complete_when_the_reporter_hears_about_it(us
         (state.stopped, (), len(state.history))
     }
     assert [(name, kind) for name, kind, *_ in seen] == [
-        ("write_file", "denied"), ("read_file", "cancelled"), ("bash", "cancelled"), ("deploy", "cancelled"),
+        ("write_file", "denied"),
+        ("read_file", "cancelled"),
+        ("bash", "cancelled"),
+        ("deploy", "cancelled"),
     ]
 
 
@@ -1193,7 +1210,10 @@ async def test_finish_wins_over_a_permission_stop_and_the_turn_is_still_closed(u
         agent.run(state)
     # The deny and the cancellations are recorded (the turn must be closed) but the stop entry is not:
     assert [(e.call.name, str(e.outcome)) for e in state.history if e.kind == "tool_result"] == [
-        ("write_file", "denied"), ("read_file", "cancelled"), ("bash", "cancelled"), ("deploy", "cancelled"),
+        ("write_file", "denied"),
+        ("read_file", "cancelled"),
+        ("bash", "cancelled"),
+        ("deploy", "cancelled"),
     ]
     stops = [e.content for e in state.history if e.kind == "stop"]
     assert stops == [StoppedByFinish(answer={"summary": "done early"})]
@@ -1278,8 +1298,11 @@ async def test_tool_error_from_a_permission_denies_the_call_and_the_run_continue
 
 @pytest.mark.parametrize("use_async", [False, True])
 async def test_another_exception_from_a_permission_propagates_and_closes_the_calls(use_async):
-    calls = [tool_call("write_file", path="a", content="x"), tool_call("bash", command="ls"),
-             tool_call("read_file", path="b")]
+    calls = [
+        tool_call("write_file", path="a", content="x"),
+        tool_call("bash", command="ls"),
+        tool_call("read_file", path="b"),
+    ]
     permissions = [DenyByName(["write_file"]), Raising(RuntimeError("checker broke")), AllowByDefault()]
     agent = make_agent([calls, "never"], permissions)
     state = State(messages=[Message.user("Task")])
@@ -1291,7 +1314,9 @@ async def test_another_exception_from_a_permission_propagates_and_closes_the_cal
     assert 'exception raised in permission Raising() checking bash(command="ls")' in e.value.__notes__
     assert ran == []  # never treated as allowed, and nothing ran after it
     assert [b.content for b in results(state)] == [
-        "write_file is not allowed.", "(aborted: RuntimeError)", "(aborted: RuntimeError)"
+        "write_file is not allowed.",
+        "(aborted: RuntimeError)",
+        "(aborted: RuntimeError)",
     ]
     errors = [h for h in state.history if h.kind == "error"]
     assert len(errors) == 1 and errors[0].call is not None and errors[0].call.name == "bash"
@@ -1393,14 +1418,20 @@ async def test_a_decide_by_human_yes_is_saved_before_the_tool_runs(tmp_path, use
         await agent.arun(state)
     else:
         agent.run(state)
-    assert seen == [["context_change", "run_start", "model_request", "model_reply", "human"]]  # the approval reached the store before the tool started
+    assert seen == [
+        ["context_change", "run_start", "model_request", "model_reply", "human"]
+    ]  # the approval reached the store before the tool started
 
 
 def test_resume_after_a_stop_keeps_denied_and_cancelled(tmp_path):
     store = FileStore(tmp_path)
     fake = FakeModel([STOP_CALLS])
     agent = Agent(
-        model=fake, tools=[read_file, write_file, bash, deploy], permissions=[Stopper()], reporter=None, human=None,
+        model=fake,
+        tools=[read_file, write_file, bash, deploy],
+        permissions=[Stopper()],
+        reporter=None,
+        human=None,
         store=store,
     )
     live = State(messages=[Message.user("Task")], id="s1")

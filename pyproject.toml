@@ -57,6 +57,13 @@ docs = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/alpineagents"]
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+# Preview style keeps the hugged brackets the code and docs use, such as FakeModel([...]).
+preview = true
+
 [tool.ruff.lint.per-file-ignores]
 # Some docs examples continue the example before them on the same page, so they use names defined there.
 "docs_src/*" = ["F821"]

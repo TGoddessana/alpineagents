@@ -112,9 +112,7 @@ class FakeModel(Model):
         with self._lock:
             return len(self._replies) - self._index
 
-    def respond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    def respond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """Records ``request`` in ``requests`` and returns the next prepared reply.
 
         Each text block is passed to ``on_text`` once.
@@ -169,9 +167,7 @@ class FakeModel(Model):
 
         message = Message("assistant", blocks)
         input_tokens = self.count_tokens(request)
-        output_tokens = sum(
-            estimate_text_tokens(block.text) for block in blocks if isinstance(block, TextBlock)
-        )
+        output_tokens = sum(estimate_text_tokens(block.text) for block in blocks if isinstance(block, TextBlock))
         usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens, requests=1)
         usage = replace(usage, cost=self._cost(usage))
         stop_reason = "tool_use" if any(isinstance(b, ToolCall) for b in blocks) else "end_turn"
@@ -227,9 +223,7 @@ class FakeHuman(Human):
             self.questions.append(prompt)
             while True:
                 if self._index >= len(self._answers):
-                    raise RuntimeError(
-                        f"FakeHuman: ran out of prepared answers. Last question: {prompt!r}"
-                    )
+                    raise RuntimeError(f"FakeHuman: ran out of prepared answers. Last question: {prompt!r}")
                 answer = self._answers[self._index]
                 self._index += 1
                 try:

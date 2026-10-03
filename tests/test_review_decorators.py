@@ -202,12 +202,7 @@ def test_tool_with_typechecking_only_state_import(tmp_path):
 def test_unresolvable_other_hint_still_errors(tmp_path):
     mod_path = tmp_path / "review_tool_mod2.py"
     mod_path.write_text(
-        "from __future__ import annotations\n"
-        "from alpineagents import tool\n"
-        "\n"
-        "@tool\n"
-        "def f(x: Missing):\n"
-        "    return x\n"
+        "from __future__ import annotations\nfrom alpineagents import tool\n\n@tool\ndef f(x: Missing):\n    return x\n"
     )
     sys.path.insert(0, str(tmp_path))
     try:

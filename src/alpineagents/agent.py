@@ -57,7 +57,17 @@ DEFAULT: Any = _Default()
 
 #: Setting names ``copy`` accepts (same as the constructor arguments).
 SETTINGS = (
-    "model", "system", "tools", "skills", "loop", "reporter", "human", "store", "permissions", "name", "description",
+    "model",
+    "system",
+    "tools",
+    "skills",
+    "loop",
+    "reporter",
+    "human",
+    "store",
+    "permissions",
+    "name",
+    "description",
 )
 
 #: Notification methods a Reporter must have: every ``on_*`` the Reporter base class defines.
@@ -168,11 +178,17 @@ class Agent:
         #   each item must be a Permission object (a class is a TypeError).
         # - The original arguments are kept as given in _kwargs, for copy (including the DEFAULT marker).
         tools = _as_tuple(tools, "tools", "Agent(model=..., tools=[web_search])")
-        checks: tuple[Any, ...] | None = None if permissions is None else _as_tuple(
-            permissions, "permissions", "Agent(model=..., permissions=[AllowByReadOnly(), DecideByHuman()])"
+        checks: tuple[Any, ...] | None = (
+            None
+            if permissions is None
+            else _as_tuple(
+                permissions, "permissions", "Agent(model=..., permissions=[AllowByReadOnly(), DecideByHuman()])"
+            )
         )
-        skills = (skills,) if isinstance(skills, str) else _as_tuple(
-            skills, "skills", 'Agent(model=..., skills=["./skills"])'
+        skills = (
+            (skills,)
+            if isinstance(skills, str)
+            else _as_tuple(skills, "skills", 'Agent(model=..., skills=["./skills"])')
         )
         self._kwargs: dict[str, Any] = {
             "model": model,
@@ -193,7 +209,7 @@ class Agent:
                 raise TypeError(
                     fix_message(
                         f"{setting}= takes a string (got: {value!r})",
-                        f"Pass a string like {setting}=\"...\", or leave it out",
+                        f'Pass a string like {setting}="...", or leave it out',
                     )
                 )
 
@@ -206,9 +222,7 @@ class Agent:
         mcp_uses: dict[str, _MCPUse] = {}
         for item in tools:
             if isinstance(item, Agent):
-                missing = [
-                    attr for attr in ("name", "description") if not getattr(item, attr)
-                ]
+                missing = [attr for attr in ("name", "description") if not getattr(item, attr)]
                 if missing:
                     raise ValueError(
                         fix_message(
@@ -223,9 +237,7 @@ class Agent:
                             ")",
                         )
                     )
-                raise NotImplementedError(
-                    f"Subagents are not supported yet (Agent {item.name!r} passed in tools=)"
-                )
+                raise NotImplementedError(f"Subagents are not supported yet (Agent {item.name!r} passed in tools=)")
             if isinstance(item, (MCP, MCPToolRef)):
                 _add_mcp(mcp_uses, item)
                 continue
@@ -666,9 +678,7 @@ class Agent:
         try:
             await self._asave(state)
             request = self._think_request(state, specs, reporter)
-            reply = await self._model.arespond(
-                request, self._on_text(state, reporter), self._on_event(state, reporter)
-            )
+            reply = await self._model.arespond(request, self._on_text(state, reporter), self._on_event(state, reporter))
             self._end_think(state, reply, reporter)
         except BaseException as e:
             state._record_error(e)
@@ -715,9 +725,7 @@ class Agent:
         calls = self._begin_use_tools(state, "use_tools")
         try:
             if calls:
-                run_calls(
-                    state, calls, self._tool_map(), self.reporter, self._tool_saver(state), self._permissions
-                )
+                run_calls(state, calls, self._tool_map(), self.reporter, self._tool_saver(state), self._permissions)
         except BaseException as e:
             self._save_after(state, e)
             raise
@@ -1323,9 +1331,7 @@ class Agent:
                 fix_message(
                     f"{method}() was called on an Agent with human=None (question: {prompt!r})",
                     "Give it a human to ask with Agent(human=...), or write the rule in code so no human is needed",
-                    'agent = Agent(model=..., human=Terminal())\n'
-                    "# in tests\n"
-                    'agent.copy(human=FakeHuman(["yes"]))',
+                    'agent = Agent(model=..., human=Terminal())\n# in tests\nagent.copy(human=FakeHuman(["yes"]))',
                 )
             )
         check_human_returns(returns)

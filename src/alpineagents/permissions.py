@@ -170,8 +170,7 @@ class Permission:
             raise TypeError(
                 fix_message(
                     f"{cls.__name__} implements neither check nor acheck",
-                    "Implement check(state, call, tool), or async acheck(...) for a permission that awaits "
-                    "something",
+                    "Implement check(state, call, tool), or async acheck(...) for a permission that awaits something",
                     f"class {cls.__name__}({kinds[0]}):\n"
                     "    def check(self, state, call, tool):\n"
                     "        return None  # no opinion: the next permission decides",
@@ -254,7 +253,7 @@ def _patterns(value: Any, owner: str) -> tuple[str, ...]:
         raise TypeError(
             fix_message(
                 f"{owner} takes name patterns as strings (got: {wrong[0]!r})",
-                "Give tool names, or glob patterns such as \"github__*\"",
+                'Give tool names, or glob patterns such as "github__*"',
                 example,
             )
         )

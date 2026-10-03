@@ -76,10 +76,7 @@ def test_tool_start_and_completed():
     call = tool_call("read_file", path="main.py")
     terminal.on_tool_start(state, call)
     terminal.on_tool_end(state, call, "x" * 1200, DONE)
-    assert out.getvalue() == (
-        '  tool read_file(path="main.py")\n'
-        "  done 1.2KB\n"
-    )
+    assert out.getvalue() == ('  tool read_file(path="main.py")\n  done 1.2KB\n')
 
 
 @pytest.mark.parametrize(
@@ -312,9 +309,7 @@ def test_ask_propagates_eof_and_keyboard_interrupt():
     with pytest.raises(EOFError):
         terminal_eof.ask(StubState(), "question", returns=str)
 
-    terminal_kb = Terminal(
-        output=io.StringIO(), input=lambda p: (_ for _ in ()).throw(KeyboardInterrupt())
-    )
+    terminal_kb = Terminal(output=io.StringIO(), input=lambda p: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         terminal_kb.ask(StubState(), "question", returns=str)
 

@@ -48,8 +48,7 @@ DONE = "(done)"
 
 #: List shown in the unsupported-type error.
 SUPPORTED_TYPES_TEXT = (
-    "str, int, float, bool, Literal[...], Enum, list[T], dict[str, T], T | None, "
-    "dataclass, TypedDict, Pydantic model"
+    "str, int, float, bool, Literal[...], Enum, list[T], dict[str, T], T | None, dataclass, TypedDict, Pydantic model"
 )
 
 _BAD_PARAM_KINDS = (
@@ -408,8 +407,7 @@ def _handled_types(handler: Any, tool_name: str) -> tuple[type[Exception], ...]:
     except (TypeError, ValueError):
         params = []
     required = [
-        p for p in params
-        if p.default is inspect.Parameter.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+        p for p in params if p.default is inspect.Parameter.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
     ]
     if len(required) != 1 or required[0].kind is inspect.Parameter.KEYWORD_ONLY:
         raise TypeError(
@@ -665,8 +663,7 @@ def _check_input_schema(tool_name: str, schema: Any) -> dict[str, Any]:
     if not isinstance(schema, Mapping) or schema.get("type") != "object":
         raise TypeError(
             fix_message(
-                f"Tool {tool_name}: input_schema= must be a JSON Schema object with \"type\": \"object\" "
-                f"(got: {schema!r})",
+                f'Tool {tool_name}: input_schema= must be a JSON Schema object with "type": "object" (got: {schema!r})',
                 "Describe the arguments as the properties of an object. Providers accept only object schemas",
                 '{"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}',
             )
@@ -801,8 +798,14 @@ class FunctionTool(Tool):
         self.bound_to = None
         # The options as given, for copy.
         self._options: dict[str, Any] = {
-            "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
-            "hints_for": hints_for, "read_only": read_only, "destructive": destructive, "idempotent": idempotent,
+            "name": name,
+            "description": description,
+            "parallel": parallel,
+            "exception_handler": exception_handler,
+            "hints_for": hints_for,
+            "read_only": read_only,
+            "destructive": destructive,
+            "idempotent": idempotent,
             "open_world": open_world,
         }
         self.exception_handler = exception_handler
@@ -819,9 +822,7 @@ class FunctionTool(Tool):
         sig = inspect.signature(fn)
         params = list(sig.parameters.values())
 
-        self.needs_self = (
-            bool(params) and params[0].name == "self" and params[0].annotation is inspect.Parameter.empty
-        )
+        self.needs_self = bool(params) and params[0].name == "self" and params[0].annotation is inspect.Parameter.empty
         positional = params[1:] if self.needs_self else params
 
         for p in positional:
@@ -1209,8 +1210,14 @@ def tool(
         ValueError: ``read_only=True`` with ``destructive=True`` or ``idempotent=False``.
     """
     options: dict[str, Any] = {
-        "name": name, "description": description, "parallel": parallel, "exception_handler": exception_handler,
-        "hints_for": hints_for, "read_only": read_only, "destructive": destructive, "idempotent": idempotent,
+        "name": name,
+        "description": description,
+        "parallel": parallel,
+        "exception_handler": exception_handler,
+        "hints_for": hints_for,
+        "read_only": read_only,
+        "destructive": destructive,
+        "idempotent": idempotent,
         "open_world": open_world,
     }
     if fn is not None:
@@ -1259,7 +1266,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             raise ValueError(
                 fix_message(
                     f"Duplicate tool name {t.name!r}: {sources[t.name]!r} and {source!r}",
-                    "Rename one of them with @tool(name=\"...\")",
+                    'Rename one of them with @tool(name="...")',
                 )
             )
         result[t.name] = t

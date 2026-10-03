@@ -219,9 +219,7 @@ def test_tool_defs_placeholder_when_empty_but_referenced():
 
 def test_build_request_kwargs_respects_tool_choice_none():
     model = Anthropic("claude-sonnet-5")
-    request = Request(
-        system=None, messages=(), tools=(ToolSpec("t1", "d", {"type": "object"}),), tool_choice="none"
-    )
+    request = Request(system=None, messages=(), tools=(ToolSpec("t1", "d", {"type": "object"}),), tool_choice="none")
     kwargs = model._build_request_kwargs(request)
     assert kwargs["tool_choice"] == {"type": "none"}
 
@@ -280,9 +278,7 @@ def test_respond_streams_text_and_converts_blocks(monkeypatch):
             fake_block("tool_use", id="call1", name="search", input={"q": "weather"}),
             fake_block("thinking", thinking="hmm..."),
         ],
-        usage=fake_usage(
-            input_tokens=100, output_tokens=20, cache_read_input_tokens=30, cache_creation_input_tokens=5
-        ),
+        usage=fake_usage(input_tokens=100, output_tokens=20, cache_read_input_tokens=30, cache_creation_input_tokens=5),
         stop_reason="tool_use",
     )
     install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=["Hel", "lo there"], final_message=final_message))
@@ -339,7 +335,9 @@ def test_respond_model_falls_back_to_requested_name(monkeypatch, reported):
 def test_respond_without_on_text_callback(monkeypatch):
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
-        content=[fake_block("text", text="ok")], usage=fake_usage(input_tokens=1, output_tokens=1), stop_reason="end_turn"
+        content=[fake_block("text", text="ok")],
+        usage=fake_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
     )
     install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=["ok"], final_message=final_message))
     reply = model.respond(Request(system=None, messages=(Message("user", (TextBlock("hi"),)),)))
@@ -350,7 +348,9 @@ def test_respond_normalizes_missing_cache_usage_to_zero(monkeypatch):
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
         content=[fake_block("text", text="ok")],
-        usage=fake_usage(input_tokens=5, output_tokens=5, cache_read_input_tokens=None, cache_creation_input_tokens=None),
+        usage=fake_usage(
+            input_tokens=5, output_tokens=5, cache_read_input_tokens=None, cache_creation_input_tokens=None
+        ),
         stop_reason="end_turn",
     )
     install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=[], final_message=final_message))
@@ -362,7 +362,9 @@ def test_respond_normalizes_missing_cache_usage_to_zero(monkeypatch):
 def test_respond_computes_cost_when_price_given(monkeypatch):
     model = Anthropic("claude-sonnet-5", price=Price(input=3.0, output=15.0))
     final_message = SimpleNamespace(
-        content=[fake_block("text", text="ok")], usage=fake_usage(input_tokens=5, output_tokens=5), stop_reason="end_turn"
+        content=[fake_block("text", text="ok")],
+        usage=fake_usage(input_tokens=5, output_tokens=5),
+        stop_reason="end_turn",
     )
     install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=[], final_message=final_message))
     reply = model.respond(Request(system=None, messages=(Message("user", (TextBlock("hi"),)),)))
@@ -373,7 +375,9 @@ def test_respond_computes_cost_when_price_given(monkeypatch):
 def test_respond_on_text_exception_propagates_unchanged(monkeypatch):
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
-        content=[fake_block("text", text="x")], usage=fake_usage(input_tokens=1, output_tokens=1), stop_reason="end_turn"
+        content=[fake_block("text", text="x")],
+        usage=fake_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
     )
     install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=["x"], final_message=final_message))
 
@@ -801,7 +805,9 @@ def test_user_images_are_sent_even_when_vision_is_not_declared():
 def test_respond_sends_user_message_images_to_the_sdk(monkeypatch):
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
-        content=[fake_block("text", text="A cat")], usage=fake_usage(input_tokens=1700, output_tokens=3), stop_reason="end_turn"
+        content=[fake_block("text", text="A cat")],
+        usage=fake_usage(input_tokens=1700, output_tokens=3),
+        stop_reason="end_turn",
     )
     client = install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=["A cat"], final_message=final_message))
     model.respond(Request(system=None, messages=(Message.user("What is this?", Image(PNG), Image(JPEG)),)))
@@ -817,7 +823,9 @@ def test_respond_sends_nothing_frozen_to_the_sdk(monkeypatch):
     # ToolCall.args and RawBlock.data are deep-frozen in history; the request holds plain containers.
     model = Anthropic("claude-sonnet-5")
     final_message = SimpleNamespace(
-        content=[fake_block("text", text="ok")], usage=fake_usage(input_tokens=5, output_tokens=1), stop_reason="end_turn"
+        content=[fake_block("text", text="ok")],
+        usage=fake_usage(input_tokens=5, output_tokens=1),
+        stop_reason="end_turn",
     )
     client = install_fake_client(monkeypatch, model, FakeStreamCM(final_message=final_message))
     call = ToolCall("look", {"opts": {"tags": ["a"]}}, "c1")

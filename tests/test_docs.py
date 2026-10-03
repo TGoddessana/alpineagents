@@ -119,12 +119,14 @@ def test_no_api_key(monkeypatch, capsys):
 def test_coding_agent(models, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     Path("calc.py").write_text("def add(a, b):\n    return a + b\n")
-    models.append(FakeModel([
-        tool_call("list_files"),
-        tool_call("read_file", path="calc.py"),
-        tool_call("write_file", path="test_calc.py", content="def test_add(): ..."),
-        "Added test_calc.py",
-    ]))
+    models.append(
+        FakeModel([
+            tool_call("list_files"),
+            tool_call("read_file", path="calc.py"),
+            tool_call("write_file", path="test_calc.py", content="def test_add(): ..."),
+            "Added test_calc.py",
+        ])
+    )
     run("coding_agent")
     assert Path("test_calc.py").exists()
     assert "Added test_calc.py" in capsys.readouterr().out
@@ -223,11 +225,13 @@ def test_approval_read_only_runs_without_asking(models, answers, monkeypatch, tm
 
 def test_approval_always(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    models.append(FakeModel([
-        tool_call("write_file", path="README.md", content="a"),
-        tool_call("write_file", path="CONTRIBUTING.md", content="b"),
-        "Done",
-    ]))
+    models.append(
+        FakeModel([
+            tool_call("write_file", path="README.md", content="a"),
+            tool_call("write_file", path="CONTRIBUTING.md", content="b"),
+            "Done",
+        ])
+    )
     answers.append("always")
     ns = run("approval_always")  # asked once: "always" covers the second call
     assert Path("README.md").exists() and Path("CONTRIBUTING.md").exists()
@@ -242,12 +246,14 @@ def test_approval_always(models, answers, monkeypatch, tmp_path):
 
 def test_approval_hints(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    models.append(FakeModel([
-        tool_call("bash", command="mkdir build"),
-        tool_call("bash", command="ls"),
-        tool_call("bash", command="rm -rf build"),
-        "unused",
-    ]))
+    models.append(
+        FakeModel([
+            tool_call("bash", command="mkdir build"),
+            tool_call("bash", command="ls"),
+            tool_call("bash", command="rm -rf build"),
+            "unused",
+        ])
+    )
     ns = run("approval_hints")
     answers.append("no")  # only rm -rf build is asked about
     state = user("Clean up")
@@ -262,7 +268,6 @@ def test_approval_hints(models, answers, monkeypatch, tmp_path):
     assert not bash.hints_for({"command": "mkdir build"}).destructive
     assert bash.hints_for({"command": "ls; rm -rf build"}).destructive
     assert bash.hints_for({"command": 5}).destructive
-
 
 
 def test_approval_deny(models, answers, monkeypatch, tmp_path):
@@ -283,8 +288,10 @@ def test_approval_deny(models, answers, monkeypatch, tmp_path):
 
 def test_verify(models, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
-    outputs = iter([types.SimpleNamespace(returncode=1, stdout="1 failed: test_add"),
-                    types.SimpleNamespace(returncode=0, stdout="")])
+    outputs = iter([
+        types.SimpleNamespace(returncode=1, stdout="1 failed: test_add"),
+        types.SimpleNamespace(returncode=0, stdout=""),
+    ])
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: next(outputs))
     fake = FakeModel([tool_call("write_file", path="calc.py", content="x = 1"), "Done", "Fixed"])
     models.append(fake)
@@ -408,7 +415,7 @@ def test_context_size(models, monkeypatch, tmp_path):
     ns["agent"].copy(model=fake, reporter=None).run(state)
     assert state.answer == "Done"
     kinds = [h.content.kind for h in state.history if h.kind == "context_change"]
-    assert kinds == ["import", "compact", "clear_tool_results"][:len(kinds)] and "compact" in kinds
+    assert kinds == ["import", "compact", "clear_tool_results"][: len(kinds)] and "compact" in kinds
 
 
 def test_async_agent(models, capsys):
@@ -751,8 +758,10 @@ def test_tool_image(models, monkeypatch, tmp_path, capsys):
     models.append(fake)
     run("tool_image")
     result = [m for m in fake.requests[1].messages if m.role == "user"][-1]
-    assert any(isinstance(block, Image) or any(isinstance(b, Image) for b in getattr(block, "content", ()))
-               for block in result.content)
+    assert any(
+        isinstance(block, Image) or any(isinstance(b, Image) for b in getattr(block, "content", ()))
+        for block in result.content
+    )
     assert "Sales go up" in capsys.readouterr().out
 
 
@@ -844,9 +853,14 @@ def test_every_docs_src_file_is_used():
 def test_default_loop_on_the_learn_page_matches_the_source():
     page = (ROOT / "docs" / "learn" / "loop.md").read_text()
     source = (ROOT / "src" / "alpineagents" / "loop.py").read_text()
-    for line in ["@loop(until=waiting_for_user, limit=50)", "def default_loop(agent: Agent, state: State):",
-                 "    compact_if_full(agent, state)", "    agent.think(state)", "    if state.pending_calls:",
-                 "        agent.use_tools(state)"]:
+    for line in [
+        "@loop(until=waiting_for_user, limit=50)",
+        "def default_loop(agent: Agent, state: State):",
+        "    compact_if_full(agent, state)",
+        "    agent.think(state)",
+        "    if state.pending_calls:",
+        "        agent.use_tools(state)",
+    ]:
         assert line in page and line in source, line
 
 
@@ -862,7 +876,10 @@ def test_internal_links_point_to_pages():
 
 
 def test_every_page_in_the_nav_exists_and_every_page_is_in_the_nav():
-    nav = {(ROOT / "docs" / p).resolve() for p in re.findall(r":\s+([\w/-]+\.md)\s*$", (ROOT / "mkdocs.yml").read_text(), re.M)}
+    nav = {
+        (ROOT / "docs" / p).resolve()
+        for p in re.findall(r":\s+([\w/-]+\.md)\s*$", (ROOT / "mkdocs.yml").read_text(), re.M)
+    }
     pages = {p.resolve() for p in (ROOT / "docs").rglob("*.md")}
     assert nav == pages
 

@@ -78,9 +78,7 @@ class Model(ABC):
         """Required. The context window size in tokens. ``agent.context_used(state)`` is measured against it."""
 
     @abstractmethod
-    def respond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    def respond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """Required. Sends one request and returns the reply.
 
         Args:
@@ -110,9 +108,7 @@ class Model(ABC):
         # State uses the same rule (_tokens) directly.
         return context_tokens(request.messages, estimate_overhead_tokens(request.system, request.tools))
 
-    def compact(
-        self, request: Request, instructions: str | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    def compact(self, request: Request, instructions: str | None = None, on_event: OnEvent | None = None) -> Reply:
         """Optional. Summarizes the context and returns the summary in ``reply.text``.
 
         The default works with every model: it appends a summary request (``COMPACT_PROMPT`` plus
@@ -127,9 +123,7 @@ class Model(ABC):
         # Tool definitions are kept in the request: some providers require them when the context has tool_use.
         return self.respond(self._summary_request(request, instructions), None, on_event)
 
-    async def arespond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    async def arespond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """Optional. The async version of ``respond``, used by ``athink`` and ``aask``.
 
         The default runs ``respond`` on a worker thread and delivers ``on_text`` and ``on_event`` on the event
@@ -191,8 +185,7 @@ class Model(ABC):
             listed = ", ".join(sorted(self.supports)) or "(none)"
             raise ValueError(
                 fix_message(
-                    f"{type(self).__name__}({self.name!r}) does not support {setting} "
-                    f"(required feature: {feature!r})",
+                    f"{type(self).__name__}({self.name!r}) does not support {setting} (required feature: {feature!r})",
                     f"Features this adapter supports: {listed}. Remove the unsupported setting, or "
                     f"declare the features the server supports with supports=",
                 )

@@ -213,7 +213,9 @@ def test_user_images_come_after_the_tool_result_images_in_the_same_user_message(
     call = ToolCall("shot", {"url": "x.dev"}, "c1")
     result = ToolResultBlock("c1", (TextBlock("Loaded"), Image(GIF_)), "shot")
     messages = _messages(
-        Message.user("Task"), Message("assistant", (call,)), Message("user", (result, TextBlock("see this"), Image(PNG)))
+        Message.user("Task"),
+        Message("assistant", (call,)),
+        Message("user", (result, TextBlock("see this"), Image(PNG))),
     )
     tool_message, user_message = messages[-2:]
     assert tool_message["role"] == "tool"
@@ -224,7 +226,6 @@ def test_user_images_come_after_the_tool_result_images_in_the_same_user_message(
         {"type": "text", "text": "see this"},
         _image_part(Image(PNG)),
     ]
-
 
 
 def test_user_images_are_sent_even_when_vision_is_not_declared():
@@ -256,7 +257,10 @@ async def test_the_image_reaches_the_wire_as_a_data_url(monkeypatch, use_async):
     def handler(request):
         sent.append(json.loads(request.content))
         return httpx2.Response(
-            200, headers={"content-type": "text/event-stream"}, stream=_SyncBody([_SSE_START, _SSE_END]), request=request
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_SyncBody([_SSE_START, _SSE_END]),
+            request=request,
         )
 
     model = OpenAICompatible("gpt-5")

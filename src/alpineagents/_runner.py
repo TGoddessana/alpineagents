@@ -62,8 +62,22 @@ class _Job:
     """Execution state of one call. The worker thread and the main thread share it under ``lock``."""
 
     __slots__ = (
-        "call", "tool", "args", "future", "waiter", "seq", "lock", "loop", "task", "cancel_requested",
-        "announced", "ended", "cancelled_error", "is_error", "input_error", "tool_error",
+        "call",
+        "tool",
+        "args",
+        "future",
+        "waiter",
+        "seq",
+        "lock",
+        "loop",
+        "task",
+        "cancel_requested",
+        "announced",
+        "ended",
+        "cancelled_error",
+        "is_error",
+        "input_error",
+        "tool_error",
     )
 
     def __init__(self, call: ToolCall, tool: Tool) -> None:
@@ -311,9 +325,7 @@ def _collect(
             on_record()
 
 
-def _abandon(
-    state: State, reporter: Reporter | None, running: list[_Job], interrupt: BaseException
-) -> None:
+def _abandon(state: State, reporter: Reporter | None, running: list[_Job], interrupt: BaseException) -> None:
     """Interrupt: records what finished, cancels coroutines, and does not wait for sync calls.
 
     Unfinished calls stay in ``pending_calls`` (``Agent.run`` closes them). Calls that got ``on_tool_start``
@@ -345,9 +357,7 @@ def _record_now(state: State, reporter: Reporter | None, call: ToolCall, text: s
         reporter.on_tool_end(state, call, text, ToolOutcome(ToolOutcomeKind.INPUT_ERROR))
 
 
-def _start(
-    state: State, reporter: Reporter | None, executor: _Executor, job: _Job, running: list[_Job]
-) -> None:
+def _start(state: State, reporter: Reporter | None, executor: _Executor, job: _Job, running: list[_Job]) -> None:
     """Adds to ``running`` first (so ``_abandon`` sees it wherever an interrupt lands), then ``on_tool_start``,
     then hands it to a worker thread."""
     running.append(job)
@@ -577,9 +587,7 @@ async def _awork(job: _Job, state: State) -> ToolResultContent:
     return text
 
 
-def _astart(
-    state: State, reporter: Reporter | None, executor: _Executor, job: _Job, running: list[_Job]
-) -> None:
+def _astart(state: State, reporter: Reporter | None, executor: _Executor, job: _Job, running: list[_Job]) -> None:
     """Like ``_start``: an ``async def`` tool becomes a Task on this loop, any other tool goes to a worker thread."""
     running.append(job)
     job.announced = True
@@ -621,9 +629,7 @@ async def _acollect(
             await on_record()
 
 
-def _aabandon(
-    state: State, reporter: Reporter | None, running: list[_Job], interrupt: BaseException
-) -> None:
+def _aabandon(state: State, reporter: Reporter | None, running: list[_Job], interrupt: BaseException) -> None:
     """Like ``_abandon``: ``async def`` tool Tasks are cancelled and not waited for (if a Task still ends with a
     value or another exception, it is recorded as a late result); worker threads are treated as in ``_abandon``."""
     closing = closed_result(interrupt)

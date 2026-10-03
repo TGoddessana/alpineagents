@@ -120,7 +120,9 @@ def _oai_usage(prompt_tokens, completion_tokens, cached_tokens=None, cache_write
     details = None
     if cached_tokens is not None or cache_write_tokens is not None:
         details = SimpleNamespace(cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens)
-    return SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, prompt_tokens_details=details)
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, prompt_tokens_details=details
+    )
 
 
 def _req(messages=(Message.user("hi"),)) -> Request:
@@ -522,7 +524,9 @@ def test_openai_compatible_tool_calls_stop_reason_still_works(monkeypatch):
     """A call that ended normally (``finish_reason == "tool_calls"``) runs as is."""
     model = OpenAICompatible("gpt-5", api_key="x")
     chunks = [
-        _oai_chunk(tool_calls=[_oai_tool_delta(0, id="call_1", name="bash", arguments='{"cwd": "/", "command": "ls"}')]),
+        _oai_chunk(
+            tool_calls=[_oai_tool_delta(0, id="call_1", name="bash", arguments='{"cwd": "/", "command": "ls"}')]
+        ),
         _oai_chunk(finish_reason="tool_calls"),
     ]
     _install_openai_client(monkeypatch, model, chunks=chunks)

@@ -74,7 +74,7 @@ def _byte_size(text: str) -> str:
 
 
 def test_tool_call_creates_unique_ids_each_time():
-    """"tool_call(name, **args)`` -> ``id`` is ``"call_"`` + 12 hex digits (uuid4), newly made each time."""
+    """ "tool_call(name, **args)`` -> ``id`` is ``"call_"`` + 12 hex digits (uuid4), newly made each time."""
     a = tool_call("read_file", path="main.py")
     b = tool_call("read_file", path="main.py")
     assert a.name == "read_file"
@@ -84,7 +84,7 @@ def test_tool_call_creates_unique_ids_each_time():
 
 
 def test_fake_model_str_item_is_text_only_reply():
-    """"str`` -> a text reply (no tool calls)"""
+    """ "str`` -> a text reply (no tool calls)"""
     fake = FakeModel(["The bug is on line 3"])
     reply = fake.respond(Request(None, (Message.user("Find the bug"),)))
     assert reply.text == "The bug is on line 3"
@@ -93,7 +93,7 @@ def test_fake_model_str_item_is_text_only_reply():
 
 
 def test_fake_model_toolcall_item_is_tool_use_reply():
-    """"ToolCall`` -> a reply with only that call"""
+    """ "ToolCall`` -> a reply with only that call"""
     call = tool_call("read_file", path="main.py")
     fake = FakeModel([call])
     reply = fake.respond(Request(None, (Message.user("Find the bug"),)))
@@ -103,7 +103,7 @@ def test_fake_model_toolcall_item_is_tool_use_reply():
 
 
 def test_fake_model_list_item_mixes_blocks_in_order():
-    """"list`` / ``tuple`` (mixing ``str``, ``ToolCall``, ``RawBlock``) -> a reply with those blocks in order"""
+    """ "list`` / ``tuple`` (mixing ``str``, ``ToolCall``, ``RawBlock``) -> a reply with those blocks in order"""
     call = tool_call("read_file", path="main.py")
     fake = FakeModel([["Let me read the file.", call]])
     chunks: list[str] = []
@@ -115,7 +115,7 @@ def test_fake_model_list_item_mixes_blocks_in_order():
 
 
 def test_fake_model_reply_item_passthrough():
-    """"Reply`` -> as is"""
+    """ "Reply`` -> as is"""
     custom = Reply(message=Message("assistant", (TextBlock("A fixed reply"),)), usage=Usage(), stop_reason="end_turn")
     fake = FakeModel([custom])
     reply = fake.respond(Request(None, (Message.user("Question"),)))
@@ -123,7 +123,7 @@ def test_fake_model_reply_item_passthrough():
 
 
 def test_fake_model_exception_item_is_raised():
-    """"BaseException`` instance -> raises that exception (for testing error paths)"""
+    """ "BaseException`` instance -> raises that exception (for testing error paths)"""
     boom = TimeoutError("slow")
     fake = FakeModel([boom])
     with pytest.raises(TimeoutError) as exc_info:
@@ -132,7 +132,7 @@ def test_fake_model_exception_item_is_raised():
 
 
 def test_fake_model_callable_item_receives_request():
-    """"callable -> calls ``item(request)`` and converts the result by the rules above"""
+    """ "callable -> calls ``item(request)`` and converts the result by the rules above"""
     fake = FakeModel([lambda request: f"Saw {len(request.messages)} messages"])
     request = Request(None, (Message.user("one"), Message("assistant", (TextBlock("two"),))))
     reply = fake.respond(request)
@@ -140,7 +140,7 @@ def test_fake_model_callable_item_receives_request():
 
 
 def test_fake_model_records_requests_in_order():
-    """"requests``: a list of the received Requests, in order (for checking)."""
+    """ "requests``: a list of the received Requests, in order (for checking)."""
     fake = FakeModel(["First reply", "Second reply"])
     r1 = Request(None, (Message.user("First question"),))
     r2 = Request(None, (Message.user("Second question"),))
@@ -150,7 +150,7 @@ def test_fake_model_records_requests_in_order():
 
 
 def test_fake_model_context_too_long_error_does_not_consume_item():
-    """"If the estimated context exceeds ``context_window``, ``ContextTooLongError``"" (the item is not used)."""
+    """ "If the estimated context exceeds ``context_window``, ``ContextTooLongError``"" (the item is not used)."""
     fake = FakeModel(["Never used"], context_window=1)
     long_request = Request(None, (Message.user("very long " * 50),))
     with pytest.raises(ContextTooLongError):
@@ -159,7 +159,7 @@ def test_fake_model_context_too_long_error_does_not_consume_item():
 
 
 def test_fake_model_exhausted_raises_runtime_error():
-    """"If no items are left, ``RuntimeError``("FakeModel: ran out of prepared replies (all N used)"...)"""
+    """ "If no items are left, ``RuntimeError``("FakeModel: ran out of prepared replies (all N used)"...)"""
     fake = FakeModel(["Only one"])
     fake.respond(Request(None, (Message.user("First question"),)))
     with pytest.raises(RuntimeError, match=r"FakeModel: ran out of prepared replies \(all 1 used\)"):
@@ -167,7 +167,7 @@ def test_fake_model_exhausted_raises_runtime_error():
 
 
 def test_fake_human_returns_answers_in_order_and_records_questions():
-    """"FakeHuman(answers)``: returns the answers in turn, converted by ``parse_answer``.
+    """ "FakeHuman(answers)``: returns the answers in turn, converted by ``parse_answer``.
 
     ``questions``: the questions received, in order."""
     human = FakeHuman(["yes", "no"])
@@ -179,7 +179,7 @@ def test_fake_human_returns_answers_in_order_and_records_questions():
 
 
 def test_fake_human_skips_invalid_answer_and_uses_next():
-    """"If it does not fit (``ValueError``), the next answer is used, as if the person answered again."""
+    """ "If it does not fit (``ValueError``), the next answer is used, as if the person answered again."""
     human = FakeHuman(["dunno", "yes"])
     state = State(messages=[Message.user("Task")])
     assert human.ask(state, "Continue?", returns=bool) is True
@@ -187,7 +187,7 @@ def test_fake_human_skips_invalid_answer_and_uses_next():
 
 
 def test_fake_human_exhausted_raises_runtime_error():
-    """"When answers run out, ``RuntimeError``("FakeHuman: ran out of prepared answers", with the last question)."""
+    """ "When answers run out, ``RuntimeError``("FakeHuman: ran out of prepared answers", with the last question)."""
     human = FakeHuman([])
     state = State(messages=[Message.user("Task")])
     with pytest.raises(RuntimeError, match="FakeHuman: ran out of prepared answers"):
@@ -272,7 +272,7 @@ def _read_file_fixed(path: str) -> str:
 
 
 def test_on_run_start_before_loop_and_on_run_end_in_finally_on_success():
-    """"on_run_start / on_run_end(state, error) | Agent.run | before the loop / finally``"""
+    """ "on_run_start / on_run_end(state, error) | Agent.run | before the loop / finally``"""
     reporter = RecordingReporter()
     fake = FakeModel(["Done"])
     agent = Agent(model=fake, reporter=reporter, human=None)
@@ -285,7 +285,7 @@ def test_on_run_start_before_loop_and_on_run_end_in_finally_on_success():
 
 
 def test_on_run_end_called_with_error_when_run_raises():
-    """"Even when an error occurs, on_run_end is always called in finally. error is that exception as is."""
+    """ "Even when an error occurs, on_run_end is always called in finally. error is that exception as is."""
     reporter = RecordingReporter()
     boom = RuntimeError("model failure")
     fake = FakeModel([boom])
@@ -303,7 +303,7 @@ def test_on_run_end_called_with_error_when_run_raises():
 
 
 def test_on_think_start_before_respond_and_turn_already_incremented():
-    """"on_think_start(state) | Agent.think, Agent.ask | right before respond (for think, after _begin_think)``.
+    """ "on_think_start(state) | Agent.think, Agent.ask | right before respond (for think, after _begin_think)``.
 
     So when think calls it, ``state.turn`` is already this turn's number.
     """
@@ -318,7 +318,7 @@ def test_on_think_start_before_respond_and_turn_already_incremented():
 
 
 def test_on_text_called_once_per_text_block_with_chunk():
-    """"on_text(state, chunk) | per text chunk``"""
+    """ "on_text(state, chunk) | per text chunk``"""
     reporter = RecordingReporter()
     fake = FakeModel(["Hello, nice to meet you"])
     agent = Agent(model=fake, reporter=reporter, human=None)
@@ -329,7 +329,7 @@ def test_on_text_called_once_per_text_block_with_chunk():
 
 
 def test_on_think_end_called_right_after_reply_recorded_with_reply_object():
-    """"on_think_end(state, reply) | Agent.think, Agent.ask | right after the reply finishes and is recorded``"""
+    """ "on_think_end(state, reply) | Agent.think, Agent.ask | right after the reply finishes and is recorded``"""
     reporter = RecordingReporter()
     fake = FakeModel(["Final answer"])
     agent = Agent(model=fake, reporter=reporter, human=None)
@@ -345,7 +345,7 @@ def test_on_think_end_called_right_after_reply_recorded_with_reply_object():
 
 
 def test_on_tool_start_and_on_tool_end_wrap_execution_in_order():
-    """"on_tool_start/on_tool_end | _runner.run_calls (main thread) |
+    """ "on_tool_start/on_tool_end | _runner.run_calls (main thread) |
     right before running / right after the result is recorded``"""
     reporter = RecordingReporter()
     call = tool_call("_read_file_fixed", path="main.py")
@@ -381,7 +381,7 @@ def test_on_tool_start_and_on_tool_end_wrap_execution_in_order():
 
 
 def test_on_tool_end_for_denied_call_has_no_matching_on_tool_start():
-    """"on_tool_end (denied)": a call a permission denied gets on_tool_end without on_tool_start (the tool did not
+    """ "on_tool_end (denied)": a call a permission denied gets on_tool_end without on_tool_start (the tool did not
     run)."""
 
     @tool
@@ -413,7 +413,7 @@ def test_on_tool_end_for_denied_call_has_no_matching_on_tool_start():
 
 
 def test_on_context_change_called_after_compact_with_before_after_tokens():
-    """"on_context_change(state, change) | State(_rollback, _replace_context, clear_tool_results) |
+    """ "on_context_change(state, change) | State(_rollback, _replace_context, clear_tool_results) |
     right after recording (outside the lock)``"""
     reporter = RecordingReporter()
     fake = FakeModel(["Summary: read the files so far"])
@@ -430,7 +430,7 @@ def test_on_context_change_called_after_compact_with_before_after_tokens():
 
 
 def test_reporter_none_is_silent_and_does_not_change_behavior():
-    """"With reporter=None nothing is shown.", "The agent behaves the same without a Reporter."""
+    """ "With reporter=None nothing is shown.", "The agent behaves the same without a Reporter."""
     call = tool_call("_read_file_fixed", path="main.py")
 
     reporter = RecordingReporter()
@@ -440,9 +440,7 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
     state_with_reporter = State(messages=[Message.user("Find the bug")])
     agent_with_reporter.run(state_with_reporter)
 
-    agent_silent = Agent(
-        model=FakeModel([call, "Answer"]), tools=[_read_file_fixed], reporter=None, human=None
-    )
+    agent_silent = Agent(model=FakeModel([call, "Answer"]), tools=[_read_file_fixed], reporter=None, human=None)
     state_silent = State(messages=[Message.user("Find the bug")])
     agent_silent.run(state_silent)  # must behave the same, with no exception
 
@@ -458,7 +456,7 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
 
 
 def test_ask_human_with_human_none_raises_no_human_error():
-    """"With human=None ... ask_human raises alpineagents.NoHumanError."""
+    """ "With human=None ... ask_human raises alpineagents.NoHumanError."""
     agent = Agent(model=FakeModel([]), human=None, reporter=None)
     state = State(messages=[Message.user("Task")])
     with pytest.raises(NoHumanError):
@@ -466,7 +464,7 @@ def test_ask_human_with_human_none_raises_no_human_error():
 
 
 def test_ask_human_unsupported_returns_type_raises_type_error():
-    """"ask_human(returns=...) with an unsupported type`` -> ``TypeError`` (returns is str/bool/Literal only)."""
+    """ "ask_human(returns=...) with an unsupported type`` -> ``TypeError`` (returns is str/bool/Literal only)."""
     agent = Agent(model=FakeModel([]), human=FakeHuman(["any answer"]), reporter=None)
     state = State(messages=[Message.user("Task")])
     with pytest.raises(TypeError):
@@ -474,7 +472,7 @@ def test_ask_human_unsupported_returns_type_raises_type_error():
 
 
 def test_ask_human_records_question_and_answer_in_history_not_context():
-    """"The question and answer stay in history as human and do not go into the context."""
+    """ "The question and answer stay in history as human and do not go into the context."""
     agent = Agent(model=FakeModel([]), human=FakeHuman(["yes"]), reporter=None)
     state = State(messages=[Message.user("Task")])
     before_context = state.messages
@@ -515,7 +513,7 @@ def test_terminal_end_to_end_output_shape_for_tool_then_answer():
 
 
 def test_terminal_shows_limit_warning_line_end_to_end():
-    """"The default Terminal() shows a run stopped by limit as a warning line
+    """ "The default Terminal() shows a run stopped by limit as a warning line
     (``done: reached limit(50), the task may be unfinished``)``"""
 
     @tool
@@ -578,7 +576,7 @@ class AskPermission(DecidePermission):
 
 
 def test_permission_block_denies_dangerous_call():
-    """"A denied call has a result, so use_tools does not run it."""
+    """ "A denied call has a result, so use_tools does not run it."""
     _write_calls.clear()
     call = tool_call("write_file", path="a.txt", content="x")
     fake = FakeModel([call, "Gave up"])
@@ -594,7 +592,7 @@ def test_permission_block_denies_dangerous_call():
 
 
 def test_permission_block_always_allow_skips_asking_again_same_turn():
-    """"The 'always allow' list lives in the extra_data of the top-level State (state.root).
+    """ "The 'always allow' list lives in the extra_data of the top-level State (state.root).
 
     The next call to the same tool in the same turn is not asked again (parallel calls see the same list too).
     """
@@ -617,7 +615,7 @@ def test_permission_block_always_allow_skips_asking_again_same_turn():
 
 
 def test_plan_then_execute_runs_each_step_with_coding_loop():
-    """"Plan then execute": calls loops in turn. limit is counted anew for each step."""
+    """ "Plan then execute": calls loops in turn. limit is counted anew for each step."""
 
     @dataclass
     class Plan:
@@ -632,13 +630,11 @@ def test_plan_then_execute_runs_each_step_with_coding_loop():
                 break
         return state.answer
 
-    fake = FakeModel(
-        [
-            '{"steps": ["List the files", "Fix the bug"]}',
-            "Step 1 done",
-            "Step 2 done",
-        ]
-    )
+    fake = FakeModel([
+        '{"steps": ["List the files", "Fix the bug"]}',
+        "Step 1 done",
+        "Step 2 done",
+    ])
     agent = Agent(model=fake, loop=plan_then_execute, reporter=None, human=None)
     state = State(messages=[Message.user("Fix the bug")])
     answer = agent.run(state)
@@ -653,7 +649,7 @@ def test_plan_then_execute_runs_each_step_with_coding_loop():
 
 
 def test_chat_loop_answers_then_quits_on_command():
-    """"Chat": the outer loop is the human's turn, the inner loop is the agent's turn."""
+    """ "Chat": the outer loop is the human's turn, the inner loop is the agent's turn."""
 
     @loop(until=is_finished, limit=1000)
     def chat(agent: Agent, state: State):
@@ -677,7 +673,7 @@ def test_chat_loop_answers_then_quits_on_command():
 
 
 def test_coder_and_reviewer_pair_finishes_once_approved():
-    """"Coder and reviewer": the coder runs the State.
+    """ "Coder and reviewer": the coder runs the State.
 
     The reviewer only reads the same context with ask (any Agent could also think on it: there is no owner)."""
 
@@ -686,12 +682,10 @@ def test_coder_and_reviewer_pair_finishes_once_approved():
         approved: bool
         comments: str
 
-    reviewer_fake = FakeModel(
-        [
-            '{"approved": false, "comments": "Add tests"}',
-            '{"approved": true, "comments": "Looks good"}',
-        ]
-    )
+    reviewer_fake = FakeModel([
+        '{"approved": false, "comments": "Add tests"}',
+        '{"approved": true, "comments": "Looks good"}',
+    ])
     reviewer = Agent(model=reviewer_fake, system="You are a meticulous code reviewer", reporter=None, human=None)
 
     @loop(until=is_finished, limit=5)
@@ -728,12 +722,10 @@ def test_reads_file_then_answers():
         return "def main():\n    pass\n"
 
     base_agent = Agent(model=FakeModel([]), tools=[read_file], reporter=None, human=None)
-    fake = FakeModel(
-        [
-            tool_call("read_file", path="main.py"),
-            "The bug is on line 3",
-        ]
-    )
+    fake = FakeModel([
+        tool_call("read_file", path="main.py"),
+        "The bug is on line 3",
+    ])
     state = State(messages=[Message.user("Find the bug")])
     base_agent.copy(model=fake, reporter=None).run(state)
 
@@ -748,19 +740,17 @@ def test_reads_file_then_answers():
 
 
 def test_overview_example_one_smallest_agent_end_to_end():
-    """"The smallest agent": ``Agent(model=..., tools=[web_search])``, ``agent.run("...")``."""
+    """ "The smallest agent": ``Agent(model=..., tools=[web_search])``, ``agent.run("...")``."""
 
     @tool
     def web_search(query: str) -> str:
         """Searches the web."""
         return "Already exists: alpineagents is an agent framework registered on PyPI"
 
-    fake = FakeModel(
-        [
-            tool_call("web_search", query="alpineagents pypi"),
-            "The package already exists. Checked on PyPI.",
-        ]
-    )
+    fake = FakeModel([
+        tool_call("web_search", query="alpineagents pypi"),
+        "The package already exists. Checked on PyPI.",
+    ])
     agent = Agent(model=fake, tools=[web_search], reporter=None, human=None)
     answer = agent.run("Find out whether a Python package called alpineagents already exists")
 
@@ -769,7 +759,7 @@ def test_overview_example_one_smallest_agent_end_to_end():
 
 
 def test_overview_example_two_full_loop_with_filesystem(tmp_path):
-    """"Everything in use" example, run end to end without the subagent (researcher)/MCP/skills.
+    """ "Everything in use" example, run end to end without the subagent (researcher)/MCP/skills.
 
     The ``FileSystem`` tool object, a custom ``coding`` loop (with ``compact_if_full``),
     ``state.stopped`` and ``state.usage.cost`` are all checked as is.
@@ -795,12 +785,10 @@ def test_overview_example_two_full_loop_with_filesystem(tmp_path):
         if state.pending_calls:
             agent.use_tools(state)
 
-    fake = FakeModel(
-        [
-            tool_call("read_file", path="main.py"),
-            "Found the bug: missing null check",
-        ]
-    )
+    fake = FakeModel([
+        tool_call("read_file", path="main.py"),
+        "Found the bug: missing null check",
+    ])
     agent = Agent(
         model=fake,
         system="You are a coding assistant",

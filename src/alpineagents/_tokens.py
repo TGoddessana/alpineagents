@@ -56,18 +56,14 @@ def _image_count(block: object) -> int:
 
 
 def estimate_message_tokens(message: Message) -> int:
-    return 4 + sum(
-        estimate_text_tokens(_block_text(b)) + IMAGE_TOKENS * _image_count(b) for b in message.content
-    )
+    return 4 + sum(estimate_text_tokens(_block_text(b)) + IMAGE_TOKENS * _image_count(b) for b in message.content)
 
 
 def estimate_overhead_tokens(system: str | None, tools: Iterable[ToolSpec]) -> int:
     """Estimate of what every request carries outside the messages (system prompt, tool definitions)."""
     total = estimate_text_tokens(system or "")
     for spec in tools:
-        total += estimate_text_tokens(
-            spec.name + spec.description + json.dumps(spec.input_schema, ensure_ascii=False)
-        )
+        total += estimate_text_tokens(spec.name + spec.description + json.dumps(spec.input_schema, ensure_ascii=False))
     return total
 
 

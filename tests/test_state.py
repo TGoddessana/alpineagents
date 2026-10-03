@@ -914,12 +914,7 @@ def test_clear_tool_results_clears_older_results_and_keeps_last_n():
 
     state.clear_tool_results(keep_last=1)
 
-    results = [
-        block.content
-        for message in state.messages
-        for block in message.content
-        if hasattr(block, "call_id")
-    ]
+    results = [block.content for message in state.messages for block in message.content if hasattr(block, "call_id")]
     assert results == ["(cleared: kept in history)", "(cleared: kept in history)", "result3"]
 
 
@@ -1027,7 +1022,9 @@ def test_state_equality_is_identity():
 
 
 def test_every_history_kind_has_exactly_one_entry_class():
-    kinds_by_class = {cls: typing.get_args(typing.get_type_hints(cls)["kind"]) for cls in typing.get_args(types.HistoryEntry)}
+    kinds_by_class = {
+        cls: typing.get_args(typing.get_type_hints(cls)["kind"]) for cls in typing.get_args(types.HistoryEntry)
+    }
     all_kinds = [kind for kinds in kinds_by_class.values() for kind in kinds]
     assert sorted(all_kinds) == sorted(typing.get_args(types.HistoryKind))
     assert len(kinds_by_class) == 11 and len(all_kinds) == 13

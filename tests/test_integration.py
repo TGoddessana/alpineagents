@@ -32,7 +32,7 @@ def _result_texts(state: State) -> list[str]:
 
 
 def test_notice_added_by_tool_lands_after_all_results_of_the_turn():
-    """"A notice added while a tool runs goes in after all results of that turn are recorded.\""""
+    """ "A notice added while a tool runs goes in after all results of that turn are recorded.\""""
     slow_started = threading.Event()
 
     @tool
@@ -54,8 +54,7 @@ def test_notice_added_by_tool_lands_after_all_results_of_the_turn():
     Agent(fake, tools=[quick, slow], reporter=None).run(state)
 
     roles_and_texts = [
-        (m.role, [getattr(b, "content", None) or getattr(b, "text", None) for b in m.content])
-        for m in state.messages
+        (m.role, [getattr(b, "content", None) or getattr(b, "text", None) for b in m.content]) for m in state.messages
     ]
     # One result message (in request order), then the notice right after it, then the next answer.
     assert roles_and_texts[2] == ("user", ["fast", "slow"])
@@ -70,7 +69,7 @@ def test_notice_added_by_tool_lands_after_all_results_of_the_turn():
 
 
 def test_tool_exception_waits_for_other_calls_and_keeps_type_and_message_with_note():
-    """"The exception the tool raised, as is (e.g. TimeoutError). Waits until the other tools of the same turn
+    """ "The exception the tool raised, as is (e.g. TimeoutError). Waits until the other tools of the same turn
     finish, then raises the first exception." / "Keeps the exception's type and message and only adds the tool
     name and arguments with add_note().\""""
     finished: list[str] = []
@@ -102,7 +101,7 @@ def test_tool_exception_waits_for_other_calls_and_keeps_type_and_message_with_no
 
 
 def test_serial_tools_do_not_start_after_a_parallel_call_failed():
-    """"parallel=False tools run one at a time after the rest finish." If the parallel group raises, the serial
+    """ "parallel=False tools run one at a time after the rest finish." If the parallel group raises, the serial
     tools do not start and their calls stay in pending_calls (a loop that catches it can run them again with
     use_tools)."""
     ran: list[str] = []
@@ -129,7 +128,7 @@ def test_serial_tools_do_not_start_after_a_parallel_call_failed():
 
 
 def test_serial_tools_run_one_at_a_time_in_request_order():
-    """"Mark tools that must not run together (e.g. writing files) with @tool(parallel=False). They then run
+    """ "Mark tools that must not run together (e.g. writing files) with @tool(parallel=False). They then run
     one at a time after the rest finish.\""""
     active = 0
     max_active = 0
@@ -162,7 +161,7 @@ def test_serial_tools_run_one_at_a_time_in_request_order():
 
 
 def test_exception_after_reply_recorded_does_not_roll_back_the_reply():
-    """"An exception after the reply entry (e.g. raised by Reporter.on_think_end) does NOT undo the reply."
+    """ "An exception after the reply entry (e.g. raised by Reporter.on_think_end) does NOT undo the reply."
     Only a request that got no reply is taken back. The reply and its calls stay, and because the exception
     leaves run(), the calls are closed as aborted (the State stays saveable and runnable)."""
 
@@ -201,7 +200,7 @@ def test_exception_after_reply_recorded_does_not_roll_back_the_reply():
 
 
 def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
-    """"E.g. a submit(answer: str, state: State) tool, which the model calls when it finishes the task, calls
+    """ "E.g. a submit(answer: str, state: State) tool, which the model calls when it finishes the task, calls
     state.finish(answer)." / "state.finish() was called → stop when that turn ends and return state.answer"
     (stopped == StoppedByFinish(answer))."""
 
@@ -223,7 +222,7 @@ def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
 
 
 def test_stopped_is_cleared_when_a_later_run_raises():
-    """"stopped: why the last loop stopped." A run that ended with an exception has no stopped loop, so the
+    """ "stopped: why the last loop stopped." A run that ended with an exception has no stopped loop, so the
     reason from the previous run does not linger."""
     fake = FakeModel(["First answer", RuntimeError("API broken")])
     agent = Agent(fake, reporter=None)
@@ -238,7 +237,7 @@ def test_stopped_is_cleared_when_a_later_run_raises():
 
 
 def test_until_callable_object_without_name_uses_class_name_for_stopped():
-    """"until takes one State -> bool function, or a list of functions." A callable object without a name must
+    """ "until takes one State -> bool function, or a list of functions." A callable object without a name must
     also be able to stop the loop, and stopped holds its class name."""
 
     class OverBudget:
@@ -267,7 +266,7 @@ def test_until_callable_object_without_name_uses_class_name_for_stopped():
 
 
 def test_context_tokens_counts_the_overhead_of_all_the_agents_tools_whatever_think_showed():
-    """"agent.context_tokens(state): estimate with this Agent's system/tool overhead." The State no longer
+    """ "agent.context_tokens(state): estimate with this Agent's system/tool overhead." The State no longer
     remembers which tools the last think(tools=...) showed, so the estimate always uses the Agent's whole tool
     list (the 0.4 "keeps the last think's overhead" rule is gone with the State's own window)."""
 
@@ -300,7 +299,7 @@ def test_context_tokens_counts_the_overhead_of_all_the_agents_tools_whatever_thi
 
 
 def test_putting_a_class_instead_of_an_object_in_tools_says_how_to_fix():
-    """"Put an object in tools= and all of its @tool methods become tools." Passing the class by mistake is
+    """ "Put an object in tools= and all of its @tool methods become tools." Passing the class by mistake is
     reported, with how to fix it, when the Agent is created."""
 
     class FileSystem:
@@ -337,7 +336,7 @@ def test_another_agent_can_ask_think_and_compact_and_the_first_one_continues():
 
 
 def test_interrupt_caught_inside_the_loop_keeps_calls_pending_for_deny():
-    """"Calls are closed only when an exception leaves run(). If the loop catches the exception, the calls stay
+    """ "Calls are closed only when an exception leaves run(). If the loop catches the exception, the calls stay
     in pending_calls." An interrupt (KeyboardInterrupt) follows the same rule."""
 
     @tool

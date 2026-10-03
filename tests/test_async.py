@@ -173,8 +173,16 @@ async def test_reporter_notifications_all_come_from_the_loop_thread():
     await agent.arun("Task")
     names = [name for name, _ in recorder.events]
     assert names == [
-        "run_start", "think_start", "text", "think_end", "tool_start", "tool_end",
-        "think_start", "text", "think_end", "run_end",
+        "run_start",
+        "think_start",
+        "text",
+        "think_end",
+        "tool_start",
+        "tool_end",
+        "think_start",
+        "text",
+        "think_end",
+        "run_end",
     ]
     assert {thread for _, thread in recorder.events} == {threading.get_ident()}
     assert recorder.texts == ["Let me look", "Found it"]
@@ -604,7 +612,9 @@ class WebHuman(Human):
 
 async def test_aask_human_with_an_async_only_human():
     agent = make_agent([], human=WebHuman("always"))
-    answer = await agent.aask_human(State(messages=[Message.user("Task")]), "Allow?", returns=Literal["yes", "no", "always"])
+    answer = await agent.aask_human(
+        State(messages=[Message.user("Task")]), "Allow?", returns=Literal["yes", "no", "always"]
+    )
     assert answer == "always"
 
 

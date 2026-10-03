@@ -450,9 +450,7 @@ def _restored(snap: StateSnapshot, length: int) -> StateSnapshot:
     return target
 
 
-def _compacted(
-    messages: Sequence[Message], first: Message | None, summary: str, kept: int
-) -> tuple[Message, ...]:
+def _compacted(messages: Sequence[Message], first: Message | None, summary: str, kept: int) -> tuple[Message, ...]:
     """The context after ``compact``: the first user message, the summary, and the last ``kept`` messages (the ones
     added while a model was writing the summary, which it never saw)."""
     head = (first,) if first is not None else ()
@@ -701,9 +699,7 @@ class State:
                 )
             data = _json(extra_data, "State(extra_data=...)")
         if messages:
-            change = ContextChange(
-                "import", 0, _tokens.context_tokens(messages, 0), messages=messages
-            )
+            change = ContextChange("import", 0, _tokens.context_tokens(messages, 0), messages=messages)
             self._commit(ContextChangeEntry(content=change, turn=0))
         if data:
             self._commit(ExtraDataEntry(content=data, turn=0))
@@ -1383,7 +1379,8 @@ class State:
         with self._lock:
             snap = self._snap
             still_pending = any(
-                result is None and pending is call for pending, result in zip(snap._turn_calls, snap._turn_results, strict=True)
+                result is None and pending is call
+                for pending, result in zip(snap._turn_calls, snap._turn_results, strict=True)
             )
             self._commit(
                 ToolResultEntry(
@@ -1433,9 +1430,7 @@ class State:
         with self._lock:
             closed = list(self._snap.pending_calls)
             for call in closed:
-                self._commit(
-                    ToolResultEntry(content=text, call=call, outcome=kind, error=error, turn=self._snap.turn)
-                )
+                self._commit(ToolResultEntry(content=text, call=call, outcome=kind, error=error, turn=self._snap.turn))
             return closed
 
     def _record_error(self, error: BaseException, call: ToolCall | None = None) -> None:
@@ -1470,7 +1465,10 @@ class State:
         with self._lock:
             self._commit(
                 ExchangeEntry(
-                    kind="ask", content=Exchange(question, _json_answer(question, answer)), usage=usage, turn=self._snap.turn
+                    kind="ask",
+                    content=Exchange(question, _json_answer(question, answer)),
+                    usage=usage,
+                    turn=self._snap.turn,
                 )
             )
 
@@ -1771,19 +1769,28 @@ _REMOVED_NAMES: dict[str, tuple[str, str, str]] = {
 
 #: What to do instead of assigning a read-only property, per property name.
 _COMMAND_FOR = {
-    "messages": ("state.add_message(...) adds one, state.compact(summary) or state.clear_tool_results() shrink it, "
-                 "state.restore(snapshot) goes back", 'state.add_message(Message.user("..."))'),
+    "messages": (
+        "state.add_message(...) adds one, state.compact(summary) or state.clear_tool_results() shrink it, "
+        "state.restore(snapshot) goes back",
+        'state.add_message(Message.user("..."))',
+    ),
     "extra_data": ("change it inside edit_extra_data()", 'with state.edit_extra_data() as d:\n    d["k"] = 1'),
-    "history": ("history only grows: every command records its own entry (to start from a history, build "
-                "State(history=...))", "copy = State(history=state.history)"),
-    "pending_calls": ("agent.use_tools(state) gives them results; they come from the model's reply",
-                      "agent.use_tools(state)"),
+    "history": (
+        "history only grows: every command records its own entry (to start from a history, build State(history=...))",
+        "copy = State(history=state.history)",
+    ),
+    "pending_calls": (
+        "agent.use_tools(state) gives them results; they come from the model's reply",
+        "agent.use_tools(state)",
+    ),
     "turn": ("it is derived from history: agent.think(state) adds a turn", "agent.think(state)"),
     "usage": ("it is derived from history: every think, ask and compact adds to it", "agent.think(state)"),
     "finished": ("call state.finish(answer)", 'state.finish("done")'),
     "answer": ("call state.finish(answer)", 'state.finish("done")'),
-    "stopped": ("it is set by the run (an until, a limit, a permission) or by state.finish(answer)",
-                'state.finish("done")'),
+    "stopped": (
+        "it is set by the run (an until, a limit, a permission) or by state.finish(answer)",
+        'state.finish("done")',
+    ),
     "created_at": ("it is the time of the first history entry", "state.created_at"),
     "updated_at": ("it is the time of the latest history entry", "state.updated_at"),
     "id": ("the id is given when the State is made", 'State(id="bug-1")'),
@@ -1906,7 +1913,7 @@ def _json(value: Any, where: str) -> Any:
             raise TypeError(
                 fix_message(
                     f"{where} must be JSON (got {value!r}, which JSON cannot hold)",
-                    "use a finite number, or None for \"no value\"",
+                    'use a finite number, or None for "no value"',
                     example,
                 )
             )
@@ -1931,7 +1938,10 @@ def _json(value: Any, where: str) -> Any:
         "frozenset": "use a list: sorted(seen)",
         "bytes": "use text: base64.b64encode(data).decode()",
         "datetime": "use value.isoformat()",
-    }.get(type(value).__name__, "turn it into a dict, list, str, int, float, bool or None first (a dataclass: dataclasses.asdict)")
+    }.get(
+        type(value).__name__,
+        "turn it into a dict, list, str, int, float, bool or None first (a dataclass: dataclasses.asdict)",
+    )
     raise TypeError(fix_message(f"{where} must be JSON (got {type(value).__name__}); {hint}", hint, example))
 
 
@@ -2001,4 +2011,3 @@ def _describe_entry(entry: HistoryEntry) -> str:
         case ErrorEntry(call=ToolCall() as call):
             return f"{head} {call.name}: {_short(entry.content)}"
     return f"{head}: {_short(entry.content)}"
-

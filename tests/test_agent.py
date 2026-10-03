@@ -94,13 +94,13 @@ class _Plan:
 
 
 def test_run_with_string_creates_new_state_and_returns_loop_result():
-    """"A string creates a new State. Calls the loop and returns what the loop returned." """
+    """ "A string creates a new State. Calls the loop and returns what the loop returned." """
     agent = Agent(model=FakeModel(["Final answer"]), reporter=None)
     assert agent.run("Find the bug") == "Final answer"
 
 
 def test_run_with_existing_state_uses_it_directly():
-    """"State → used as is" (``run(task or state) -> answer``)"""
+    """ "State → used as is" (``run(task or state) -> answer``)"""
     agent = Agent(model=FakeModel(["Final answer"]), reporter=None)
     state = State(messages=[Message.user("Find the bug")])
     assert agent.run(state) == "Final answer"
@@ -108,14 +108,14 @@ def test_run_with_existing_state_uses_it_directly():
 
 
 def test_run_rejects_task_that_is_neither_string_nor_state():
-    """"run(task or state) -> answer": any other value is a misuse."""
+    """ "run(task or state) -> answer": any other value is a misuse."""
     agent = Agent(model=FakeModel([]), reporter=None)
     with pytest.raises(TypeError):
         agent.run(12345)
 
 
 def test_run_notifies_reporter_on_run_start_then_on_run_end():
-    """"on_run_start / on_run_end(state, error) | Agent.run | before the loop / finally" """
+    """ "on_run_start / on_run_end(state, error) | Agent.run | before the loop / finally" """
     recorder = _Recorder()
     agent = Agent(model=FakeModel(["Answer"]), reporter=recorder)
     agent.run("Task")
@@ -126,7 +126,7 @@ def test_run_notifies_reporter_on_run_start_then_on_run_end():
 
 
 def test_run_end_still_fires_and_reports_the_exception_that_escaped():
-    """"Exceptions are not swallowed; they are re-raised as is."" and ""on_run_end is always called in finally."""
+    """ "Exceptions are not swallowed; they are re-raised as is."" and ""on_run_end is always called in finally."""
     recorder = _Recorder()
     agent = Agent(model=FakeModel([RuntimeError("something went wrong")]), reporter=recorder)
     with pytest.raises(RuntimeError):
@@ -139,7 +139,7 @@ def test_run_end_still_fires_and_reports_the_exception_that_escaped():
 
 
 def test_think_records_model_reply_and_advances_turn():
-    """"think(state, tools=...) | Sends one request to the Model and records the reply."" and ""turn: how many
+    """ "think(state, tools=...) | Sends one request to the Model and records the reply."" and ""turn: how many
     times think ran so far. Counts from 1."""
     agent = Agent(model=FakeModel(["First thought"]), reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -150,7 +150,7 @@ def test_think_records_model_reply_and_advances_turn():
 
 
 def test_think_with_empty_tools_list_hides_all_tool_definitions():
-    """"tools=[] shows no tools; a list shows only those tools." (the ``[]`` case)"""
+    """ "tools=[] shows no tools; a list shows only those tools." (the ``[]`` case)"""
 
     @tool
     def only_tool() -> str:
@@ -165,7 +165,7 @@ def test_think_with_empty_tools_list_hides_all_tool_definitions():
 
 
 def test_think_with_tool_subset_shows_only_that_tool():
-    """"tools=[] shows no tools; a list shows only those tools." (the list case)"""
+    """ "tools=[] shows no tools; a list shows only those tools." (the list case)"""
 
     @tool
     def a_tool() -> str:
@@ -188,7 +188,7 @@ def test_think_with_tool_subset_shows_only_that_tool():
 
 
 def test_use_tools_executes_pending_calls_and_records_results():
-    """"use_tools(state) | Runs every pending call (state.pending_calls) and records the results."""
+    """ "use_tools(state) | Runs every pending call (state.pending_calls) and records the results."""
 
     @tool
     def echo(msg: str) -> str:
@@ -221,7 +221,7 @@ def test_use_tools_does_nothing_when_no_pending_calls():
 
 
 def test_ask_does_not_touch_context_but_adds_to_history_and_usage():
-    """"ask(...) | Changes neither the context nor the answer."" ""ask ... is kept in history but not in the
+    """ "ask(...) | Changes neither the context nor the answer."" ""ask ... is kept in history but not in the
     context."" ""Usage is added to state.usage."""
     fake = FakeModel(["A tidy plan"])
     agent = Agent(model=fake, reporter=None)
@@ -240,7 +240,7 @@ def test_ask_does_not_touch_context_but_adds_to_history_and_usage():
 
 
 def test_ask_sends_tool_definitions_but_sets_tool_choice_none():
-    """""tool_choice="none": send the tool definitions but do not allow calls (used by ask and compact)."""
+    """ ""tool_choice="none": send the tool definitions but do not allow calls (used by ask and compact)."""
 
     @tool
     def some_tool() -> str:
@@ -257,7 +257,7 @@ def test_ask_sends_tool_definitions_but_sets_tool_choice_none():
 
 
 def test_think_advances_context_while_ask_leaves_it_unchanged():
-    """""think is a command that moves the conversation forward; ask is a query that leaves it alone
+    """ ""think is a command that moves the conversation forward; ask is a query that leaves it alone
     (command-query separation)."""
     fake = FakeModel(["Thought answer", "Asked answer"])
     agent = Agent(model=fake, reporter=None)
@@ -271,7 +271,7 @@ def test_think_advances_context_while_ask_leaves_it_unchanged():
 
 
 def test_ask_retries_on_invalid_format_then_succeeds():
-    """"If the answer does not match the format, the validation error is shown to the model and it asks again,
+    """ "If the answer does not match the format, the validation error is shown to the model and it asks again,
     up to two more times (set with retries=)."""
     fake = FakeModel(["This is not JSON", '{"steps": ["First step"]}'])
     agent = Agent(model=fake, reporter=None)
@@ -282,7 +282,7 @@ def test_ask_retries_on_invalid_format_then_succeeds():
 
 
 def test_ask_raises_outputerror_after_retries_exhausted():
-    """"If it still does not match, alpineagents.OutputError is raised."""
+    """ "If it still does not match, alpineagents.OutputError is raised."""
     fake = FakeModel(["Nope", "Still nope"])
     agent = Agent(model=fake, reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -294,7 +294,7 @@ def test_ask_raises_outputerror_after_retries_exhausted():
 
 
 def test_ask_retries_zero_means_a_single_attempt():
-    """"Set with retries=": ``retries=0`` tries once and never asks again."""
+    """ "Set with retries=": ``retries=0`` tries once and never asks again."""
     fake = FakeModel(["Wrong format"])
     agent = Agent(model=fake, reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -307,7 +307,7 @@ def test_ask_retries_zero_means_a_single_attempt():
 
 
 def test_ask_human_returns_value_and_records_history_without_touching_context():
-    """"ask_human(state, prompt, returns) -> value ... Leaves the context alone and is kept in history as human."""
+    """ "ask_human(state, prompt, returns) -> value ... Leaves the context alone and is kept in history as human."""
     human = FakeHuman(["yes"])
     agent = Agent(model=FakeModel([]), human=human, reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -325,7 +325,7 @@ def test_ask_human_returns_value_and_records_history_without_touching_context():
 
 
 def test_compact_replaces_context_with_task_plus_summary():
-    """"compact(state, instructions=None) | Gets a summary from the Model and replaces the context with it."" and
+    """ "compact(state, instructions=None) | Gets a summary from the Model and replaces the context with it."" and
     ""compact(summary) replaces the context with two messages: the original task + the summary." (compact
     follows the same rule)"""
     fake = FakeModel(["Files read so far: main.py"])
@@ -338,7 +338,7 @@ def test_compact_replaces_context_with_task_plus_summary():
 
 
 def test_compact_sends_tool_definitions_but_sets_tool_choice_none():
-    """""tool_choice="none": send the tool definitions but do not allow calls (used by ask and compact)."""
+    """ ""tool_choice="none": send the tool definitions but do not allow calls (used by ask and compact)."""
 
     @tool
     def some_tool() -> str:
@@ -355,7 +355,7 @@ def test_compact_sends_tool_definitions_but_sets_tool_choice_none():
 
 
 def test_compact_with_empty_summary_raises_outputerror_and_keeps_context():
-    """"If the summary is empty, the context is left alone and OutputError is raised (so no work is lost)."""
+    """ "If the summary is empty, the context is left alone and OutputError is raised (so no work is lost)."""
     fake = FakeModel([""])
     agent = Agent(model=fake, reporter=None)
     state = State(messages=[Message.user("Find the bug")])
@@ -369,7 +369,7 @@ def test_compact_with_empty_summary_raises_outputerror_and_keeps_context():
 
 
 def test_copy_overrides_only_given_settings_and_leaves_original_untouched():
-    """"copy(**settings to change) -> Agent | A new Agent with only some settings changed. The original is
+    """ "copy(**settings to change) -> Agent | A new Agent with only some settings changed. The original is
     untouched."""
     original = Agent(model=FakeModel([]), system="Original", reporter=None)
     copied = original.copy(system="New system")
@@ -382,7 +382,7 @@ def test_copy_overrides_only_given_settings_and_leaves_original_untouched():
 
 
 def test_agent_creation_with_duplicate_tool_names_raises_valueerror():
-    """"Duplicate tool names ... | when Agent(...) is created | ValueError" """
+    """ "Duplicate tool names ... | when Agent(...) is created | ValueError" """
 
     @tool(name="dup")
     def a() -> str:
@@ -399,14 +399,14 @@ def test_agent_creation_with_duplicate_tool_names_raises_valueerror():
 
 
 def test_agent_creation_subagent_missing_name_and_description_raises_valueerror():
-    """"An Agent without name or description in tools= | when Agent(...) is created | ValueError" """
+    """ "An Agent without name or description in tools= | when Agent(...) is created | ValueError" """
     incomplete = Agent(model=FakeModel([]), reporter=None)  # no name and no description
     with pytest.raises(ValueError):
         Agent(model=FakeModel([]), tools=[incomplete], reporter=None)
 
 
 def test_finish_then_think_raises_valueerror():
-    """"think, use_tools or ask called after finish() | on call | ValueError" (think)"""
+    """ "think, use_tools or ask called after finish() | on call | ValueError" (think)"""
     agent = Agent(model=FakeModel([]), reporter=None)
     state = State(messages=[Message.user("Task")])
     state.finish()
@@ -415,7 +415,7 @@ def test_finish_then_think_raises_valueerror():
 
 
 def test_finish_then_use_tools_raises_valueerror():
-    """"think, use_tools or ask called after finish() | on call | ValueError" (use_tools)"""
+    """ "think, use_tools or ask called after finish() | on call | ValueError" (use_tools)"""
     agent = Agent(model=FakeModel([]), reporter=None)
     state = State(messages=[Message.user("Task")])
     state.finish()
@@ -424,7 +424,7 @@ def test_finish_then_use_tools_raises_valueerror():
 
 
 def test_finish_then_ask_raises_valueerror():
-    """"think, use_tools or ask called after finish() | on call | ValueError" (ask)"""
+    """ "think, use_tools or ask called after finish() | on call | ValueError" (ask)"""
     agent = Agent(model=FakeModel([]), reporter=None)
     state = State(messages=[Message.user("Task")])
     state.finish()
@@ -433,7 +433,7 @@ def test_finish_then_ask_raises_valueerror():
 
 
 def test_think_with_pending_calls_raises_valueerror():
-    """"think, compact or save while there are pending calls | on call | ValueError" (think)"""
+    """ "think, compact or save while there are pending calls | on call | ValueError" (think)"""
 
     @tool
     def noop() -> str:
@@ -451,7 +451,7 @@ def test_think_with_pending_calls_raises_valueerror():
 
 
 def test_compact_with_pending_calls_raises_valueerror():
-    """"think, compact or save while there are pending calls | on call | ValueError" (compact)"""
+    """ "think, compact or save while there are pending calls | on call | ValueError" (compact)"""
 
     @tool
     def noop() -> str:
@@ -467,7 +467,7 @@ def test_compact_with_pending_calls_raises_valueerror():
 
 
 def test_any_agent_can_think_on_a_state_another_agent_thought_on():
-    """"Any Agent can think, use_tools and compact a State" (the 0.4 owner rule is gone)."""
+    """ "Any Agent can think, use_tools and compact a State" (the 0.4 owner rule is gone)."""
     state = State(messages=[Message.user("Task")])
     first = Agent(model=FakeModel(["First answer"]), reporter=None)
     first.think(state)
@@ -478,7 +478,7 @@ def test_any_agent_can_think_on_a_state_another_agent_thought_on():
 
 
 def test_run_on_already_finished_state_raises_valueerror():
-    """"run again on a finish()ed State | on call | ValueError" """
+    """ "run again on a finish()ed State | on call | ValueError" """
     agent = Agent(model=FakeModel([]), reporter=None)
     state = State(messages=[Message.user("Task")])
     state.finish("Already done")
@@ -487,7 +487,7 @@ def test_run_on_already_finished_state_raises_valueerror():
 
 
 def test_ask_human_without_human_raises_nohumanerror():
-    """"ask_human called with human=None | on call | NoHumanError" """
+    """ "ask_human called with human=None | on call | NoHumanError" """
     agent = Agent(model=FakeModel([]), human=None, reporter=None)
     state = State(messages=[Message.user("Task")])
     with pytest.raises(NoHumanError):
@@ -495,7 +495,7 @@ def test_ask_human_without_human_raises_nohumanerror():
 
 
 def test_think_tools_argument_rejects_tool_not_registered_on_agent():
-    """"Something that is not this Agent's tool in think(tools=[...])" (a tool that is not registered cannot be
+    """ "Something that is not this Agent's tool in think(tools=[...])" (a tool that is not registered cannot be
     passed to think(tools=...)) — raised as ValueError with how to fix it."""
 
     @tool
@@ -515,14 +515,14 @@ def test_think_tools_argument_rejects_tool_not_registered_on_agent():
 
 
 def test_copy_with_unknown_setting_raises_typeerror():
-    """"Unknown setting name in copy() | TypeError" """
+    """ "Unknown setting name in copy() | TypeError" """
     agent = Agent(model=FakeModel([]), reporter=None)
     with pytest.raises(TypeError):
         agent.copy(unknown_option=True)
 
 
 def test_ask_unsupported_returns_raises_typeerror():
-    """"Unsupported format in ask(returns=...) | TypeError" """
+    """ "Unsupported format in ask(returns=...) | TypeError" """
     agent = Agent(model=FakeModel([]), reporter=None)
     state = State(messages=[Message.user("Task")])
     with pytest.raises(TypeError):
@@ -530,7 +530,7 @@ def test_ask_unsupported_returns_raises_typeerror():
 
 
 def test_ask_human_unsupported_returns_raises_typeerror():
-    """"Unsupported format in ask_human(returns=...) | TypeError" """
+    """ "Unsupported format in ask_human(returns=...) | TypeError" """
     agent = Agent(model=FakeModel([]), human=FakeHuman(["1"]), reporter=None)
     state = State(messages=[Message.user("Task")])
     with pytest.raises(TypeError):
@@ -546,7 +546,7 @@ def test_state_has_no_public_deny():
 
 
 def test_agent_prints_nothing_and_never_reads_input(monkeypatch, capsys):
-    """"It does not print to the screen or read human input. It only notifies the Reporter and asks the Human."""
+    """ "It does not print to the screen or read human input. It only notifies the Reporter and asks the Human."""
 
     def fail_input(*args, **kwargs):
         raise AssertionError("Agent called input() directly")
@@ -560,7 +560,7 @@ def test_agent_prints_nothing_and_never_reads_input(monkeypatch, capsys):
 
 
 def test_agent_keeps_no_conversation_state_of_its_own():
-    """"It keeps no conversation history of its own. History belongs to the State."""
+    """ "It keeps no conversation history of its own. History belongs to the State."""
     agent = Agent(model=FakeModel(["First answer", "Second answer"]), reporter=None)
     first = State(messages=[Message.user("Task 1")])
     second = State(messages=[Message.user("Task 2")])
@@ -578,14 +578,14 @@ def test_agent_keeps_no_conversation_state_of_its_own():
 
 
 def test_closed_result_text_distinguishes_exception_from_interrupt():
-    """"Closed by an exception | (aborted: TimeoutError)" ""Closed by an interrupt | (interrupted by user)"
+    """ "Closed by an exception | (aborted: TimeoutError)" ""Closed by an interrupt | (interrupted by user)"
     (state.closed_result)"""
     assert closed_result(TimeoutError()) == "(aborted: TimeoutError)"
     assert closed_result(KeyboardInterrupt()) == INTERRUPTED == "(interrupted by user)"
 
 
 def test_think_exception_rolls_back_to_state_right_before_that_think():
-    """"think (during the model request) | roll back to just before that think | leaves no trace in the outside
+    """ "think (during the model request) | roll back to just before that think | leaves no trace in the outside
     world. Just request again"""
     fake = FakeModel([RuntimeError("model error"), "Worked this time"])
     agent = Agent(model=fake, reporter=None)
@@ -606,7 +606,7 @@ def test_think_exception_rolls_back_to_state_right_before_that_think():
 
 
 def test_use_tools_exception_leaves_failed_call_pending_but_records_finished_ones():
-    """"use_tools (while tools run) | Results of finished calls are recorded. Failed, unfinished and unstarted
+    """ "use_tools (while tools run) | Results of finished calls are recorded. Failed, unfinished and unstarted
     calls stay in pending_calls and the exception is raised"""
     agent = _agent_with_ok_and_boom_tools()
     state = State(messages=[Message.user("Task")])
@@ -617,13 +617,11 @@ def test_use_tools_exception_leaves_failed_call_pending_but_records_finished_one
 
     pending_names = {c.name for c in state.pending_calls}
     assert pending_names == {"boom_tool"}
-    assert any(
-        h.kind == "tool_result" and h.call and h.call.name == "ok_tool" for h in state.history
-    )
+    assert any(h.kind == "tool_result" and h.call and h.call.name == "ok_tool" for h in state.history)
 
 
 def test_run_closes_unfinished_tool_call_with_closed_marker_when_exception_escapes():
-    """"When it leaves run (wherever it came from) | after _record_error(e), close the remaining pending calls
+    """ "When it leaves run (wherever it came from) | after _record_error(e), close the remaining pending calls
     with closed_result(e)"" (e.g. "(aborted: TimeoutError)")"""
     agent = _agent_with_ok_and_boom_tools()
     state = State(messages=[Message.user("Task")])
@@ -638,20 +636,18 @@ def test_run_closes_unfinished_tool_call_with_closed_marker_when_exception_escap
 
 
 def test_error_recorded_only_once_for_the_same_exception_instance():
-    """"In every case an error entry is recorded. The same exception object is recorded only once
+    """ "In every case an error entry is recorded. The same exception object is recorded only once
     (_record_error checks with is)."""
     agent = _agent_with_ok_and_boom_tools()
     state = State(messages=[Message.user("Task")])
     with pytest.raises(TimeoutError):
         agent.run(state)
-    error_entries = [
-        h for h in state.history if h.kind == "error" and isinstance(h.error, TimeoutError)
-    ]
+    error_entries = [h for h in state.history if h.kind == "error" and isinstance(h.error, TimeoutError)]
     assert len(error_entries) == 1
 
 
 def test_loop_body_exception_outside_think_and_use_tools_keeps_context_and_closes_pending():
-    """"Loop body or block (outside the two above) | left as is. Pending calls left over are closed as above |
+    """ "Loop body or block (outside the two above) | left as is. Pending calls left over are closed as above |
     keeps the state saveable" """
 
     @tool
@@ -717,7 +713,7 @@ def test_loop_catching_use_tools_exception_and_retrying_keeps_run_from_raising()
 
 
 def test_keyboard_interrupt_during_think_rolls_back_like_any_other_exception():
-    """"Ctrl+C (KeyboardInterrupt) ... during a model reply, it rolls back" """
+    """ "Ctrl+C (KeyboardInterrupt) ... during a model reply, it rolls back" """
     fake = FakeModel([KeyboardInterrupt(), "success"])
     agent = Agent(model=fake, reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -735,7 +731,7 @@ def test_keyboard_interrupt_during_think_rolls_back_like_any_other_exception():
 
 
 def test_keyboard_interrupt_during_tool_execution_closes_unfinished_calls_as_interrupted():
-    """""While tools run, unfinished calls are closed as (interrupted by user)." ("Unfinished" here covers both
+    """ ""While tools run, unfinished calls are closed as (interrupted by user)." ("Unfinished" here covers both
     calls cut off by an exception midway and serial calls that never started because the parallel group
     failed)"""
 
@@ -763,7 +759,7 @@ def test_keyboard_interrupt_during_tool_execution_closes_unfinished_calls_as_int
 
 
 def test_late_sync_tool_result_is_recorded_and_announced_before_next_think():
-    """"For a sync tool, Python cannot stop the thread. The framework closes the call without waiting.
+    """ "For a sync tool, Python cannot stop the thread. The framework closes the call without waiting.
     If the result arrives later, it is kept in history and put into the context right before the next think
     as a notice like [notice] interrupted ... finished later: ..."""
 
@@ -788,9 +784,7 @@ def test_late_sync_tool_result_is_recorded_and_announced_before_next_think():
 
     # Wait until slow_sync really finishes (the worker thread's done callback records the late result).
     deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and not any(
-        h.kind == "tool_result" and h.late for h in state.history
-    ):
+    while time.monotonic() < deadline and not any(h.kind == "tool_result" and h.late for h in state.history):
         time.sleep(0.02)
     late_entries = [h for h in state.history if h.kind == "tool_result" and h.late]
     assert len(late_entries) == 1
@@ -806,7 +800,7 @@ def test_late_sync_tool_result_is_recorded_and_announced_before_next_think():
 
 
 def test_calls_in_one_turn_run_at_the_same_time():
-    """"Calls in one turn run at the same time."""
+    """ "Calls in one turn run at the same time."""
     barrier = threading.Barrier(2, timeout=2)
 
     @tool
@@ -833,7 +827,7 @@ def test_calls_in_one_turn_run_at_the_same_time():
 
 
 def test_parallel_false_tool_runs_only_after_the_parallel_batch_finishes():
-    """"Mark tools that must not run together (e.g. writing files) with @tool(parallel=False). They then run
+    """ "Mark tools that must not run together (e.g. writing files) with @tool(parallel=False). They then run
     one at a time after the rest finish."""
     log: list[str] = []
     lock = threading.Lock()
@@ -865,7 +859,7 @@ def test_parallel_false_tool_runs_only_after_the_parallel_batch_finishes():
 
 
 def test_tool_results_are_kept_in_the_order_the_model_requested_them():
-    """"The tool results of one turn go into a single user message, as ToolResultBlocks in the order the model
+    """ "The tool results of one turn go into a single user message, as ToolResultBlocks in the order the model
     requested them."""
 
     @tool
@@ -895,7 +889,7 @@ def test_tool_results_are_kept_in_the_order_the_model_requested_them():
 
 
 def test_run_with_string_starts_a_state_with_that_one_user_message_and_a_run_start_entry():
-    """"A string creates a new State: State(messages=[Message.user(text)])." The State is not returned, so the
+    """ "A string creates a new State: State(messages=[Message.user(text)])." The State is not returned, so the
     request the model got shows it."""
     fake = FakeModel(["Final answer"], name="m1")
     Agent(model=fake, reporter=None).run("Find the bug")
@@ -920,7 +914,7 @@ def test_run_takes_its_argument_positionally_only():
 
 
 def test_run_records_one_run_start_entry_holding_the_agents_info_before_the_first_think():
-    """"Record RunStartEntry(AgentInfo) at run start." It comes after the messages and before the model request."""
+    """ "Record RunStartEntry(AgentInfo) at run start." It comes after the messages and before the model request."""
 
     @tool
     def helper() -> str:
@@ -983,7 +977,7 @@ def test_run_start_clears_the_previous_runs_stop_reason():
 
 
 def test_a_state_being_run_by_a_thread_refuses_a_second_run_from_any_agent():
-    """"Refuse a State that is already being run by any Agent (ValueError)." The first run is not disturbed."""
+    """ "Refuse a State that is already being run by any Agent (ValueError)." The first run is not disturbed."""
     started = threading.Event()
     release = threading.Event()
 
@@ -1063,7 +1057,7 @@ def test_think_and_use_tools_are_not_blocked_by_the_run_guard_outside_a_run():
 
 
 def test_agent_copy_with_another_model_continues_the_same_state():
-    """"Any Agent (e.g. agent.copy(model=...)) may run a State." Each run has its own RunStartEntry, and the
+    """ "Any Agent (e.g. agent.copy(model=...)) may run a State." Each run has its own RunStartEntry, and the
     ModelRequestEntry of each names the model that was asked."""
     cheap = Agent(model=FakeModel(["First answer"], name="cheap"), reporter=None)
     strong = cheap.copy(model=FakeModel(["Second answer"], name="strong"))
@@ -1113,7 +1107,7 @@ def test_a_second_agent_can_use_tools_and_compact_a_state_the_first_one_thought_
 
 
 def test_think_records_a_request_entry_then_a_reply_entry_for_each_turn():
-    """"think records ModelRequestEntry(model name) before calling the model, then ModelReplyEntry." The request
+    """ "think records ModelRequestEntry(model name) before calling the model, then ModelReplyEntry." The request
     carries the turn it starts."""
 
     @tool
@@ -1154,7 +1148,7 @@ def test_the_model_request_is_on_record_while_the_model_is_still_working():
 
 
 def test_failed_think_records_request_and_error_and_the_turn_reverts():
-    """"Request then error, no reply: a rollback." Messages and turn are as before; the error stays in history."""
+    """ "Request then error, no reply: a rollback." Messages and turn are as before; the error stays in history."""
     fake = FakeModel([RuntimeError("model error"), "Worked this time"])
     agent = Agent(model=fake, reporter=None)
     state = State(messages=[Message.user("Task")])
@@ -1210,7 +1204,7 @@ def test_successful_think_puts_messages_added_while_waiting_after_the_reply():
 
 
 def test_an_exception_after_the_reply_is_recorded_does_not_undo_the_reply():
-    """"An exception after the reply entry (e.g. raised by Reporter.on_think_end) does NOT undo the reply." """
+    """ "An exception after the reply entry (e.g. raised by Reporter.on_think_end) does NOT undo the reply." """
 
     class _Failing(Reporter):
         def on_think_end(self, state, reply):
@@ -1226,7 +1220,7 @@ def test_an_exception_after_the_reply_is_recorded_does_not_undo_the_reply():
 
 
 def test_think_on_an_empty_state_raises_valueerror_and_records_nothing():
-    """"agent.think on a State with no messages raises ValueError." The model is not called."""
+    """ "agent.think on a State with no messages raises ValueError." The model is not called."""
     fake = FakeModel(["never used"])
     agent = Agent(model=fake, reporter=None)
     state = State()
@@ -1250,7 +1244,7 @@ def test_think_works_once_a_message_is_added_to_an_empty_state():
 
 
 def test_context_tokens_counts_messages_plus_this_agents_system_and_tools():
-    """"Estimate with this Agent's system/tool overhead." The same State costs more on an Agent with a system
+    """ "Estimate with this Agent's system/tool overhead." The same State costs more on an Agent with a system
     prompt and tools."""
 
     @tool
@@ -1295,7 +1289,7 @@ def test_the_state_no_longer_has_context_tokens_or_context_used():
 
 
 def test_compact_records_a_compact_context_change_with_the_summary_and_the_usage_of_the_request():
-    """"agent.compact ... same internal command as state.compact(summary) with usage=reply.usage"."""
+    """ "agent.compact ... same internal command as state.compact(summary) with usage=reply.usage"."""
     agent = Agent(model=FakeModel(["Files read so far: main.py"]), reporter=None)
     state = State(messages=[Message.user("Find the bug")])
     usage_before = state.usage
@@ -1324,7 +1318,7 @@ def test_manual_compact_records_a_compact_change_without_usage():
 
 
 def test_compact_keeps_messages_added_while_the_model_wrote_the_summary():
-    """"kept= the number of messages added while the model was summarizing": they stay after the summary."""
+    """ "kept= the number of messages added while the model was summarizing": they stay after the summary."""
     state = State(messages=[Message.user("Find the bug")])
 
     def summarize_while_user_types(request):
@@ -1359,7 +1353,7 @@ def test_failed_compact_changes_nothing_and_a_later_one_still_works():
 
 
 def test_ask_records_an_ask_entry_with_its_usage_and_that_usage_reaches_the_state():
-    """"agent.ask: ExchangeEntry("ask", Exchange(question, json_answer), usage=reply.usage)"."""
+    """ "agent.ask: ExchangeEntry("ask", Exchange(question, json_answer), usage=reply.usage)"."""
     agent = Agent(model=FakeModel(["A tidy plan"]), reporter=None)
     state = State(messages=[Message.user("Task")])
     agent.ask(state, "Summarize the work so far")
@@ -1373,7 +1367,7 @@ def test_ask_records_an_ask_entry_with_its_usage_and_that_usage_reaches_the_stat
 
 
 def test_ask_returns_the_real_object_but_records_json():
-    """"returns the real object to the caller" while the history keeps JSON (a dict for a dataclass)."""
+    """ "returns the real object to the caller" while the history keeps JSON (a dict for a dataclass)."""
     agent = Agent(model=FakeModel(['{"steps": ["First", "Second"]}']), reporter=None)
     state = State(messages=[Message.user("Task")])
     plan = agent.ask(state, "Make a plan", returns=_Plan)
@@ -1399,7 +1393,7 @@ def test_ask_with_retries_records_one_entry_with_the_usage_of_every_try():
 
 
 def test_ask_human_records_a_human_entry_without_usage():
-    """"ask_human: ExchangeEntry("human", ..., usage=None)"."""
+    """ "ask_human: ExchangeEntry("human", ..., usage=None)"."""
     agent = Agent(model=FakeModel([]), human=FakeHuman(["yes"]), reporter=None)
     state = State(messages=[Message.user("Task")])
     agent.ask_human(state, "Continue?", returns=bool)
@@ -1414,7 +1408,7 @@ def test_ask_human_records_a_human_entry_without_usage():
 
 
 def test_finish_records_a_stop_entry_with_the_answer():
-    """"finish records StopEntry(StoppedByFinish(answer))" and ``finished`` / ``answer`` follow it."""
+    """ "finish records StopEntry(StoppedByFinish(answer))" and ``finished`` / ``answer`` follow it."""
     state = State(messages=[Message.user("Task")])
     state.finish({"summary": "done"})
     entry = state.history[-1]

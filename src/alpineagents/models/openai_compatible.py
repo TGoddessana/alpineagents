@@ -179,9 +179,7 @@ class OpenAICompatible(Model):
         if supports is not None:
             self.supports = frozenset(supports)
         self._sdk_client: Any = None
-        self._async_clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._async_clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = weakref.WeakKeyDictionary()
         self._client_lock = threading.Lock()
 
     @property
@@ -189,9 +187,7 @@ class OpenAICompatible(Model):
         """Context window size in tokens, as passed to ``context_window=``."""
         return self._context_window
 
-    def respond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    def respond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """Sends one request as a stream and returns the reply.
 
         Text chunks go to ``on_text`` as they arrive. Reasoning text some servers send (``reasoning_content``) is
@@ -232,9 +228,7 @@ class OpenAICompatible(Model):
 
         return self._to_reply(collected)
 
-    async def arespond(
-        self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None
-    ) -> Reply:
+    async def arespond(self, request: Request, on_text: OnText | None = None, on_event: OnEvent | None = None) -> Reply:
         """The async version of ``respond``, with the same reply and errors. Cancelling it closes the stream."""
         # Uses AsyncOpenAI, one client per event loop (see _async_client).
         import openai

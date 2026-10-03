@@ -56,7 +56,10 @@ def test_same_rules_as_tool_hints():
 
         hints = Hints(**given)
         assert (hints.read_only, hints.destructive, hints.idempotent, hints.open_world) == (
-            noop.read_only, noop.destructive, noop.idempotent, noop.open_world,
+            noop.read_only,
+            noop.destructive,
+            noop.idempotent,
+            noop.open_world,
         )
 
 

@@ -141,7 +141,9 @@ def _oai_tool_delta(index, id=None, name=None, arguments=None):
 
 def _oai_usage(prompt_tokens, completion_tokens, cached_tokens=None):
     details = None if cached_tokens is None else SimpleNamespace(cached_tokens=cached_tokens)
-    return SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, prompt_tokens_details=details)
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, prompt_tokens_details=details
+    )
 
 
 # ==================================================================
@@ -150,7 +152,7 @@ def _oai_usage(prompt_tokens, completion_tokens, cached_tokens=None):
 
 
 class _RecordingModel(Model):
-    """"A new provider works once it implements the two required members."""
+    """ "A new provider works once it implements the two required members."""
 
     def __init__(self, window: int = 100_000):
         self.name = "recording"
@@ -189,7 +191,7 @@ class _PricedModel(Model):
 
 
 def test_respond_is_a_required_member():
-    """"respond(request, on_text) -> reply | required." Without it the adapter cannot be created."""
+    """ "respond(request, on_text) -> reply | required." Without it the adapter cannot be created."""
 
     class MissingRespond(Model):
         @property
@@ -201,7 +203,7 @@ def test_respond_is_a_required_member():
 
 
 def test_context_window_is_a_required_member():
-    """"context_window | required. The context window size." Without it the adapter cannot be created."""
+    """ "context_window | required. The context window size." Without it the adapter cannot be created."""
 
     class MissingContextWindow(Model):
         def respond(self, request, on_text=None, on_event=None):
@@ -212,7 +214,7 @@ def test_context_window_is_a_required_member():
 
 
 def test_new_adapter_needs_only_the_two_required_members():
-    """"A new provider works once it implements the two required members."""
+    """ "A new provider works once it implements the two required members."""
     model = _RecordingModel()
     assert model.context_window == 100_000
     reply = model.respond(Request(system=None, messages=()))
@@ -220,7 +222,7 @@ def test_new_adapter_needs_only_the_two_required_members():
 
 
 def test_count_tokens_has_a_default_implementation():
-    """"count_tokens(request) -> int | optional. The default adds an estimate of the newly added part to the last
+    """ "count_tokens(request) -> int | optional. The default adds an estimate of the newly added part to the last
     reply's usage."""
     model = _RecordingModel()
     anchored = Message("assistant", (TextBlock("previous answer"),), tokens=1000)
@@ -231,7 +233,7 @@ def test_count_tokens_has_a_default_implementation():
 
 
 def test_mark_cache_has_a_default_implementation_that_returns_request_unchanged():
-    """"mark_cache(request) -> Request | optional. Decides where prompt cache markers go." The default returns it
+    """ "mark_cache(request) -> Request | optional. Decides where prompt cache markers go." The default returns it
     unchanged."""
     model = _RecordingModel()
     request = Request(system="sys", messages=(Message.user("hello"),))
@@ -239,7 +241,7 @@ def test_mark_cache_has_a_default_implementation_that_returns_request_unchanged(
 
 
 def test_compact_has_a_default_implementation_calling_respond_with_tool_choice_none():
-    """"compact(request, instructions) -> summary | optional. The default is a summary request that works with every
+    """ "compact(request, instructions) -> summary | optional. The default is a summary request that works with every
     model."""
     model = _RecordingModel()
     request = Request(system=None, messages=(Message.user("work so far"),))
@@ -252,7 +254,7 @@ def test_compact_has_a_default_implementation_calling_respond_with_tool_choice_n
 
 
 def test_supports_defaults_to_empty_when_adapter_declares_nothing():
-    """"supports | the list of supported features." A minimal adapter that declares nothing supports no features."""
+    """ "supports | the list of supported features." A minimal adapter that declares nothing supports no features."""
     model = _RecordingModel()
     assert model.supports == frozenset()
 
@@ -263,27 +265,27 @@ def test_supports_defaults_to_empty_when_adapter_declares_nothing():
 
 
 def test_model_string_format_is_provider_slash_model():
-    """"Model string: the format is "provider/model" ("anthropic/claude-sonnet-5", ...)."""
+    """ "Model string: the format is "provider/model" ("anthropic/claude-sonnet-5", ...)."""
     model = resolve_model("anthropic/claude-sonnet-5")
     assert isinstance(model, Anthropic)
     assert model.name == "claude-sonnet-5"
 
 
 def test_colon_is_not_a_separator_because_it_collides_with_ollama_tags():
-    """"":` is not used as a separator because it collides with Ollama tags."" (the provider is up to the first `/`)"""
+    """ "":` is not used as a separator because it collides with Ollama tags."" (the provider is up to the first `/`)"""
     model = resolve_model("ollama/llama3:8b")
     assert isinstance(model, OpenAICompatible)
     assert model.name == "llama3:8b"
 
 
 def test_unambiguous_bare_name_may_omit_provider_prefix():
-    """"Models whose provider is clear from the name alone (`claude-*`, `gpt-*`) may omit the prefix."""
+    """ "Models whose provider is clear from the name alone (`claude-*`, `gpt-*`) may omit the prefix."""
     assert isinstance(resolve_model("claude-sonnet-5"), Anthropic)
     assert isinstance(resolve_model("gpt-5"), OpenAICompatible)
 
 
 def test_ambiguous_bare_name_raises_error_showing_candidates():
-    """"If ambiguous, raise an error that shows the candidates."""
+    """ "If ambiguous, raise an error that shows the candidates."""
     with pytest.raises(ValueError) as exc_info:
         resolve_model("mystery-model")
     message = str(exc_info.value)
@@ -299,7 +301,7 @@ def test_ambiguous_bare_name_raises_error_showing_candidates():
 
 @pytest.mark.parametrize("adapter_cls", [Anthropic, OpenAICompatible])
 def test_common_settings_share_the_same_names_across_adapter_classes(adapter_cls):
-    """"Shared settings (max_tokens, temperature, timeout, retries, price) have the same names in every class"""
+    """ "Shared settings (max_tokens, temperature, timeout, retries, price) have the same names in every class"""
     price = Price(input=1.0, output=2.0)
     model = adapter_cls("some-model", max_tokens=111, temperature=0.3, timeout=9.5, retries=4, price=price)
     assert model.max_tokens == 111
@@ -310,7 +312,7 @@ def test_common_settings_share_the_same_names_across_adapter_classes(adapter_cls
 
 
 def test_provider_specific_settings_exist_only_on_their_own_class():
-    """"Provider-specific settings (thinking=, cache=) exist only on their own class."""
+    """ "Provider-specific settings (thinking=, cache=) exist only on their own class."""
     Anthropic("claude-sonnet-5", thinking=True)  # Anthropic has it
     with pytest.raises(TypeError):
         OpenAICompatible("gpt-5", thinking=True)  # OpenAICompatible does not
@@ -320,7 +322,7 @@ def test_provider_specific_settings_exist_only_on_their_own_class():
 
 @pytest.mark.parametrize("adapter_cls, model_name", [(Anthropic, "claude-sonnet-5"), (OpenAICompatible, "gpt-5")])
 def test_adapter_construction_needs_no_network_or_credentials(monkeypatch, adapter_cls, model_name):
-    """"No network or credentials are used at construction. The SDK client is built once, on the first respond."""
+    """ "No network or credentials are used at construction. The SDK client is built once, on the first respond."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     model = adapter_cls(model_name)  # must be created without an exception
@@ -333,7 +335,7 @@ def test_adapter_construction_needs_no_network_or_credentials(monkeypatch, adapt
 
 
 def test_cost_is_computed_from_the_price():
-    """"price=Price(input=3.0, output=15.0)" (dollars per million tokens) gives usage.cost."""
+    """ "price=Price(input=3.0, output=15.0)" (dollars per million tokens) gives usage.cost."""
     price = Price(input=1.0, output=2.0)
     model = _PricedModel(price=price)
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, requests=1)
@@ -346,7 +348,7 @@ def test_there_is_no_price_lookup_extension_point():
 
 
 def test_cost_is_none_not_zero_when_price_is_unknown():
-    """"Without a price it is `None`. This keeps "unknown" apart from 0."""
+    """ "Without a price it is `None`. This keeps "unknown" apart from 0."""
     model = _PricedModel(price=None)
     usage = Usage(input_tokens=100, output_tokens=100, requests=1)
     cost = model._cost(usage)
@@ -360,7 +362,7 @@ def test_cost_is_none_not_zero_when_price_is_unknown():
 
 
 def test_setting_unsupported_feature_raises_value_error_not_silently_ignored():
-    """"Adapters declare the features they support. Setting an unsupported feature raises an error instead of being
+    """ "Adapters declare the features they support. Setting an unsupported feature raises an error instead of being
     silently ignored."""
     with pytest.raises(ValueError, match="does not support"):
         Anthropic("claude-sonnet-5", supports=frozenset(), thinking=True)
@@ -380,7 +382,7 @@ def test_unsupported_feature_error_message_lists_what_the_adapter_supports():
 
 
 def test_anthropic_retries_setting_is_passed_to_the_sdk_client(monkeypatch):
-    """"Retries use the SDK's retries (`retries=`)."""
+    """ "Retries use the SDK's retries (`retries=`)."""
     import anthropic as sdk
 
     captured: dict = {}
@@ -391,7 +393,7 @@ def test_anthropic_retries_setting_is_passed_to_the_sdk_client(monkeypatch):
 
 
 def test_openai_compatible_retries_setting_is_passed_to_the_sdk_client(monkeypatch):
-    """"Retries use the SDK's retries (`retries=`)."""
+    """ "Retries use the SDK's retries (`retries=`)."""
     import openai as sdk
 
     captured: dict = {}
@@ -407,7 +409,7 @@ def test_openai_compatible_retries_setting_is_passed_to_the_sdk_client(monkeypat
 
 
 def test_anthropic_respond_streams_text_via_on_text_callback(monkeypatch):
-    """"respond(request, on_text) -> reply | required. ... Passes text to `on_text` as it arrives."""
+    """ "respond(request, on_text) -> reply | required. ... Passes text to `on_text` as it arrives."""
     model = Anthropic("claude-sonnet-5")
     final = SimpleNamespace(
         content=[_anthropic_block("text", text="Hello there")],
@@ -438,7 +440,7 @@ def test_anthropic_respond_converts_tool_use_block_to_tool_call(monkeypatch):
 
 
 def test_anthropic_respond_preserves_thinking_block_data_verbatim(monkeypatch):
-    """"Received messages are not modified. Provider-specific data such as thinking blocks is kept as the original
+    """ "Received messages are not modified. Provider-specific data such as thinking blocks is kept as the original
     and sent back unchanged."""
     model = Anthropic("claude-sonnet-5", thinking=True)
     thinking_payload = {"type": "thinking", "thinking": "read the file first", "signature": "sig-abc"}
@@ -455,12 +457,14 @@ def test_anthropic_respond_preserves_thinking_block_data_verbatim(monkeypatch):
 
 
 def test_anthropic_respond_maps_usage_fields_from_sdk_usage(monkeypatch):
-    """"Adapters map Usage to one meaning: `input_tokens` is input that did not go through the cache, ..."
+    """ "Adapters map Usage to one meaning: `input_tokens` is input that did not go through the cache, ..."
     (ARCHITECTURE.md "Requests and replies")"""
     model = Anthropic("claude-sonnet-5")
     final = SimpleNamespace(
         content=[_anthropic_block("text", text="ok")],
-        usage=_anthropic_usage(input_tokens=100, output_tokens=20, cache_read_input_tokens=30, cache_creation_input_tokens=5),
+        usage=_anthropic_usage(
+            input_tokens=100, output_tokens=20, cache_read_input_tokens=30, cache_creation_input_tokens=5
+        ),
         stop_reason="end_turn",
     )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(final=final))
@@ -475,12 +479,14 @@ def test_anthropic_respond_maps_usage_fields_from_sdk_usage(monkeypatch):
 
 
 def test_anthropic_respond_usage_missing_cache_fields_default_to_zero(monkeypatch):
-    """"cost is `Model._cost(usage)` (`None` if the price is unknown)."" Before that, checks the premise that cache
+    """ "cost is `Model._cost(usage)` (`None` if the price is unknown)."" Before that, checks the premise that cache
     fields are normalized to 0 when the cache is not used."""
     model = Anthropic("claude-sonnet-5")
     final = SimpleNamespace(
         content=[_anthropic_block("text", text="ok")],
-        usage=_anthropic_usage(input_tokens=5, output_tokens=5, cache_read_input_tokens=None, cache_creation_input_tokens=None),
+        usage=_anthropic_usage(
+            input_tokens=5, output_tokens=5, cache_read_input_tokens=None, cache_creation_input_tokens=None
+        ),
         stop_reason="end_turn",
     )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(final=final))
@@ -492,11 +498,13 @@ def test_anthropic_respond_usage_missing_cache_fields_default_to_zero(monkeypatc
 
 
 def test_anthropic_respond_cost_is_none_when_no_price_configured(monkeypatch):
-    """"With neither, or for an unknown model, it is `None`."" (checked on the usage.cost that respond really
+    """ "With neither, or for an unknown model, it is `None`."" (checked on the usage.cost that respond really
     returns)"""
     model = Anthropic("claude-sonnet-5")
     final = SimpleNamespace(
-        content=[_anthropic_block("text", text="ok")], usage=_anthropic_usage(input_tokens=5, output_tokens=5), stop_reason="end_turn"
+        content=[_anthropic_block("text", text="ok")],
+        usage=_anthropic_usage(input_tokens=5, output_tokens=5),
+        stop_reason="end_turn",
     )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(final=final))
     reply = model.respond(Request(system=None, messages=(Message.user("hi"),)))
@@ -504,7 +512,7 @@ def test_anthropic_respond_cost_is_none_when_no_price_configured(monkeypatch):
 
 
 def test_anthropic_respond_cost_computed_from_given_price(monkeypatch):
-    """"price=Price(input=3.0, output=15.0)" (dollars per million tokens) takes priority over that."" → reflected
+    """ "price=Price(input=3.0, output=15.0)" (dollars per million tokens) takes priority over that."" → reflected
     in the reply's usage.cost."""
     price = Price(input=3.0, output=15.0)
     model = Anthropic("claude-sonnet-5", price=price)
@@ -519,13 +527,15 @@ def test_anthropic_respond_cost_computed_from_given_price(monkeypatch):
 
 
 def test_anthropic_sends_own_provider_raw_block_back_verbatim(monkeypatch):
-    """"Provider-specific data such as thinking blocks is kept as the original and sent back unchanged.""
+    """ "Provider-specific data such as thinking blocks is kept as the original and sent back unchanged.""
     (same provider)"""
     model = Anthropic("claude-sonnet-5")
     raw_payload = {"type": "thinking", "thinking": "that earlier thought", "signature": "sig-xyz"}
     history = Message("assistant", (RawBlock("anthropic", raw_payload),))
     final = SimpleNamespace(
-        content=[_anthropic_block("text", text="Continuing")], usage=_anthropic_usage(input_tokens=1, output_tokens=1), stop_reason="end_turn"
+        content=[_anthropic_block("text", text="Continuing")],
+        usage=_anthropic_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
     )
     calls = _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(final=final))
 
@@ -537,12 +547,14 @@ def test_anthropic_sends_own_provider_raw_block_back_verbatim(monkeypatch):
 
 
 def test_anthropic_drops_raw_block_from_a_different_provider(monkeypatch):
-    """"Only an adapter with the same `provider` (`Model.provider`) sends it back unchanged; other adapters drop it.""
+    """ "Only an adapter with the same `provider` (`Model.provider`) sends it back unchanged; other adapters drop it.""
     (ARCHITECTURE.md "Message representation"; the counterpart of the keep-the-original rule)"""
     model = Anthropic("claude-sonnet-5")
     history = Message("assistant", (RawBlock("openai_compatible", {"reasoning_content": "other provider"}),))
     final = SimpleNamespace(
-        content=[_anthropic_block("text", text="Continuing")], usage=_anthropic_usage(input_tokens=1, output_tokens=1), stop_reason="end_turn"
+        content=[_anthropic_block("text", text="Continuing")],
+        usage=_anthropic_usage(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
     )
     calls = _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(final=final))
 
@@ -559,7 +571,7 @@ def test_anthropic_drops_raw_block_from_a_different_provider(monkeypatch):
 
 
 def test_openai_compatible_respond_streams_text_via_on_text_callback(monkeypatch):
-    """"respond(request, on_text) -> reply | required. ... Passes text to `on_text` as it arrives."" (the
+    """ "respond(request, on_text) -> reply | required. ... Passes text to `on_text` as it arrives."" (the
     OpenAI-compatible adapter has the same contract)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     chunks = [_oai_chunk(content="Hel"), _oai_chunk(content="lo"), _oai_chunk(finish_reason="stop")]
@@ -606,7 +618,7 @@ def test_openai_compatible_fallback_call_ids_are_unique_across_turns(monkeypatch
 
 
 def test_openai_compatible_respond_maps_usage_and_subtracts_cached_from_input(monkeypatch):
-    """"Adapters map Usage to one meaning: input_tokens is input that did not go through the cache, total input =
+    """ "Adapters map Usage to one meaning: input_tokens is input that did not go through the cache, total input =
     input + cache_read + cache_write."""
     model = OpenAICompatible("gpt-5", api_key="x")
     usage = _oai_usage(prompt_tokens=100, completion_tokens=20, cached_tokens=30)
@@ -647,7 +659,7 @@ def test_openai_compatible_respond_model_falls_back_to_requested_name(monkeypatc
 
 
 def test_openai_compatible_respond_cost_is_none_when_no_price_configured(monkeypatch):
-    """"With neither, or for an unknown model, it is `None`."" (checked on the OpenAI-compatible adapter's respond
+    """ "With neither, or for an unknown model, it is `None`."" (checked on the OpenAI-compatible adapter's respond
     result)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     usage = _oai_usage(prompt_tokens=10, completion_tokens=10)
@@ -659,7 +671,7 @@ def test_openai_compatible_respond_cost_is_none_when_no_price_configured(monkeyp
 
 
 def test_openai_compatible_own_provider_raw_block_merged_back_verbatim(monkeypatch):
-    """"Provider-specific data such as thinking blocks is kept as the original and sent back unchanged.""
+    """ "Provider-specific data such as thinking blocks is kept as the original and sent back unchanged.""
     (same provider)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     raw_data = {"reasoning_content": "this is what I thought before"}
@@ -675,7 +687,7 @@ def test_openai_compatible_own_provider_raw_block_merged_back_verbatim(monkeypat
 
 
 def test_openai_compatible_drops_raw_block_from_a_different_provider(monkeypatch):
-    """"Only an adapter with the same `provider` sends it back unchanged; other adapters drop it.""
+    """ "Only an adapter with the same `provider` sends it back unchanged; other adapters drop it.""
     (ARCHITECTURE.md "Message representation" — RawBlock is kept as the original only when the provider matches)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     history = Message("assistant", (RawBlock("anthropic", {"type": "thinking", "thinking": "another provider"}),))
@@ -696,10 +708,12 @@ def test_openai_compatible_drops_raw_block_from_a_different_provider(monkeypatch
 
 
 def test_anthropic_rate_limit_wrapped_as_rate_limit_error_with_cause(monkeypatch):
-    """"Model (API): if it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes
+    """ "Model (API): if it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes
     (RateLimitError, ...). The original SDK exception is in __cause__."""
     model = Anthropic("claude-sonnet-5")
-    sdk_exc = SDKAnthropicRateLimit("slow down", response=_fake_response(429, "rate_limit_error", "slow down"), body=None)
+    sdk_exc = SDKAnthropicRateLimit(
+        "slow down", response=_fake_response(429, "rate_limit_error", "slow down"), body=None
+    )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(error=sdk_exc))
 
     with pytest.raises(RateLimitError) as exc_info:
@@ -710,12 +724,16 @@ def test_anthropic_rate_limit_wrapped_as_rate_limit_error_with_cause(monkeypatch
 @pytest.mark.parametrize(
     "sdk_exc_factory",
     [
-        lambda: SDKAnthropicAuthError("bad key", response=_fake_response(401, "authentication_error", "bad key"), body=None),
-        lambda: SDKAnthropicPermissionDenied("no perm", response=_fake_response(403, "permission_error", "no perm"), body=None),
+        lambda: SDKAnthropicAuthError(
+            "bad key", response=_fake_response(401, "authentication_error", "bad key"), body=None
+        ),
+        lambda: SDKAnthropicPermissionDenied(
+            "no perm", response=_fake_response(403, "permission_error", "no perm"), body=None
+        ),
     ],
 )
 def test_anthropic_auth_failures_wrapped_as_auth_error(monkeypatch, sdk_exc_factory):
-    """"...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
+    """ "...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
     model = Anthropic("claude-sonnet-5")
     sdk_exc = sdk_exc_factory()
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(error=sdk_exc))
@@ -726,9 +744,11 @@ def test_anthropic_auth_failures_wrapped_as_auth_error(monkeypatch, sdk_exc_fact
 
 
 def test_anthropic_request_too_large_wrapped_as_context_too_long_error(monkeypatch):
-    """"...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
+    """ "...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
     model = Anthropic("claude-sonnet-5")
-    sdk_exc = SDKAnthropicRequestTooLarge("too big", response=_fake_response(413, "request_too_large", "too big"), body=None)
+    sdk_exc = SDKAnthropicRequestTooLarge(
+        "too big", response=_fake_response(413, "request_too_large", "too big"), body=None
+    )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(error=sdk_exc))
 
     with pytest.raises(ContextTooLongError) as exc_info:
@@ -737,11 +757,13 @@ def test_anthropic_request_too_large_wrapped_as_context_too_long_error(monkeypat
 
 
 def test_anthropic_other_sdk_errors_wrapped_as_generic_provider_error(monkeypatch):
-    """"If it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes" (anything else gets
+    """ "If it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes" (anything else gets
     the base type)"""
     model = Anthropic("claude-sonnet-5")
     body = {"error": {"type": "invalid_request_error", "message": "missing field"}}
-    sdk_exc = SDKAnthropicBadRequest("bad", response=_fake_response(400, "invalid_request_error", "missing field"), body=body)
+    sdk_exc = SDKAnthropicBadRequest(
+        "bad", response=_fake_response(400, "invalid_request_error", "missing field"), body=body
+    )
     _install_anthropic_client(monkeypatch, model, _AnthropicStreamCM(error=sdk_exc))
 
     with pytest.raises(ProviderError) as exc_info:
@@ -751,7 +773,7 @@ def test_anthropic_other_sdk_errors_wrapped_as_generic_provider_error(monkeypatc
 
 
 def test_openai_compatible_rate_limit_wrapped_as_rate_limit_error_with_cause(monkeypatch):
-    """"Model (API): if it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes
+    """ "Model (API): if it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes
     (RateLimitError, ...). The original SDK exception is in __cause__." (the OpenAI-compatible adapter follows the
     same contract)"""
     model = OpenAICompatible("gpt-5", api_key="x")
@@ -764,7 +786,7 @@ def test_openai_compatible_rate_limit_wrapped_as_rate_limit_error_with_cause(mon
 
 
 def test_openai_compatible_auth_failure_wrapped_as_auth_error(monkeypatch):
-    """"...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
+    """ "...ContextTooLongError, AuthError). The original SDK exception is in __cause__."""
     model = OpenAICompatible("gpt-5", api_key="x")
     sdk_exc = SDKOpenAIAuthError("bad key", response=_fake_response(401, "authentication_error", "bad key"), body=None)
     _install_openai_client(monkeypatch, model, error=sdk_exc)
@@ -775,12 +797,14 @@ def test_openai_compatible_auth_failure_wrapped_as_auth_error(monkeypatch):
 
 
 def test_openai_compatible_context_length_exceeded_wrapped_as_context_too_long_error(monkeypatch):
-    """"...ContextTooLongError, AuthError). The original SDK exception is in __cause__." (when the server reports it
+    """ "...ContextTooLongError, AuthError). The original SDK exception is in __cause__." (when the server reports it
     via code)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     body = {"type": "invalid_request_error", "code": "context_length_exceeded", "message": "too long"}
     sdk_exc = SDKOpenAIBadRequest(
-        "too long", response=_fake_response(400, "invalid_request_error", "too long", {"code": "context_length_exceeded"}), body=body
+        "too long",
+        response=_fake_response(400, "invalid_request_error", "too long", {"code": "context_length_exceeded"}),
+        body=body,
     )
     _install_openai_client(monkeypatch, model, error=sdk_exc)
 
@@ -790,11 +814,13 @@ def test_openai_compatible_context_length_exceeded_wrapped_as_context_too_long_e
 
 
 def test_openai_compatible_other_bad_request_wrapped_as_generic_provider_error(monkeypatch):
-    """"If it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes" (anything else gets
+    """ "If it still fails after the SDK's retries, alpineagents.ProviderError and its subtypes" (anything else gets
     the base type)"""
     model = OpenAICompatible("gpt-5", api_key="x")
     body = {"type": "invalid_request_error", "message": "missing field"}
-    sdk_exc = SDKOpenAIBadRequest("bad", response=_fake_response(400, "invalid_request_error", "missing field"), body=body)
+    sdk_exc = SDKOpenAIBadRequest(
+        "bad", response=_fake_response(400, "invalid_request_error", "missing field"), body=body
+    )
     _install_openai_client(monkeypatch, model, error=sdk_exc)
 
     with pytest.raises(ProviderError) as exc_info:
@@ -804,7 +830,7 @@ def test_openai_compatible_other_bad_request_wrapped_as_generic_provider_error(m
 
 
 def test_provider_error_hierarchy_lets_generic_except_survive_provider_swap():
-    """"Why only provider errors are wrapped: user code with `except anthropic.RateLimitError` breaks the moment the
+    """ "Why only provider errors are wrapped: user code with `except anthropic.RateLimitError` breaks the moment the
     provider changes. So errors are wrapped in common types only at the provider boundary."""
     assert issubclass(RateLimitError, ProviderError)
     assert issubclass(ContextTooLongError, ProviderError)
