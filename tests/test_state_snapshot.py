@@ -637,19 +637,23 @@ def test_fork_in_the_middle_of_a_turn_keeps_the_pending_calls():
     assert_replays(state)
 
 
-def test_fork_while_the_model_is_being_waited_on_is_waiting_too():
+def test_fork_while_the_model_is_being_waited_on_raises():
     model = SlowModel()
     agent = Agent(model=model, reporter=None, human=None)
     state = task()
     thread, errors = think_in_thread(agent, state, model)
     try:
-        fork = state.fork()
-        assert fork.snapshot() == state.snapshot()
-        assert fork.turn == 1 and fork.snapshot()._waiting
+        with pytest.raises(ValueError, match=r"cannot call fork\(\) while the model is being waited on") as e:
+            state.fork()
+        assert "Fix:" in str(e.value) and "on_think_end" in str(e.value)
+        # a plain replay of the waiting history is still allowed
+        replay = State(history=state.history)
+        assert replay.snapshot() == state.snapshot() and replay.snapshot()._waiting
     finally:
         model.release.set()
         thread.join(timeout=5)
     assert not errors
+    assert state.fork().snapshot() == state.snapshot()  # after think returned
 
 
 # ===========================================================================

@@ -222,8 +222,12 @@ agent.run(attempt)
 ```
 
 A fork is the same State at that point: a fork of a finished State is finished too, so to continue from its
-messages start a new State: `State(messages=state.messages)`. Fork between turns: a fork taken while the model is being
-waited on is waiting too.
+messages start a new State: `State(messages=state.messages)`.
+
+Fork between turns. `fork()` raises `ValueError` while the model is being waited on, because the copy would wait for
+a reply that no `think` will record: fork before `think`, or after it returns (for example in
+`Reporter.on_think_end`). `State(history=...)` of a history taken while waiting is still allowed: it is a plain
+replay.
 
 ## Pending calls
 

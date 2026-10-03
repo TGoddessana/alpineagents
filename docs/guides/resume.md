@@ -130,6 +130,8 @@ to try a different next step and keep the original:
 - A fork is independent: running or changing it leaves `state` as it was.
 - With `Agent(store=...)`, the fork is saved under its own id the first time the Agent runs it.
 - `fork().snapshot() == state.snapshot()`: equal histories give equal snapshots.
+- Fork between turns. `fork()` raises `ValueError` while the model is being waited on: fork before `think`, or after
+  it returns (for example in `Reporter.on_think_end`).
 
 ## List and delete
 

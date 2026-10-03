@@ -531,6 +531,7 @@ class State:
         messages: Iterable[Message] = (),
         extra_data: Mapping[str, Any] | None = None,
         history: Iterable[HistoryEntry] | None = None,
+        **kwargs: Never,
     ) -> None:
         """Start a State, empty or from messages, extra data or a history. Everything is keyword-only.
 
@@ -546,7 +547,8 @@ class State:
                 combined with ``messages`` or ``extra_data``: the history already holds them.
 
         Raises:
-            TypeError: A positional argument, an item of ``messages`` that is not a ``Message``, an
+            TypeError: A positional argument, a keyword that does not exist (the 0.4 ones, ``task=``, ``context=`` and
+                ``data=``, get a message naming their replacement), an item of ``messages`` that is not a ``Message``, an
                 ``extra_data`` value that is not JSON, an item of ``history`` that is not a history entry, or
                 ``history`` together with ``messages`` or ``extra_data``.
             ValueError: ``id`` has other characters, or ``history`` is inconsistent (it gives the index of the
@@ -560,6 +562,8 @@ class State:
                     'State(messages=[Message.user("Find the bug in this repo")])',
                 )
             )
+        if kwargs:
+            raise TypeError(_bad_keyword(next(iter(kwargs))))
         self._id = uuid.uuid4().hex if id is None else check_id(id, "State(id=...)")
         self._lock = threading.RLock()
         # Held for a whole ``edit_extra_data()`` block, so concurrent edits take turns. Never taken inside
@@ -583,6 +587,26 @@ class State:
             self._replay_history(self._check_history_args(history, messages, extra_data))
             return
         self._import(self._check_messages(messages), extra_data)
+
+    # ------------------------------------------------------------ migration errors
+
+    # A State is changed only through its commands, and 0.4 names are gone without aliases. These two hooks only
+    # explain: they turn a bare AttributeError into one that names the replacement. They are hidden from type
+    # checkers so that a typo like ``state.mesages`` is still reported by them.
+    if not TYPE_CHECKING:
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name.startswith("_"):  # internal: set by State itself, a subclass or copy/pickle machinery
+                object.__setattr__(self, name, value)
+                return
+            raise AttributeError(_refused_assignment(type(self), name))
+
+        def __getattr__(self, name: str) -> Any:
+            # Runs only for names that do not exist, so every real attribute is untouched.
+            hint = _REMOVED_NAMES.get(name)
+            if hint is not None:
+                raise AttributeError(fix_message(*hint), name=name, obj=self)
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}", name=name, obj=self)
 
     # ------------------------------------------------------------ building
 
@@ -1014,16 +1038,31 @@ class State:
         no store, no running Agent. Use it to try something on a copy.
 
         The copy is the same State at that point, so a fork of a finished State is finished too (start a new State
-        from ``state.messages`` to continue), and a fork taken while a model request is waiting (e.g. from a
-        Reporter's ``on_think_start``) is waiting too, with no ``think()`` behind it. Fork between turns.
+        from ``state.messages`` to continue). Fork between turns: while a model request is being waited on there is
+        no ``think()`` behind the copy, so ``fork()`` refuses (fork before ``think``, or after it returns, e.g. in
+        ``Reporter.on_think_end``). ``State(history=snapshot.history)`` of such a snapshot is still allowed: it is
+        a plain replay.
 
         Example:
             ```python
             attempt = state.fork()
             agent.run(attempt)  # `state` is untouched
             ```
+
+        Raises:
+            ValueError: The model is being waited on.
         """
-        return State(history=self.history)
+        snap = self._snap
+        if snap._waiting:
+            raise ValueError(
+                fix_message(
+                    "cannot call fork() while the model is being waited on: the copy would be waiting for a reply "
+                    "that no think() will record",
+                    "fork before think, or after think returns (e.g. in Reporter.on_think_end)",
+                    "attempt = state.fork()\nagent.think(state)",
+                )
+            )
+        return State(history=snap.history)
 
     def restore(self, snapshot: StateSnapshot) -> None:
         """Go back to ``snapshot``, a ``state.snapshot()`` taken earlier from this State.
@@ -1632,6 +1671,186 @@ _ENTRY_TYPES = (
     ExtraDataEntry,
     ErrorEntry,
 )
+
+
+_DERIVED_KEYWORDS = ("turn", "usage", "stopped", "finished", "answer", "pending_calls")
+_ACCEPTED_KEYWORDS = ("id", "messages", "extra_data", "history")
+
+#: 0.4 names, with what replaced them: (problem, fix, example) for ``fix_message``. Reading one raises
+#: ``AttributeError`` with this text (no alias is kept).
+_REMOVED_NAMES: dict[str, tuple[str, str, str]] = {
+    "data": (
+        "state.data is gone in 0.5: it is state.extra_data, and read-only",
+        "read state.extra_data; change it inside edit_extra_data()",
+        'with state.edit_extra_data() as d:\n    d["calls"] = d.get("calls", 0) + 1',
+    ),
+    "context": (
+        "state.context is gone in 0.5: it is state.messages (a read-only tuple)",
+        "read state.messages; change it with state.add_message(...) or state.compact(...)",
+        'state.add_message(Message.user("..."))',
+    ),
+    "task": (
+        "state.task is gone in 0.5: the first message is not special",
+        "read state.messages[0] (or StateInfo.first_message in a store listing)",
+        "state.messages[0].text",
+    ),
+    "lock": (
+        "state.lock is gone in 0.5: no State method needs you to hold a lock",
+        "use edit_extra_data(), which is atomic, or state.snapshot() for several values that belong together",
+        'with state.edit_extra_data() as d:\n    d["calls"] = d.get("calls", 0) + 1',
+    ),
+    "is_answered": (
+        "State.is_answered is gone in 0.5: an until function is one you write",
+        "write the check for your task: the last message is an assistant message without tool calls, and nothing "
+        "is pending",
+        "def waiting_for_user(state: State) -> bool:\n"
+        "    if state.pending_calls or not state.messages:\n"
+        "        return False\n"
+        "    last = state.messages[-1]\n"
+        '    return last.role == "assistant" and not last.tool_calls',
+    ),
+    "wants_tools": (
+        "state.wants_tools() is gone in 0.5",
+        "read state.pending_calls: the tool calls the model asked for that have no result yet",
+        "if state.pending_calls:\n    agent.use_tools(state)",
+    ),
+    "is_finished": (
+        "state.is_finished() is gone in 0.5: it is the property state.finished",
+        "read state.finished, without parentheses",
+        "if state.finished: ...",
+    ),
+    "add_user_message": (
+        "state.add_user_message(text) is gone in 0.5",
+        "pass a Message to state.add_message (images go into Message.user after the text)",
+        'state.add_message(Message.user("..."))',
+    ),
+    "add_notice": (
+        "state.add_notice(text) is gone in 0.5",
+        "pass a notice Message to state.add_message",
+        'state.add_message(Message.notice("..."))',
+    ),
+    "start_from": (
+        "state.start_from(summary) is gone in 0.5",
+        "use state.compact(summary): it keeps the first message and the summary",
+        'state.compact("what happened so far")',
+    ),
+    "context_used": (
+        "state.context_used is gone in 0.5: the answer depends on the model, so the Agent gives it",
+        "ask the Agent that will run the State",
+        "agent.context_used(state)",
+    ),
+    "context_tokens": (
+        "state.context_tokens is gone in 0.5: the answer depends on the model, so the Agent gives it",
+        "ask the Agent that will run the State",
+        "agent.context_tokens(state)",
+    ),
+}
+
+#: What to do instead of assigning a read-only property, per property name.
+_COMMAND_FOR = {
+    "messages": ("state.add_message(...) adds one, state.compact(summary) or state.clear_tool_results() shrink it, "
+                 "state.restore(snapshot) goes back", 'state.add_message(Message.user("..."))'),
+    "extra_data": ("change it inside edit_extra_data()", 'with state.edit_extra_data() as d:\n    d["k"] = 1'),
+    "history": ("history only grows: every command records its own entry (to start from a history, build "
+                "State(history=...))", "copy = State(history=state.history)"),
+    "pending_calls": ("agent.use_tools(state) gives them results; they come from the model's reply",
+                      "agent.use_tools(state)"),
+    "turn": ("it is derived from history: agent.think(state) adds a turn", "agent.think(state)"),
+    "usage": ("it is derived from history: every think, ask and compact adds to it", "agent.think(state)"),
+    "finished": ("call state.finish(answer)", 'state.finish("done")'),
+    "answer": ("call state.finish(answer)", 'state.finish("done")'),
+    "stopped": ("it is set by the run (an until, a limit, a permission) or by state.finish(answer)",
+                'state.finish("done")'),
+    "created_at": ("it is the time of the first history entry", "state.created_at"),
+    "updated_at": ("it is the time of the latest history entry", "state.updated_at"),
+    "id": ("the id is given when the State is made", 'State(id="bug-1")'),
+    "parent": ("it is reserved for subagents", "state.parent"),
+    "root": ("it is reserved for subagents", "state.root"),
+    "depth": ("it is reserved for subagents", "state.depth"),
+}
+
+#: Assigning a removed 0.4 name: what to do instead (more specific than reading it).
+_ASSIGN_REMOVED = {
+    "data": (
+        "state.data is gone in 0.5: it is state.extra_data, and read-only",
+        "change it inside edit_extra_data()",
+        'with state.edit_extra_data() as d:\n    d["k"] = v',
+    ),
+    "context": (
+        "state.context is gone in 0.5: it is state.messages, and read-only",
+        "state.messages is read-only; use state.add_message(...) / state.compact(...)",
+        'state.add_message(Message.user("..."))',
+    ),
+    "task": (
+        "state.task is gone in 0.5: the first message is not special",
+        "removed; the first message is state.messages[0]",
+        "state.messages[0].text",
+    ),
+    "lock": (
+        "state.lock is gone in 0.5: no State method needs you to hold a lock",
+        "removed; edit_extra_data() is atomic",
+        'with state.edit_extra_data() as d:\n    d["k"] = v',
+    ),
+}
+
+
+def _bad_keyword(name: str) -> str:
+    """The ``TypeError`` text for ``State(name=...)`` when ``name`` is not a keyword of 0.5."""
+    if name == "task":
+        return fix_message(
+            "State has no task in 0.5: the first message is not special",
+            "pass the first message as State(messages=[Message.user(...)])",
+            'State(messages=[Message.user("Fix calc.py")])',
+        )
+    if name == "context":
+        return fix_message(
+            "State(context=...) is State(messages=...) in 0.5, and takes Message objects",
+            "rename the keyword to messages= and wrap each item with Message.user(...)",
+            'State(messages=[Message.user("Fix calc.py")])',
+        )
+    if name == "data":
+        return fix_message(
+            "State(data=...) is State(extra_data=...) in 0.5",
+            "rename the keyword to extra_data=",
+            'State(extra_data={"repo": "api"})',
+        )
+    if name in _DERIVED_KEYWORDS:
+        return fix_message(
+            f"State(...) takes no {name}=: it is derived from history",
+            "pass history=, or let the Agent record it",
+            "State(history=other.history)",
+        )
+    return fix_message(
+        f"State(...) got an unexpected keyword argument {name!r}",
+        f"the accepted keywords are {', '.join(_ACCEPTED_KEYWORDS)}",
+        'State(messages=[Message.user("...")], id="bug-1", extra_data={"repo": "api"})',
+    )
+
+
+def _refused_assignment(cls: type, name: str) -> str:
+    """The ``AttributeError`` text for ``state.name = value`` (only ``_`` names may be assigned)."""
+    if name in _ASSIGN_REMOVED:
+        return fix_message(*_ASSIGN_REMOVED[name])
+    if name in _COMMAND_FOR:
+        fix, example = _COMMAND_FOR[name]
+        return fix_message(
+            f"state.{name} is read-only: a State is changed only through its commands",
+            fix,
+            example,
+        )
+    if name in _REMOVED_NAMES:
+        return fix_message(*_REMOVED_NAMES[name])
+    if callable(getattr(cls, name, None)):
+        return fix_message(
+            f"state.{name} is a State method and cannot be replaced",
+            "call it instead of assigning to it",
+            f"state.{name}(...)",
+        )
+    return fix_message(
+        f"State has no attribute {name!r} and does not accept new attributes",
+        "keep your own values in state.extra_data (edit_extra_data()), or in a variable next to the State",
+        f'with state.edit_extra_data() as d:\n    d["{name}"] = ...',
+    )
 
 
 def _check_text(action: str, name: str, value: Any, example: str) -> None:

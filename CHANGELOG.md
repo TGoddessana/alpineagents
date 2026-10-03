@@ -137,7 +137,9 @@ computed from `state.history`.
   the [State](https://tgoddessana.github.io/alpineagents/concepts/state/) concept page.
   - Every value of a snapshot is computed from its `history`, so `State(history=state.history).snapshot() ==
     state.snapshot()` holds at any moment, also in the middle of a turn.
-  - `state.fork()` makes a State with the same history, a new id, and no store or running Agent.
+  - `state.fork()` makes a State with the same history, a new id, and no store or running Agent. It raises
+    `ValueError` while the model is being waited on (fork before `think`, or after it returns, e.g. in
+    `Reporter.on_think_end`); `State(history=...)` of a history taken then is still a plain replay.
     `state.restore(snapshot)` goes back to a snapshot of the same State: `messages`, `turn`, `extra_data`, `finished`,
     `answer` and `stopped` go back, `usage` stays (the tokens were spent), and `history` keeps everything and gains
     a `context_change` entry of kind `"restore"`.
@@ -204,6 +206,13 @@ computed from `state.history`.
   State.
 
 ### Migrating from 0.4
+
+**Coming from 0.4:** the old names are not aliased, but they now fail with a message that names the replacement.
+`State(task=...)`, `State(context=...)` and `State(data=...)` raise `TypeError` pointing to `messages=` and
+`extra_data=`; assigning to a State (`state.data = ...`, `state.messages = ...`, a typo) raises `AttributeError` that
+names the command to use; and reading a removed name (`state.data`, `state.context`, `state.task`, `state.lock`,
+`state.is_answered`, `state.add_user_message`, ...) raises `AttributeError` with its replacement. Only names starting
+with `_` can be assigned on a State.
 
 | 0.4 | 0.5 |
 | --- | --- |
