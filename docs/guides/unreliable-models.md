@@ -49,16 +49,16 @@ differ from the first. Whether that is worth it, and what the person sees, is up
 ## Hand back a reply with no tool call
 
 Some models stop to say what they will do next ("I will now read the file") instead of doing it. That reply has no
-tool call, so `State.is_answered` is true and the loop stops. This loop hands it back:
+tool call, so `waiting_for_user` is true and the loop stops. This loop hands it back:
 
 ```python
 --8<-- "docs_src/nudge.py"
 ```
 
-1. When the reply calls tools, the counter in `state.data` goes back to 0.
-2. When it calls none, `state.add_notice(NUDGE)` asks the model to go on, up to `NUDGES` times in a row.
-3. The notice comes after the reply, so `State.is_answered` is false and the loop runs another turn.
-4. After `NUDGES` notices, nothing is added. `State.is_answered` is true and the loop stops.
+1. When the reply calls tools, the counter in `state.extra_data` goes back to 0.
+2. When it calls none, `state.add_message(Message.notice(NUDGE))` asks the model to go on, up to `NUDGES` times in a row.
+3. The notice comes after the reply, so `waiting_for_user` is false and the loop runs another turn.
+4. After `NUDGES` notices, nothing is added. `waiting_for_user` is true and the loop stops.
 
 The notice is in history as kind `notice`, and the model sees it as a user message that starts with `[notice] `.
 
@@ -73,7 +73,7 @@ An `until` function can look at the last replies and stop the loop when the mode
 --8<-- "docs_src/repeating.py"
 ```
 
-1. `repeating` takes the tool calls of the last `REPEATS` replies from `state.history`.
+1. `repeating` takes the tool calls of the last `REPEATS` `model_reply` entries of `state.history`.
 2. It compares names and arguments, not call ids, which are new in every reply.
 3. When all of them are the same, the loop stops before the next turn with
    `state.stopped == StoppedByUntil("repeating")`.

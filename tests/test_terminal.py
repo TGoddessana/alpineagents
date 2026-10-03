@@ -1,5 +1,5 @@
-"""Terminal tests. State is still being built in another unit, so these use a small stub object with only the
-attributes needed (turn, depth, usage, stopped).
+"""Terminal tests. Most of them use a small stub object with only the attributes the Terminal reads (turn, depth,
+usage, stopped), so a test does not need a whole State.
 """
 
 from __future__ import annotations
@@ -175,13 +175,24 @@ def test_context_change_clear_tool_results_no_tail():
     assert out.getvalue() == "  tool results cleared: 900 → 300 tokens\ndone: (1 turn)\n"
 
 
-def test_context_change_rollback():
+def test_context_change_restore():
+    # "rollback" is gone in 0.5 (a failed think is a request without a reply, not a context change);
+    # going back to an earlier snapshot is "restore" and has no cache note.
     out = io.StringIO()
     terminal = Terminal(output=out)
     state = StubState(turn=1)
-    terminal.on_context_change(state, ContextChange("rollback", 500, 200))
+    terminal.on_context_change(state, ContextChange("restore", 500, 200, restored_to=4))
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "  context rolled back: 500 → 200 tokens\ndone: (1 turn)\n"
+    assert out.getvalue() == "  context restored: 500 → 200 tokens\ndone: (1 turn)\n"
+
+
+def test_context_change_import_has_a_name_without_cache_note():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    state = StubState(turn=1)
+    terminal.on_context_change(state, ContextChange("import", 0, 300))
+    terminal.on_run_end(state, None)
+    assert out.getvalue() == "  context imported: 0 → 300 tokens\ndone: (1 turn)\n"
 
 
 def test_run_end_normal_with_cost_and_cache_rate():

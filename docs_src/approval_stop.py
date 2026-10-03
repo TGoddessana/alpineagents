@@ -1,8 +1,8 @@
-from alpineagents import State, StoppedByPermission
+from alpineagents import Message, State, StoppedByPermission
 
-state = State("Write a short README for this folder")
+state = State(messages=[Message.user("Write a short README for this folder")])
 agent.run(state)
 while isinstance(state.stopped, StoppedByPermission):
-    state.add_user_message(input("What should it do instead? "))
+    state.add_message(Message.user(input("What should it do instead? ")))
     agent.run(state)
 print(state.answer)

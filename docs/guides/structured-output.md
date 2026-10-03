@@ -13,7 +13,7 @@ Get a typed result instead of text. There are two ways.
 --8<-- "docs_src/structured_output.py"
 ```
 
-1. `agent.run(state)` does the work.
+1. `agent.run(state)` does the work on a State made with `State(messages=[Message.user(...)])`.
 2. `agent.ask(...)` asks the model one more question about the same context.
 3. `returns=Review` makes the answer a `Review` object.
 

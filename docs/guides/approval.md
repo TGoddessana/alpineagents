@@ -51,7 +51,8 @@ before any tool of the turn runs, and then the allowed calls run together, as in
 A refused call:
 
 - does not run, and the model gets the reason as the call's error result;
-- is recorded in `state.history` as a `denied` entry with the reason and the call, and leaves `state.pending_calls`;
+- is recorded in `state.history` as a `tool_result` entry with `outcome == "denied"`, the reason as its content and the
+  call, and leaves `state.pending_calls`;
 - gets `on_tool_end` on the Reporter (without `on_tool_start`), with `outcome.kind == "denied"` and
   `outcome.decided_by` set to the `repr()` of the permission that refused it, such as `"DecideByHuman()"`
   (`None` when nobody decided).
@@ -87,8 +88,8 @@ They live in `alpineagents.permissions`:
 
 - The run ends normally, without an exception, and the State is not finished, so `run` continues it.
 - The other calls of the same turn are cancelled: they do not run and nobody is asked about them. The model gets
-  `(not run: the user stopped this turn)` for each, `state.history` records them as `cancelled`, and the Reporter gets
-  `outcome.kind == "cancelled"`.
+  `(not run: the user stopped this turn)` for each, `state.history` records them as `tool_result` entries with
+  `outcome == "cancelled"`, and the Reporter gets `outcome.kind == "cancelled"`.
 - Any permission can stop a run this way by returning `Denied(reason, stop=True)`.
 
 `state.stopped` is set as soon as the person says `no`, before the tools of the turn would run. A `@loop` stops by
@@ -96,11 +97,13 @@ itself before its next turn. A loop written without `@loop` checks it before eac
 
 ```python
 def my_loop(agent: Agent, state: State):
-    while state.stopped is None and not state.is_answered():
+    while state.stopped is None and not waiting_for_user(state):
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             agent.use_tools(state)
 ```
+
+`waiting_for_user` is the function from [Stop conditions](stop-conditions.md#stop-on-a-check).
 
 ## Decide by what a call does
 
@@ -166,8 +169,8 @@ Let the person approve a tool once for the rest of the task:
 ```
 
 - `Denied(reason, stop=True)` also stops the run, like `DecideByHuman`'s `no`.
-- `state.root.data["always"]` keeps the approved tool names across turns and runs, and a [store](resume.md) saves
-  it. The model never sees `state.data`.
+- `state.root.extra_data["always"]` keeps the approved tool names across turns and runs, and a [store](resume.md)
+  saves it. `edit_extra_data()` records the change as one history entry. The model never sees `state.extra_data`.
 - `self.human.ask(...)` asks directly, so the question is not recorded in `state.history` the way `DecideByHuman`
   records it.
 

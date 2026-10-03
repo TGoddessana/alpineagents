@@ -30,7 +30,7 @@ def make_agent(fake, tools, **settings):
 
 def run_once(t, **args):
     """The model calls ``t`` once and then answers. Returns the State."""
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call(t.name, **args), "done"]), [t]).run(state)
     return state
 
@@ -42,7 +42,7 @@ def result_entry(state):
 def result_block(state):
     return next(
         block
-        for message in state.context
+        for message in state.messages
         for block in message.content
         if isinstance(block, ToolResultBlock)
     )
@@ -85,7 +85,7 @@ async def test_tool_error_from_an_async_tool():
         """Fetch"""
         raise ToolError("HTTP 500")
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     await make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch]).arun(state)
     assert (result_block(state).content, result_block(state).is_error) == ("HTTP 500", True)
     assert state.stopped == StoppedByUntil("is_answered")
@@ -97,7 +97,7 @@ async def test_tool_error_from_a_sync_tool_in_arun():
         """Fetch"""
         raise ToolError("HTTP 500")
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     await make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch]).arun(state)
     assert (result_block(state).content, result_block(state).is_error) == ("HTTP 500", True)
 
@@ -111,9 +111,9 @@ def test_other_calls_of_the_turn_are_unaffected():
         return "page"
 
     fake = FakeModel([[tool_call("fetch", url="bad"), tool_call("fetch", url="good")], "done"])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(fake, [fetch]).run(state)
-    results = [block for block in state.context[2].content]
+    results = [block for block in state.messages[2].content]
     assert [(b.content, b.is_error) for b in results] == [("HTTP 404", True), ("page", False)]
 
 
@@ -185,7 +185,7 @@ def test_other_exceptions_still_stop_the_run():
         """Fetch"""
         raise KeyError("bug")
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(KeyError):
         make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch]).run(state)
     assert result_block(state).content == "(aborted: KeyError)"
@@ -229,7 +229,7 @@ async def test_handler_on_an_async_tool():
         """Fetch"""
         raise HTTPError("timeout")
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     await make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch]).arun(state)
     assert (result_block(state).content, result_block(state).is_error) == ("request failed: timeout", True)
 
@@ -244,7 +244,7 @@ def test_handler_on_a_method_tool():
             """Fetch"""
             raise HTTPError(self.base + path)
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("fetch", path="/a"), "done"]), [Web("https://x.dev")]).run(state)
     assert result_block(state).content == "request failed: https://x.dev/a"
 
@@ -369,7 +369,7 @@ def test_copy_keeps_a_bound_tool_bound():
     web = Web()
     handled = web.fetch.copy(exception_handler=http_errors, name="get")
     assert handled.bound_to is web and handled.name == "get"
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("get", url="u"), "done"]), [handled]).run(state)
     assert result_block(state).content == "request failed: u"
 
@@ -414,7 +414,7 @@ def test_store_keeps_the_error_result(tmp_path):
         raise ToolError("HTTP 404")
 
     store = FileStore(tmp_path)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("fetch", url="u"), "done"]), [fetch], store=store).run(state)
 
     loaded = store.load(state.id)

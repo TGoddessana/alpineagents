@@ -7,8 +7,9 @@ The model writes a plan in the first turn, without tools. From the second turn i
 ```
 
 1. In the first turn, `agent.think(state, tools=[])` shows the model no tools, so the reply is text: the plan.
-2. A reply without tool calls makes `State.is_answered` true. `state.add_notice(...)` adds a message after it, so the
-   loop continues.
+2. A reply without tool calls makes `waiting_for_user` true (the function from
+   [Stop conditions](stop-conditions.md#stop-on-a-check)). `state.add_message(Message.notice(...))` adds a message
+   after it, so the loop continues.
 3. From the second turn, `agent.think(state)` shows every tool.
 
 ## Other tool sets per turn

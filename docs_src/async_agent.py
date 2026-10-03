@@ -13,11 +13,18 @@ async def run_command(command: str) -> str:
     return output.decode()[-5000:]
 
 
-@loop(until=State.is_answered, limit=30)
+def waiting_for_user(state: State) -> bool:
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
+
+
+@loop(until=waiting_for_user, limit=30)
 async def working(agent: Agent, state: State):
     await acompact_if_full(agent, state)
     await agent.athink(state)
-    if state.wants_tools():
+    if state.pending_calls:
         await agent.ause_tools(state)
 
 

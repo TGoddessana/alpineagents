@@ -89,9 +89,9 @@ done: error JSONDecodeError: Expecting value: line 1 column 1 (char 0) (1 turn)
 State keeps what happened:
 
 ```python
-from alpineagents import State
+from alpineagents import Message, State
 
-state = State("Get the settings from the legacy API")
+state = State(messages=[Message.user("Get the settings from the legacy API")])
 try:
     agent.run(state)
 except Exception as error:
@@ -100,8 +100,10 @@ except Exception as error:
 ```
 
 ```text
-[turn 0] user: Get the settings from the legacy API
-[turn 1] reply: get_json(path="/legacy")
+[turn 0] context_change import: 1 messages
+[turn 0] run_start: anthropic/claude-sonnet-5
+[turn 1] model_request: anthropic/claude-sonnet-5
+[turn 1] model_reply: get_json(path="/legacy")
 [turn 1] error get_json: JSONDecodeError: Expecting value: line 1 column 1 (char 0)
 [turn 1] tool_result get_json (error): (aborted: JSONDecodeError)
 ```

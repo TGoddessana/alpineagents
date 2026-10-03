@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from alpineagents._frozen import FrozenDict, FrozenList
 from alpineagents.errors import ContextTooLongError, RateLimitError
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.types import Message, Request, ToolCall
@@ -46,9 +47,9 @@ def test_fake_model_reply_records_its_name_as_model():
 def test_fake_model_run_keeps_model_in_history():
     from alpineagents import Agent, State
 
-    state = State("Find the bug")
+    state = State(messages=[Message.user("Find the bug")])
     Agent(model=FakeModel(["The bug is on line 3"], name="fake-large"), reporter=None).run(state)
-    replies = [entry.content for entry in state.history if entry.kind == "reply"]
+    replies = [entry.content for entry in state.history if entry.kind == "model_reply"]
     assert [reply.model for reply in replies] == ["fake-large"]
 
 
@@ -175,3 +176,11 @@ def test_fake_human_exhausted_raises_runtime_error():
     human = FakeHuman([])
     with pytest.raises(RuntimeError, match="Continue\\?"):
         human.ask(None, "Continue?", returns=bool)
+
+
+def test_tool_call_args_are_frozen_like_every_tool_call():
+    call = tool_call("search", query="x", filters={"tags": ["a", "b"]})
+    assert isinstance(call.args, FrozenDict) and isinstance(call.args["filters"]["tags"], FrozenList)
+    assert call.args == {"query": "x", "filters": {"tags": ["a", "b"]}}
+    with pytest.raises(TypeError):
+        call.args["query"] = "y"

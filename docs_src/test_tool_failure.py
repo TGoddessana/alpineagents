@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, StoppedByUntil, ToolError, tool
+from alpineagents import Agent, Message, State, StoppedByUntil, ToolError, tool
 from alpineagents.testing import FakeModel, tool_call
 
 
@@ -22,7 +22,7 @@ def test_a_missing_file_is_an_error_result(tmp_path, monkeypatch):
         tool_call("read_file", path="missing.py"),
         "There is no missing.py",
     ])
-    state = State("Read missing.py")
+    state = State(messages=[Message.user("Read missing.py")])
 
     agent.copy(model=fake, reporter=None).run(state)
 

@@ -8,7 +8,7 @@ import io
 import pytest
 
 from alpineagents import Agent, FileStore, Image, Reporter, State, tool
-from alpineagents._tokens import IMAGE_TOKENS, estimate_message_tokens
+from alpineagents._tokens import IMAGE_TOKENS, context_tokens, estimate_message_tokens
 from alpineagents.models.anthropic import Anthropic
 from alpineagents.models.openai_compatible import OpenAICompatible
 from alpineagents.terminal import Terminal
@@ -37,7 +37,7 @@ def make_agent(fake, tools, **settings):
 
 def result_block(state):
     return next(
-        block for message in state.context for block in message.content if isinstance(block, ToolResultBlock)
+        block for message in state.messages for block in message.content if isinstance(block, ToolResultBlock)
     )
 
 
@@ -139,7 +139,7 @@ def test_result_text():
 
 def test_the_image_reaches_the_context_history_and_next_request():
     fake = FakeModel([tool_call("screenshot", url="x.dev"), "done"])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(fake, [screenshot]).run(state)
 
     expected = (TextBlock("Loaded x.dev"), Image(PNG))
@@ -156,7 +156,7 @@ def test_an_async_tool_can_return_an_image():
         """Take a screenshot"""
         return Image(PNG)
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     asyncio.run(make_agent(FakeModel([tool_call("shot"), "done"]), [shot]).arun(state))
     assert result_block(state).content == (Image(PNG),)
 
@@ -171,20 +171,20 @@ def test_the_reporter_gets_the_blocks():
 
     ends = Ends()
     make_agent(FakeModel([tool_call("screenshot", url="x.dev"), "done"]), [screenshot], reporter=ends).run(
-        State("Task")
+        State(messages=[Message.user("Task")])
     )
     assert ends.results == [((TextBlock("Loaded x.dev"), Image(PNG)), "done")]
 
 
 def test_terminal_shows_the_size_and_image_count():
     out = io.StringIO()
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     Terminal(output=out).on_tool_end(state, ToolCall("shot", {}, "c1"), (Image(PNG), Image(GIF)), ToolOutcome("done"))
     assert out.getvalue().splitlines()[-1] == "  done 214B (2 images)"
 
 
 def test_state_str_shows_the_size():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("screenshot", url="x.dev"), "done"]), [screenshot]).run(state)
     assert "tool_result screenshot: 120B" in str(state)
 
@@ -197,7 +197,7 @@ def test_an_image_counts_as_image_tokens_not_its_base64_length():
 
 
 def test_clear_tool_results_clears_images_too():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("screenshot", url="x.dev"), "done"]), [screenshot]).run(state)
     state.clear_tool_results(keep_last=0)
     assert result_block(state).content == "(cleared: kept in history)"
@@ -206,7 +206,7 @@ def test_clear_tool_results_clears_images_too():
 
 def test_store_saves_and_loads_the_image(tmp_path):
     store = FileStore(tmp_path)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent(FakeModel([tool_call("screenshot", url="x.dev"), "done"]), [screenshot], store=store).run(state)
 
     loaded = store.load(state.id)
@@ -276,3 +276,104 @@ def test_openai_compatible_text_results_are_unchanged():
         {"role": "tool", "tool_call_id": "c1", "content": "ok"},
         {"role": "user", "content": "next"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Images in user messages: Message.user(text, *images)
+# ---------------------------------------------------------------------------
+
+
+def test_a_user_message_image_counts_as_image_tokens_not_its_base64_length():
+    big = Image(b"\x89PNG\r\n\x1a\n" + bytes(300_000))
+    text_only = estimate_message_tokens(Message.user("hi"))
+    assert estimate_message_tokens(Message.user("hi", big)) == text_only + IMAGE_TOKENS
+    assert estimate_message_tokens(Message.user("hi", big, big)) == text_only + 2 * IMAGE_TOKENS
+    # an image-only message: the empty text block is dropped, so only the image and the message overhead count
+    assert estimate_message_tokens(Message.user("", big)) == 4 + IMAGE_TOKENS
+
+
+def test_user_and_tool_result_images_are_both_counted_in_one_message():
+    message = Message("user", (ToolResultBlock("c1", (TextBlock("hi"), Image(PNG))), TextBlock("see"), Image(PNG)))
+    plain = Message("user", (ToolResultBlock("c1", "hi"), TextBlock("see")))
+    assert estimate_message_tokens(message) == estimate_message_tokens(plain) + 2 * IMAGE_TOKENS
+
+
+def test_the_context_estimate_counts_user_message_images():
+    with_image = [Message.user("What is this?", Image(PNG))]
+    without = [Message.user("What is this?")]
+    assert context_tokens(with_image, 0) == context_tokens(without, 0) + IMAGE_TOKENS
+    # after an anchor (the last reply's usage), only the newer messages are estimated: the new image counts
+    anchored = Message("assistant", (TextBlock("ok"),), tokens=1000)
+    assert context_tokens([anchored, *with_image], 0) == 1000 + estimate_message_tokens(with_image[0])
+    assert estimate_message_tokens(with_image[0]) >= IMAGE_TOKENS
+
+
+def test_agent_context_tokens_count_user_message_images():
+    agent = make_agent(FakeModel([]), [])
+    plain = State(messages=[Message.user("What is this?")])
+    seen = State(messages=[Message.user("What is this?", Image(PNG), Image(JPEG))])
+    assert agent.context_tokens(seen) == agent.context_tokens(plain) + 2 * IMAGE_TOKENS
+    assert agent.context_used(seen) > agent.context_used(plain)
+
+
+def test_the_model_count_tokens_counts_user_message_images():
+    for model in (Anthropic("claude-sonnet-5", api_key="k"), OpenAICompatible("gpt-5", api_key="k")):
+        plain = Request(None, (Message.user("What is this?"),), ())
+        seen = Request(None, (Message.user("What is this?", Image(PNG)),), ())
+        assert model.count_tokens(seen) == model.count_tokens(plain) + IMAGE_TOKENS
+
+
+def test_the_fake_model_reports_user_message_images_in_its_usage():
+    fake = FakeModel(["a cat"])
+    state = State(messages=[Message.user("What is this?", Image(PNG))])
+    make_agent(fake, []).run(state)
+    assert state.usage.input_tokens >= IMAGE_TOKENS
+
+
+def test_a_user_message_image_reaches_the_model_and_the_history():
+    fake = FakeModel(["a cat", "a dog"])
+    state = State(messages=[Message.user("What is this?", Image(PNG))])
+    agent = make_agent(fake, [])
+    agent.run(state)
+    state.add_message(Message.user("And this?", Image(JPEG)))
+    agent.run(state)
+
+    assert fake.requests[0].messages[0].content == (TextBlock("What is this?"), Image(PNG))
+    last = fake.requests[1].messages[-1]
+    assert last.role == "user" and last.content == (TextBlock("And this?"), Image(JPEG))
+    assert state.messages[0].content == (TextBlock("What is this?"), Image(PNG))
+    entries = [e for e in state.history if e.kind == "user"]
+    assert [e.content for e in entries] == [(TextBlock("And this?"), Image(JPEG))]  # text-only would be a str
+    imported = next(e for e in state.history if e.kind == "context_change").content.messages
+    assert imported[0].content == (TextBlock("What is this?"), Image(PNG))
+
+
+def test_add_message_with_only_an_image_is_fine_and_with_nothing_is_not():
+    state = State(messages=[Message.user("Task")])
+    state.add_message(Message.user("", Image(PNG)))
+    assert state.messages[-1].content == (Image(PNG),)
+    with pytest.raises(ValueError, match="no text and no image"):
+        state.add_message(Message.user("  "))
+
+
+def test_user_message_images_survive_the_store(tmp_path):
+    store = FileStore(tmp_path)
+    state = State(messages=[Message.user("What is this?", Image(PNG))], id="img1")
+    make_agent(FakeModel(["a cat"]), [], store=store).run(state)
+    state.add_message(Message.user("And this?", Image(JPEG)))
+    store.save(state)
+
+    loaded = store.load("img1")
+    assert loaded.messages == state.messages
+    assert loaded.messages[0].content == (TextBlock("What is this?"), Image(PNG))
+    assert loaded.messages[-1].content == (TextBlock("And this?"), Image(JPEG))
+    assert loaded.snapshot() == state.snapshot()
+    assert State(history=state.history).snapshot() == state.snapshot()
+
+
+def test_message_user_takes_only_images():
+    with pytest.raises(TypeError):
+        Message.user("x", b"raw bytes")  # type: ignore[arg-type]
+    assert Message.user("x", Image(PNG)).content == (TextBlock("x"), Image(PNG))
+    assert Message.user("", Image(PNG)).content == (Image(PNG),)
+    assert Message.user("x").content == (TextBlock("x"),)

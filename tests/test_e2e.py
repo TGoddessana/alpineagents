@@ -41,7 +41,20 @@ from alpineagents import (
 )
 from alpineagents.permissions import Allowed, DecidePermission, Denied, DenyByName
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
-from alpineagents.types import Message, Request, TextBlock
+from alpineagents.types import Message, Request, TextBlock, ToolOutcomeKind
+
+
+def is_finished(state: State) -> bool:
+    """A user-written until function (``State.is_finished`` is gone)."""
+    return state.finished
+
+
+def waiting_for_user(state: State) -> bool:
+    """The user-written until function of SPEC section 6 (``State.is_answered`` is gone)."""
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
 
 
 def _byte_size(text: str) -> str:
@@ -158,7 +171,7 @@ def test_fake_human_returns_answers_in_order_and_records_questions():
 
     ``questions``: the questions received, in order."""
     human = FakeHuman(["yes", "no"])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     assert human.ask(state, "Run it?", returns=bool) is True
     assert human.ask(state, "Continue?", returns=bool) is False
     assert human.questions == ["Run it?", "Continue?"]
@@ -168,7 +181,7 @@ def test_fake_human_returns_answers_in_order_and_records_questions():
 def test_fake_human_skips_invalid_answer_and_uses_next():
     """"If it does not fit (``ValueError``), the next answer is used, as if the person answered again."""
     human = FakeHuman(["dunno", "yes"])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     assert human.ask(state, "Continue?", returns=bool) is True
     assert human.remaining == 0  # both answers were used
 
@@ -176,7 +189,7 @@ def test_fake_human_skips_invalid_answer_and_uses_next():
 def test_fake_human_exhausted_raises_runtime_error():
     """"When answers run out, ``RuntimeError``("FakeHuman: ran out of prepared answers", with the last question)."""
     human = FakeHuman([])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(RuntimeError, match="FakeHuman: ran out of prepared answers"):
         human.ask(state, "Any questions?", returns=str)
 
@@ -188,7 +201,7 @@ def test_fake_human_queues_concurrent_questions():
     """
     n = 50
     human = FakeHuman([str(i) for i in range(n)])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     results: list[str] = []
     results_lock = threading.Lock()
 
@@ -263,7 +276,7 @@ def test_on_run_start_before_loop_and_on_run_end_in_finally_on_success():
     reporter = RecordingReporter()
     fake = FakeModel(["Done"])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.run(state)
     assert reporter.names()[0] == "on_run_start"
     assert reporter.events[0][1] is state
@@ -277,7 +290,7 @@ def test_on_run_end_called_with_error_when_run_raises():
     boom = RuntimeError("model failure")
     fake = FakeModel([boom])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(RuntimeError):
         agent.run(state)
     assert reporter.names()[0] == "on_run_start"
@@ -297,7 +310,7 @@ def test_on_think_start_before_respond_and_turn_already_incremented():
     reporter = RecordingReporter()
     fake = FakeModel(["Answer"])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     assert state.turn == 0
     agent.think(state)
     think_start_events = [e for e in reporter.events if e[0] == "on_think_start"]
@@ -309,7 +322,7 @@ def test_on_text_called_once_per_text_block_with_chunk():
     reporter = RecordingReporter()
     fake = FakeModel(["Hello, nice to meet you"])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Say hello")
+    state = State(messages=[Message.user("Say hello")])
     agent.think(state)
     text_events = [e for e in reporter.events if e[0] == "on_text"]
     assert text_events == [("on_text", "Hello, nice to meet you")]
@@ -320,7 +333,7 @@ def test_on_think_end_called_right_after_reply_recorded_with_reply_object():
     reporter = RecordingReporter()
     fake = FakeModel(["Final answer"])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     order = reporter.names()
     assert order == ["on_think_start", "on_text", "on_think_end"]
@@ -328,7 +341,7 @@ def test_on_think_end_called_right_after_reply_recorded_with_reply_object():
     assert isinstance(think_end[1], Reply)
     assert think_end[1].text == "Final answer"
     # It must already be recorded too
-    assert state.context[-1].text == "Final answer"
+    assert state.messages[-1].text == "Final answer"
 
 
 def test_on_tool_start_and_on_tool_end_wrap_execution_in_order():
@@ -338,7 +351,7 @@ def test_on_tool_start_and_on_tool_end_wrap_execution_in_order():
     call = tool_call("_read_file_fixed", path="main.py")
     fake = FakeModel([call, "There is a bug on line 3"])
     agent = Agent(model=fake, tools=[_read_file_fixed], reporter=reporter, human=None)
-    state = State("Find the bug")
+    state = State(messages=[Message.user("Find the bug")])
     agent.run(state)
 
     names = reporter.names()
@@ -387,14 +400,16 @@ def test_on_tool_end_for_denied_call_has_no_matching_on_tool_start():
         human=human,
         permissions=[DenyByName(["write_file"], reason="The user denied it")],
     )
-    state = State("Write the file")
+    state = State(messages=[Message.user("Write the file")])
     agent.run(state)
 
     assert "on_tool_start" not in reporter.names()  # denied, so the tool was not called
     tool_end_events = [e for e in reporter.events if e[0] == "on_tool_end"]
     assert tool_end_events == [("on_tool_end", call.id, "The user denied it", "denied")]
-    denied = [e for e in state.history if e.kind == "denied"]
+    # a denied call is a tool_result entry with outcome "denied" (there is no NotRunEntry any more)
+    denied = [e for e in state.history if e.kind == "tool_result" and e.outcome == ToolOutcomeKind.DENIED]
     assert len(denied) == 1 and denied[0].content == "The user denied it"
+    assert denied[0].is_error and denied[0].call.id == call.id
 
 
 def test_on_context_change_called_after_compact_with_before_after_tokens():
@@ -403,7 +418,7 @@ def test_on_context_change_called_after_compact_with_before_after_tokens():
     reporter = RecordingReporter()
     fake = FakeModel(["Summary: read the files so far"])
     agent = Agent(model=fake, reporter=reporter, human=None)
-    state = State("Keep going with the long task")
+    state = State(messages=[Message.user("Keep going with the long task")])
     agent.compact(state)
 
     change_events = [e for e in reporter.events if e[0] == "on_context_change"]
@@ -411,7 +426,7 @@ def test_on_context_change_called_after_compact_with_before_after_tokens():
     _, kind, before, after = change_events[0]
     assert kind == "compact"
     assert isinstance(before, int) and isinstance(after, int)
-    assert state.context[-1].text.startswith("[notice] Summary so far:")
+    assert state.messages[-1].text.startswith("[notice] Summary so far:")
 
 
 def test_reporter_none_is_silent_and_does_not_change_behavior():
@@ -422,13 +437,13 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
     agent_with_reporter = Agent(
         model=FakeModel([call, "Answer"]), tools=[_read_file_fixed], reporter=reporter, human=None
     )
-    state_with_reporter = State("Find the bug")
+    state_with_reporter = State(messages=[Message.user("Find the bug")])
     agent_with_reporter.run(state_with_reporter)
 
     agent_silent = Agent(
         model=FakeModel([call, "Answer"]), tools=[_read_file_fixed], reporter=None, human=None
     )
-    state_silent = State("Find the bug")
+    state_silent = State(messages=[Message.user("Find the bug")])
     agent_silent.run(state_silent)  # must behave the same, with no exception
 
     assert state_silent.answer == state_with_reporter.answer == "Answer"
@@ -445,7 +460,7 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
 def test_ask_human_with_human_none_raises_no_human_error():
     """"With human=None ... ask_human raises alpineagents.NoHumanError."""
     agent = Agent(model=FakeModel([]), human=None, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(NoHumanError):
         agent.ask_human(state, "Run it?")
 
@@ -453,7 +468,7 @@ def test_ask_human_with_human_none_raises_no_human_error():
 def test_ask_human_unsupported_returns_type_raises_type_error():
     """"ask_human(returns=...) with an unsupported type`` -> ``TypeError`` (returns is str/bool/Literal only)."""
     agent = Agent(model=FakeModel([]), human=FakeHuman(["any answer"]), reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(TypeError):
         agent.ask_human(state, "How many?", returns=int)
 
@@ -461,11 +476,11 @@ def test_ask_human_unsupported_returns_type_raises_type_error():
 def test_ask_human_records_question_and_answer_in_history_not_context():
     """"The question and answer stay in history as human and do not go into the context."""
     agent = Agent(model=FakeModel([]), human=FakeHuman(["yes"]), reporter=None)
-    state = State("Task")
-    before_context = state.context
+    state = State(messages=[Message.user("Task")])
+    before_context = state.messages
     value = agent.ask_human(state, "Continue?", returns=bool)
     assert value is True
-    assert state.context == before_context  # the context does not change
+    assert state.messages == before_context  # the context does not change
     human_entries = [e for e in state.history if e.kind == "human"]
     assert len(human_entries) == 1
     assert human_entries[0].content.question == "Continue?"
@@ -485,7 +500,7 @@ def test_terminal_end_to_end_output_shape_for_tool_then_answer():
     call = tool_call("_read_file_fixed", path="main.py")
     fake = FakeModel([call, "The bug is on line 3"])
     agent = Agent(model=fake, tools=[_read_file_fixed], reporter=terminal, human=None)
-    state = State("Find the bug")
+    state = State(messages=[Message.user("Find the bug")])
     agent.run(state)
 
     expected = (
@@ -508,17 +523,17 @@ def test_terminal_shows_limit_warning_line_end_to_end():
         """Does nothing."""
         return None
 
-    @loop(until=State.is_answered, limit=1)
+    @loop(until=waiting_for_user, limit=1)
     def one_turn_loop(agent, state):
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             agent.use_tools(state)
 
     out = io.StringIO()
     terminal = Terminal(output=out)
     fake = FakeModel([tool_call("noop")])  # only calls a tool, never answers -> is_answered stays false
     agent = Agent(model=fake, tools=[noop], loop=one_turn_loop, reporter=terminal, human=None)
-    state = State("A task that never ends")
+    state = State(messages=[Message.user("A task that never ends")])
     agent.run(state)
 
     assert state.stopped == StoppedByLimit(1)
@@ -543,19 +558,20 @@ def write_file(path: str, content: str) -> str:
 
 
 class AskPermission(DecidePermission):
-    """The "permission check" example with an "always" answer. The 'always allow' list lives on ``state.root``."""
+    """The "permission check" example with an "always" answer. The 'always allow' list lives in the extra_data of
+    ``state.root``, and is changed with ``edit_extra_data()`` (atomic, so parallel calls cannot lose an entry)."""
 
     def __init__(self, human: FakeHuman) -> None:
         self.human = human
 
     def check(self, state, call, tool):
         root = state.root
-        if call.name not in DANGEROUS or call.name in root.data.get("always_allow", []):
+        if call.name not in DANGEROUS or call.name in root.extra_data.get("always_allow", []):
             return Allowed()
         answer = self.human.ask(state, f"Run {call.name}({call.args})?", Literal["yes", "no", "always"])
         if answer == "always":
-            with root.lock:
-                root.data.setdefault("always_allow", []).append(call.name)
+            with root.edit_extra_data() as data:
+                data.setdefault("always_allow", []).append(call.name)
         elif answer == "no":
             return Denied("The user denied it")
         return Allowed()
@@ -568,17 +584,17 @@ def test_permission_block_denies_dangerous_call():
     fake = FakeModel([call, "Gave up"])
     human = FakeHuman(["no"])
     agent = Agent(model=fake, tools=[write_file], permissions=[AskPermission(human)], human=human, reporter=None)
-    state = State("Write the file")
+    state = State(messages=[Message.user("Write the file")])
     agent.run(state)
 
     assert _write_calls == []  # the tool was not actually called
     assert human.questions == ["Run write_file({'path': 'a.txt', 'content': 'x'})?"]
-    denied = [e for e in state.history if e.kind == "denied"]
+    denied = [e for e in state.history if e.kind == "tool_result" and e.outcome == ToolOutcomeKind.DENIED]
     assert len(denied) == 1
 
 
 def test_permission_block_always_allow_skips_asking_again_same_turn():
-    """"The 'always allow' list lives on the top-level State (state.root).
+    """"The 'always allow' list lives in the extra_data of the top-level State (state.root).
 
     The next call to the same tool in the same turn is not asked again (parallel calls see the same list too).
     """
@@ -590,12 +606,14 @@ def test_permission_block_always_allow_skips_asking_again_same_turn():
     fake = FakeModel([calls, "All done"])  # request two calls together in one turn
     human = FakeHuman(["always"])
     agent = Agent(model=fake, tools=[write_file], permissions=[AskPermission(human)], human=human, reporter=None)
-    state = State("Write two files")
+    state = State(messages=[Message.user("Write two files")])
     agent.run(state)
 
     assert sorted(_write_calls) == [("a.txt", "x"), ("b.txt", "y")]
     assert len(human.questions) == 1  # the second call hit always_allow and was not asked
-    assert state.root.data.get("always_allow") == ["write_file"]
+    assert state.root.extra_data.get("always_allow") == ["write_file"]
+    extra = [e for e in state.history if e.kind == "extra_data"]
+    assert len(extra) == 1 and dict(extra[0].content) == {"always_allow": ["write_file"]}
 
 
 def test_plan_then_execute_runs_each_step_with_coding_loop():
@@ -608,9 +626,9 @@ def test_plan_then_execute_runs_each_step_with_coding_loop():
     def plan_then_execute(agent: Agent, state: State):
         plan = agent.ask(state, "Split the task into 3-7 steps", returns=Plan)
         for step in plan.steps:
-            state.add_user_message(f"Next step: {step}")
+            state.add_message(Message.user(f"Next step: {step}"))
             default_loop(agent, state)
-            if state.is_finished():
+            if state.finished:
                 break
         return state.answer
 
@@ -622,7 +640,7 @@ def test_plan_then_execute_runs_each_step_with_coding_loop():
         ]
     )
     agent = Agent(model=fake, loop=plan_then_execute, reporter=None, human=None)
-    state = State("Fix the bug")
+    state = State(messages=[Message.user("Fix the bug")])
     answer = agent.run(state)
 
     assert answer == "Step 2 done"
@@ -630,25 +648,26 @@ def test_plan_then_execute_runs_each_step_with_coding_loop():
     assert state.turn == 2  # think happens only in the two steps (ask does not advance the turn)
     ask_entries = [e for e in state.history if e.kind == "ask"]
     assert len(ask_entries) == 1
-    assert ask_entries[0].content.answer.steps == ["List the files", "Fix the bug"]
+    # the history keeps the answer as JSON (a dict), while ask returned the Plan object to the loop above
+    assert ask_entries[0].content.answer == {"steps": ["List the files", "Fix the bug"]}
 
 
 def test_chat_loop_answers_then_quits_on_command():
     """"Chat": the outer loop is the human's turn, the inner loop is the agent's turn."""
 
-    @loop(until=State.is_finished, limit=1000)
+    @loop(until=is_finished, limit=1000)
     def chat(agent: Agent, state: State):
         default_loop(agent, state)  # answer the current message
         text = agent.ask_human(state, ">")
         if text == "quit":
             state.finish()
             return
-        state.add_user_message(text)
+        state.add_message(Message.user(text))
 
     fake = FakeModel(["Hello! How can I help?", "Yes, there is"])
     human = FakeHuman(["One more question?", "quit"])
     agent = Agent(model=fake, loop=chat, human=human, reporter=None)
-    state = State("Hi")
+    state = State(messages=[Message.user("Hi")])
     agent.run(state)
 
     assert state.stopped == StoppedByFinish()
@@ -658,9 +677,9 @@ def test_chat_loop_answers_then_quits_on_command():
 
 
 def test_coder_and_reviewer_pair_finishes_once_approved():
-    """"Coder and reviewer": the coder is the State's only owner.
+    """"Coder and reviewer": the coder runs the State.
 
-    The reviewer only reads the same context with ask."""
+    The reviewer only reads the same context with ask (any Agent could also think on it: there is no owner)."""
 
     @dataclass
     class Review:
@@ -675,29 +694,29 @@ def test_coder_and_reviewer_pair_finishes_once_approved():
     )
     reviewer = Agent(model=reviewer_fake, system="You are a meticulous code reviewer", reporter=None, human=None)
 
-    @loop(until=State.is_finished, limit=5)
+    @loop(until=is_finished, limit=5)
     def pair(agent: Agent, state: State):
         default_loop(agent, state)
         review = reviewer.ask(state, "Review the changes so far", returns=Review)
         if review.approved:
             state.finish()
         else:
-            state.add_user_message(f"Reviewer comments: {review.comments}")
+            state.add_message(Message.user(f"Reviewer comments: {review.comments}"))
 
     coder_fake = FakeModel(["First fix done", "Tests added"])
     coder = Agent(model=coder_fake, loop=pair, reporter=None, human=None)
-    state = State("Implement the feature")
+    state = State(messages=[Message.user("Implement the feature")])
     coder.run(state)
 
     assert state.stopped == StoppedByFinish()
     assert state.answer == "Tests added"
     ask_entries = [e for e in state.history if e.kind == "ask"]
     assert len(ask_entries) == 2
-    assert ask_entries[0].content.answer.approved is False
-    assert ask_entries[1].content.answer.approved is True
+    assert ask_entries[0].content.answer["approved"] is False
+    assert ask_entries[1].content.answer["approved"] is True
     # The reviewer comments went into the coder's conversation as a user message
     # (the contexts do not mix; only the coder's State has it)
-    assert any("Reviewer comments: Add tests" in m.text for m in state.context)
+    assert any("Reviewer comments: Add tests" in m.text for m in state.messages)
 
 
 def test_reads_file_then_answers():
@@ -715,7 +734,7 @@ def test_reads_file_then_answers():
             "The bug is on line 3",
         ]
     )
-    state = State("Find the bug")
+    state = State(messages=[Message.user("Find the bug")])
     base_agent.copy(model=fake, reporter=None).run(state)
 
     assert state.answer == "The bug is on line 3"
@@ -769,11 +788,11 @@ def test_overview_example_two_full_loop_with_filesystem(tmp_path):
                 return f"No such file: {path}"
             return file.read_text()
 
-    @loop(until=State.is_answered, limit=50)
+    @loop(until=waiting_for_user, limit=50)
     def full_coding_loop(agent: Agent, state: State):
         compact_if_full(agent, state)
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             agent.use_tools(state)
 
     fake = FakeModel(
@@ -790,10 +809,58 @@ def test_overview_example_two_full_loop_with_filesystem(tmp_path):
         reporter=None,
         human=None,
     )
-    state = State("Find the bug in this repo")
+    state = State(messages=[Message.user("Find the bug in this repo")])
     answer = agent.run(state)
 
     assert answer == "Found the bug: missing null check"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
     # An unknown price is None (unknown and 0 are kept apart)
     assert state.usage.cost is None
+
+
+# ======================================================================
+# 0.5: one State carried through several runs and several Agents
+# ======================================================================
+
+
+def test_one_state_carried_through_two_models_with_a_user_message_between_runs():
+    """A State is the conversation: run it with a cheap model, add a message, continue it with a stronger one
+    (``agent.copy(model=...)``). History shows one RunStartEntry per run and each request names its model."""
+    cheap = Agent(model=FakeModel(["Draft answer"], name="cheap"), reporter=None, human=None)
+    strong = cheap.copy(model=FakeModel(["Better answer"], name="strong"))
+    state = State(messages=[Message.user("Explain the bug")], extra_data={"repo": "api"})
+
+    assert cheap.run(state) == "Draft answer"
+    state.add_message(Message.user("Check that again"))
+    assert strong.run(state) == "Better answer"
+
+    assert [e.kind for e in state.history] == [
+        "context_change",  # import of the starting messages
+        "extra_data",
+        "run_start",
+        "model_request",
+        "model_reply",
+        "stop",
+        "user",
+        "run_start",
+        "model_request",
+        "model_reply",
+        "stop",
+    ]
+    assert [e.content for e in state.history if e.kind == "model_request"] == ["fake/cheap", "fake/strong"]
+    assert state.stopped == StoppedByUntil("is_answered")
+    # the invariant of 0.5: the history alone gives back the same State
+    assert State(history=state.history).snapshot() == state.snapshot()
+
+
+def test_terminal_run_on_a_state_continued_by_another_agent_prints_each_runs_turns():
+    """Terminal counts turns of the State, so a second run on the same State goes on from the last turn."""
+    out = io.StringIO()
+    first = Agent(model=FakeModel(["One"]), reporter=Terminal(output=out), human=None)
+    second = first.copy(model=FakeModel(["Two"], name="other"))
+    state = State(messages=[Message.user("Task")])
+    first.run(state)
+    state.add_message(Message.user("More"))
+    second.run(state)
+    text = out.getvalue()
+    assert "[turn 1] thinking" in text and "[turn 2] thinking" in text

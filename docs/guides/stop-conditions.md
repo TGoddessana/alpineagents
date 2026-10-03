@@ -15,9 +15,11 @@ A loop stops in one of four ways. Pick the one that matches who decides.
 --8<-- "docs_src/stop_conditions.py"
 ```
 
-1. `spent_too_much` takes the State and returns `True` to stop.
-2. `until` takes a list. The loop stops when any function in it returns `True`.
-3. After the run, `state.stopped` is `StoppedByUntil("is_answered")`, `StoppedByUntil("spent_too_much")` or
+1. `waiting_for_user` is true when the model has answered: no call is pending, and the last message is the model's
+   and asks for no tool. You write it, so you decide what "done" means. The default loop has the same check built in.
+2. `spent_too_much` takes the State and returns `True` to stop.
+3. `until` takes a list. The loop stops when any function in it returns `True`.
+4. After the run, `state.stopped` is `StoppedByUntil("waiting_for_user")`, `StoppedByUntil("spent_too_much")` or
    `StoppedByLimit(30)`. The terminal output shows the same name, for example `done: stopped by spent_too_much`.
 
 Give stop conditions clear names. The name is the only record of why the run stopped.
@@ -40,7 +42,7 @@ The answer can be any value. The model fills the tool's typed parameters, so the
 ## Stop when the person says no
 
 A permission that refuses a call with `stop=True` stops the loop before its next turn. Unlike `finish`, the State is
-not finished: add the person's next message with `state.add_user_message(...)` and run again. See
+not finished: add the person's next message with `state.add_message(Message.user(...))` and run again. See
 [Ask before a tool runs](approval.md#when-the-person-says-no).
 
 ## In a loop without @loop
@@ -50,9 +52,9 @@ on them by checking it before each turn:
 
 ```python
 def my_loop(agent: Agent, state: State):
-    while state.stopped is None and not state.is_answered():
+    while state.stopped is None and not waiting_for_user(state):
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             agent.use_tools(state)
 ```
 
@@ -67,9 +69,9 @@ Reaching `limit` stops the loop without an exception. Check it when an unfinishe
 from the example above:
 
 ```python
-from alpineagents import State, StoppedByLimit
+from alpineagents import Message, State, StoppedByLimit
 
-state = State("Rename the helper functions in utils.py")
+state = State(messages=[Message.user("Rename the helper functions in utils.py")])
 agent.run(state)
 if isinstance(state.stopped, StoppedByLimit):
     print(f"Stopped after {state.stopped.turns} turns. The task may be unfinished.")

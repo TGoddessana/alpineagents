@@ -11,7 +11,7 @@ import warnings
 import pytest
 import typing_extensions
 
-from alpineagents import StoppedByLimit
+from alpineagents import Message, StopEntry, StoppedByLimit
 from alpineagents.loop import Loop, default_loop, loop
 from alpineagents.state import State
 from alpineagents.tool import _parse_docstring, tool
@@ -146,16 +146,26 @@ def test_body_with_colliding_attributes_does_not_override_loop():
 def test_nested_loop_runs_with_outer_limit():
     turns = []
 
-    @loop(until=State.is_finished, limit=5)
+    def is_finished(state: State) -> bool:
+        return state.finished
+
+    @loop(until=is_finished, limit=5)
     def inner(agent, state):
         turns.append("inner")
 
-    outer = loop(until=State.is_finished, limit=2)(inner)
-    state = State("hi")
+    outer = loop(until=is_finished, limit=2)(inner)
+    state = State(messages=[Message.user("hi")])
     outer(None, state)
     # 2 outer turns x 5 inner turns
     assert len(turns) == 10
     assert state.stopped == StoppedByLimit(2)
+    # The inner limit stop is cleared (StopEntry(None)) when the outer loop goes on, then each loop records its own.
+    assert [h.content for h in state.history if isinstance(h, StopEntry)] == [
+        StoppedByLimit(5),
+        None,
+        StoppedByLimit(5),
+        StoppedByLimit(2),
+    ]
 
 
 # --- State injection: TYPE_CHECKING-only import, State subclass ---
@@ -182,7 +192,7 @@ def test_tool_with_typechecking_only_state_import(tmp_path):
         submit = review_tool_mod.submit
         assert "state" not in submit.input_schema.get("properties", {})
         assert submit.input_schema["required"] == ["answer"]
-        s = State("q")
+        s = State(messages=[Message.user("q")])
         assert submit.invoke(submit.prepare({"answer": "a"}), s) == "a"
     finally:
         sys.path.remove(str(tmp_path))
@@ -217,7 +227,7 @@ def test_state_subclass_is_injected():
         return x
 
     assert list(f.input_schema["properties"]) == ["x"]
-    s = MyState("q")
+    s = MyState(messages=[Message.user("q")])
     seen = []
 
     @tool

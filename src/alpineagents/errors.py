@@ -83,7 +83,7 @@ class ResumeWarning(UserWarning):
     def __init__(self, message: str, changes: dict[str, tuple[Any, Any]]) -> None:
         super().__init__(message)
         self.changes = changes
-        """What changed: ``{key: (saved_value, current_value)}`` for each differing key of the Agent summary
+        """What changed: ``{key: (saved_value, current_value)}`` for each differing key of the AgentInfo
         (``name``, ``model``, ``system_sha256``, ``tools``, ``mcp_servers``)."""
 
     def __reduce__(self) -> Any:

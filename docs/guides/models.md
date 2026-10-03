@@ -78,7 +78,7 @@ Pass a Model object to change its settings:
 
 - `OpenAICompatible` works with any server that speaks the OpenAI Chat Completions API: OpenAI, Ollama, vLLM,
   OpenRouter and others.
-- Set `context_window` to the model's real window. `compact_if_full` and `state.context_used` use it.
+- Set `context_window` to the model's real window. `compact_if_full` and `agent.context_used(state)` use it.
 - Creating a Model uses no network and needs no API key. The key is read at the first request.
 - Retries are left to the provider SDK: `retries=2` by default.
 
@@ -97,6 +97,27 @@ model = Anthropic("claude-sonnet-5", price=Price(input=3, output=15, cache_read=
 Each `Reply` records the model that answered in `reply.model`, as the provider reported it. It can differ from the
 requested name: an alias resolved to a dated id, or a router that picked another model. The cost still uses the
 requested Model's price.
+
+## Switch models in one conversation
+
+A State does not belong to the Agent that ran it. Any Agent may run, think, use tools and compact the same State, so a
+conversation can start on a fast model and go on with a strong one. `agent.copy(model=...)` makes the second Agent
+with every other setting the same:
+
+```python
+--8<-- "docs_src/switch_model.py"
+```
+
+- Both runs add to `state`. The second model sees the whole conversation, including the replies of the first.
+- `state.history` records the model of every request in a `model_request` entry, so you can see which model wrote each
+  reply. `state.usage` adds up the tokens of all of them. Its `cost` is `None` when any of them has no price.
+- Thinking blocks and other provider-specific blocks are sent back only to the provider that wrote them. A model of
+  another provider does not see them.
+- Providers cache a long context per model, so the first request after a switch pays for the whole context again.
+- The windows differ. Check `strong.context_used(state)` before you switch to a model with a smaller window, and
+  compact first if needed: `strong.compact(state)`.
+- Switching is not a change the Agent warns about. `ResumeWarning` is only for the first run after `store.load`, when
+  the Agent differs from the one that saved the State. See [Save and resume](resume.md#what-changes-after-loading).
 
 ## Write a Model
 

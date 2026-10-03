@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from alpineagents import Agent, ModelEvent, Reporter, State, Terminal
+from alpineagents import Agent, Message, ModelEvent, Reporter, State, Terminal
 from alpineagents.testing import FakeModel
 
 SWITCH = ModelEvent("fallback", "a rate limited → switched to b", {"from": "a", "to": "b"})
@@ -30,7 +30,7 @@ class Recorder(Reporter):
 def test_think_records_the_event_and_tells_the_reporter():
     reporter = Recorder()
     agent = Agent(model=Noisy(["Answer"]), reporter=reporter, human=None)
-    state = State("Question")
+    state = State(messages=[Message.user("Question")])
     agent.run(state)
 
     entries = [e for e in state.history if e.kind == "model_event"]
@@ -40,14 +40,21 @@ def test_think_records_the_event_and_tells_the_reporter():
 
 
 def test_event_is_recorded_without_a_reporter():
-    state = State("Question")
+    state = State(messages=[Message.user("Question")])
     Agent(model=Noisy(["Answer"]), reporter=None, human=None).run(state)
-    assert [e.kind for e in state.history] == ["user", "model_event", "reply"]
+    assert [e.kind for e in state.history] == [
+        "context_change",
+        "run_start",
+        "model_request",
+        "model_event",
+        "model_reply",
+        "stop",
+    ]
 
 
 def test_ask_and_compact_pass_on_event_too():
     agent = Agent(model=Noisy(["First answer", "Yes", "Summary"]), reporter=None, human=None)
-    state = State("Question")
+    state = State(messages=[Message.user("Question")])
     agent.run(state)
     agent.ask(state, "Is that right?")
     agent.compact(state)
@@ -57,12 +64,13 @@ def test_ask_and_compact_pass_on_event_too():
 
 def test_event_survives_a_failed_think():
     agent = Agent(model=Noisy([RuntimeError("disconnected")]), reporter=None, human=None)
-    state = State("Question")
+    state = State(messages=[Message.user("Question")])
     with pytest.raises(RuntimeError):
         agent.run(state)
     kinds = [e.kind for e in state.history]
-    assert kinds[:2] == ["user", "model_event"]  # history is not rolled back
-    assert state.turn == 0
+    # History is never rolled back: the request, the event and the error stay as facts.
+    assert kinds == ["context_change", "run_start", "model_request", "model_event", "error"]
+    assert state.turn == 0  # but the failed request is taken back from the snapshot
 
 
 def test_on_event_rejects_anything_but_a_model_event():

@@ -6,8 +6,8 @@ The tests come from the spec sentences, not from the implementation. No network 
 
 The ``Loop`` contract is duck typing (``Callable[[Agent, State], Any]``), so the pure loop mechanics
 (``until``/``limit`` checks, stop order, ``copy``) are checked with a tiny fake State/Agent.
-Rules that need a real State and Model, like ``is_answered()``/``add_user_message``/``context_used``,
-are checked with a real ``State`` + ``Agent`` + ``FakeModel`` (``reporter=None``).
+Rules that need a real State and Model, like a user-written ``until`` function, ``add_message`` and
+``agent.context_used``, are checked with a real ``State`` + ``Agent`` + ``FakeModel`` (``reporter=None``).
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from alpineagents import (
     CompactIfFull,
     ContextTooLongError,
     Loop,
+    Message,
     State,
+    StopEntry,
     StoppedByFinish,
     StoppedByLimit,
     StoppedByUntil,
@@ -34,34 +36,40 @@ from alpineagents.testing import FakeModel, tool_call
 
 
 class FakeState:
-    """Minimal fake State that only checks loop execution (for pure loop mechanics that need no real State)."""
+    """Minimal fake State that only checks loop execution (for pure loop mechanics that need no real State).
+
+    It has what ``Loop`` reads: ``stopped``, ``finished``, ``answer`` and the private ``_record_stop``."""
 
     def __init__(self):
-        self._finished = False
+        self.finished = False
         self._answer = None
         self.stopped = None
-
-    def is_finished(self):
-        return self._finished
-
-    def is_answered(self):
-        return self._answer is not None
 
     @property
     def answer(self):
         return self._answer
 
     def finish(self, answer=None):
-        self._finished = True
+        self.finished = True
         self.stopped = StoppedByFinish()
         if answer is not None:
             self._answer = answer
 
-    def _set_stopped(self, stopped):
+    def _record_stop(self, stopped):
         self.stopped = stopped
 
-    def _clear_stop(self):
-        self.stopped = None
+
+def is_answered(state):
+    """The until function of the fake-State tests: true once the fake State has an answer."""
+    return state.answer is not None
+
+
+def waiting_for_user(state: State) -> bool:
+    """The user-written until function of SPEC section 6, for the tests with a real State."""
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
 
 
 class FakeAgent:
@@ -88,21 +96,39 @@ def test_loop_missing_until_raises_typeerror():
 
 def test_loop_missing_limit_raises_typeerror():
     with pytest.raises(TypeError):
-        Loop(lambda a, s: None, until=FakeState.is_answered, limit=None)
+        Loop(lambda a, s: None, until=is_answered, limit=None)
 
 
 def test_until_called_result_raises_typeerror():
-    # "Passing a call result like until=state.is_answered() -> pass State.is_answered without parentheses"
+    # "Passing a call result like until=waiting_for_user(state) -> pass waiting_for_user without parentheses"
     state = FakeState()
     with pytest.raises(TypeError):
-        Loop(lambda a, s: None, until=state.is_finished(), limit=10)
+        Loop(lambda a, s: None, until=is_answered(state), limit=10)
 
 
-def test_until_bound_to_state_instance_raises_typeerror():
-    # "until is a method bound to a State instance (until=state.is_answered) -> TypeError"
-    real_state = State("Task")
-    with pytest.raises(TypeError):
-        Loop(lambda a, s: None, until=real_state.is_answered, limit=10)
+def test_until_can_be_a_method_of_any_object():
+    # State has no predicate methods any more (is_answered, is_finished are gone), so there is no "bound to a State"
+    # check: a bound method of your own object is a normal until, named after the method.
+    class Budget:
+        def __init__(self):
+            self.spent = 5
+
+        def over(self, state):
+            return self.spent > 3
+
+    budget = Budget()
+    body_loop = Loop(lambda a, s: None, until=budget.over, limit=10)
+    state = FakeState()
+    body_loop(FakeAgent(), state)
+    assert state.stopped == StoppedByUntil("over")
+
+
+def test_state_no_longer_has_the_predicate_methods():
+    # "State.is_answered no longer exists": the until functions are the user's own
+    state = State(messages=[Message.user("Task")])
+    for name in ("is_answered", "is_finished", "wants_tools"):
+        assert not hasattr(state, name)
+    assert not hasattr(State, "is_answered")
 
 
 def test_until_lambda_warns():
@@ -129,7 +155,7 @@ def test_until_names_finish_and_limit_are_allowed():
 def test_until_uncallable_item_rejected():
     # "until takes one function or a list of functions" - the list items must be callable
     with pytest.raises(TypeError):
-        Loop(lambda a, s: None, until=[FakeState.is_answered, "not callable"], limit=5)
+        Loop(lambda a, s: None, until=[is_answered, "not callable"], limit=5)
 
 
 def test_until_accepts_tuple_as_well_as_list():
@@ -161,7 +187,7 @@ def test_body_returning_value_raises_typeerror():
     def bad_body(agent, state):
         return "oops"
 
-    body_loop = Loop(bad_body, until=FakeState.is_answered, limit=5)
+    body_loop = Loop(bad_body, until=is_answered, limit=5)
     with pytest.raises(TypeError):
         body_loop(FakeAgent(), FakeState())
 
@@ -175,7 +201,7 @@ def test_stops_when_until_condition_true():
         if calls["n"] == 2:
             state._answer = "answer text"
 
-    body_loop = Loop(body, until=FakeState.is_answered, limit=10)
+    body_loop = Loop(body, until=is_answered, limit=10)
     state = FakeState()
     result = body_loop(FakeAgent(), state)
 
@@ -189,7 +215,7 @@ def test_stops_on_finish():
     def body(agent, state):
         state.finish("done!")
 
-    body_loop = Loop(body, until=FakeState.is_answered, limit=10)
+    body_loop = Loop(body, until=is_answered, limit=10)
     state = FakeState()
     result = body_loop(FakeAgent(), state)
 
@@ -207,7 +233,7 @@ def test_zero_turn_stop_when_already_finished():
     already_finished = FakeState()
     already_finished.finish("pre")
 
-    body_loop = Loop(body, until=FakeState.is_answered, limit=10)
+    body_loop = Loop(body, until=is_answered, limit=10)
     result = body_loop(FakeAgent(), already_finished)
 
     assert calls["n"] == 0
@@ -222,7 +248,7 @@ def test_stops_on_limit_with_none_answer():
     def body(agent, state):
         calls["n"] += 1
 
-    body_loop = Loop(body, until=FakeState.is_answered, limit=3)
+    body_loop = Loop(body, until=is_answered, limit=3)
     state = FakeState()
     result = body_loop(FakeAgent(), state)
 
@@ -271,7 +297,7 @@ def test_copy_overrides_only_given_fields():
     def body(agent, state):
         pass
 
-    original = Loop(body, until=FakeState.is_answered, limit=5)
+    original = Loop(body, until=is_answered, limit=5)
     copied = original.copy(limit=99)
 
     assert copied.limit == 99
@@ -287,7 +313,7 @@ def test_turn_count_resets_per_call():
     def body(agent, state):
         calls["n"] += 1
 
-    body_loop = Loop(body, until=FakeState.is_answered, limit=2)
+    body_loop = Loop(body, until=is_answered, limit=2)
     body_loop(FakeAgent(), FakeState())
     assert calls["n"] == 2
     body_loop(FakeAgent(), FakeState())
@@ -337,7 +363,7 @@ def test_loop_can_be_used_as_block_inside_another_loop():
         inner(agent, state)  # use the loop like a block
         state.finish("outer done")
 
-    outer = Loop(outer_body, until=FakeState.is_answered, limit=5)
+    outer = Loop(outer_body, until=is_answered, limit=5)
     state = FakeState()
     result = outer(FakeAgent(), state)
 
@@ -351,7 +377,7 @@ def test_block_can_be_callable_object_not_just_function():
         def __call__(self, agent, state):
             state.finish("via block object")
 
-    body_loop = Loop(FinishingBlock(), until=FakeState.is_answered, limit=5)
+    body_loop = Loop(FinishingBlock(), until=is_answered, limit=5)
     state = FakeState()
     result = body_loop(FakeAgent(), state)
 
@@ -362,50 +388,50 @@ def test_block_can_be_callable_object_not_just_function():
 # ============================================================ why conditions are checked before a turn (real State)
 
 
-def test_add_user_message_makes_is_answered_false_so_loop_runs_again():
-    # "Adding a new instruction (add_user_message) makes is_answered() false so the loop runs,
+def test_add_message_makes_the_until_false_so_loop_runs_again():
+    # "Adding a new instruction (add_message) makes waiting_for_user false so the loop runs,
     #  and with nothing to do it stops at turn 0"
     fake = FakeModel(["first answer", "second answer"])
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     def body(a, s):
         a.think(s)
 
-    think_loop = Loop(body, until=State.is_answered, limit=5)
+    think_loop = Loop(body, until=waiting_for_user, limit=5)
 
     answer1 = think_loop(agent, state)
     assert answer1 == "first answer"
     assert state.turn == 1
 
-    # Nothing to do: already is_answered(), so it must stop at turn 0 (uses no extra FakeModel reply)
+    # Nothing to do: the model already answered, so it must stop at turn 0 (uses no extra FakeModel reply)
     answer_again = think_loop(agent, state)
     assert answer_again == "first answer"
     assert state.turn == 1  # the body did not run
     assert fake.remaining == 1  # the second reply is still left
 
-    # Adding a new instruction makes is_answered() false, so the loop actually runs
-    state.add_user_message("Keep going")
+    # Adding a new instruction makes the until false, so the loop actually runs
+    state.add_message(Message.user("Keep going"))
     answer2 = think_loop(agent, state)
     assert answer2 == "second answer"
     assert state.turn == 2
     assert fake.remaining == 0
 
 
-def test_until_accepts_builtin_and_custom_condition_together():
-    # "Built-in questions like State.is_answered and user-made functions go in the same place"
+def test_until_accepts_two_user_written_conditions_together():
+    # "User-made functions go in the same list": any number of them, checked in order
     def never_over_budget(state):
         return False
 
-    combo_loop = Loop(lambda a, s: a.think(s), until=[never_over_budget, State.is_answered], limit=5)
+    combo_loop = Loop(lambda a, s: a.think(s), until=[never_over_budget, waiting_for_user], limit=5)
     fake = FakeModel(["final answer"])
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = combo_loop(agent, state)
 
     assert answer == "final answer"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 # ============================================================ body rules, @loop mistake-proofing errors
@@ -424,7 +450,7 @@ def test_finish_then_think_or_use_tools_or_ask_raises_value_error(call_after_fin
     # "Calling think or use_tools after finish() is an error" / "Fix: if a block called finish(),
     #  return from the body" - checks the error raised when a body breaks this rule
     agent = Agent(model=FakeModel([]), reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     state.finish("already done")
 
     with pytest.raises(ValueError):
@@ -454,8 +480,8 @@ def test_agent_without_loop_uses_default_loop():
 
 
 def test_default_loop_runs_think_then_use_tools_until_answered():
-    # Default loop: "compact_if_full(agent, state); agent.think(state); if state.wants_tools(): agent.use_tools(state)"
-    # until=State.is_answered, limit=50
+    # Default loop: "compact_if_full(agent, state); agent.think(state); if state.pending_calls: agent.use_tools(state)"
+    # until=waiting_for_user, limit=50
     @tool
     def echo(text: str) -> str:
         """Echo tool for tests."""
@@ -463,7 +489,7 @@ def test_default_loop_runs_think_then_use_tools_until_answered():
 
     fake = FakeModel([tool_call("echo", text="hi"), "final reply"])
     agent = Agent(model=fake, tools=[echo], reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = agent.run(state)
 
@@ -498,7 +524,7 @@ def test_stop_table_until_condition_sets_stopped_to_condition_name():
         agent.think(state)
 
     agent = Agent(model=fake, loop=budget_loop, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = agent.run(state)
 
@@ -509,17 +535,17 @@ def test_stop_table_until_condition_sets_stopped_to_condition_name():
 
 def test_stop_table_finish_sets_stopped_finish():
     # "state.finish() called | stop when that turn ends and return state.answer... the whole run ends | 'finish'"
-    @loop(until=State.is_answered, limit=5)
+    @loop(until=waiting_for_user, limit=5)
     def finishing_loop(agent, state):
         state.finish("finished answer")
 
     agent = Agent(model=FakeModel([]), loop=finishing_loop, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = agent.run(state)
 
     assert answer == "finished answer"
-    assert state.stopped == StoppedByFinish()
+    assert state.stopped == StoppedByFinish("finished answer")
 
 
 def test_stop_table_limit_sets_stopped_limit_and_returns_last_answer():
@@ -534,13 +560,208 @@ def test_stop_table_limit_sets_stopped_limit_and_returns_last_answer():
         agent.think(state)
 
     agent = Agent(model=fake, loop=think_only, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = agent.run(state)
 
     assert answer == state.answer == "thought two"  # stopping at limit does not lose the answer already there
     assert state.stopped == StoppedByLimit(2)
     assert state.turn == 2
+
+
+# ============================================================ stops are recorded as StopEntry (real State)
+
+
+def _stops(state):
+    """The ``content`` of every ``StopEntry`` in the history, in order (``None`` is a cleared stop)."""
+    return [h.content for h in state.history if isinstance(h, StopEntry)]
+
+
+def test_default_loop_stops_with_until_is_answered_and_records_it_as_a_stop_entry():
+    # "The default loops use a private until function named is_answered, so StoppedByUntil("is_answered")
+    #  is unchanged", and the loop records the stop in the history instead of setting a field
+    agent = Agent(model=FakeModel(["The answer"]), reporter=None)
+    state = State(messages=[Message.user("Task")])
+
+    assert agent.run(state) == "The answer"
+
+    assert state.stopped == StoppedByUntil("is_answered")
+    assert str(state.stopped) == "stopped by is_answered"
+    assert isinstance(state.history[-1], StopEntry)
+    assert state.history[-1].content == StoppedByUntil("is_answered")
+    assert _stops(state) == [StoppedByUntil("is_answered")]
+
+
+def test_default_loop_does_not_stop_while_the_reply_still_has_tool_calls():
+    # the until needs "no pending calls and the last message is a reply without tool calls"
+    @tool
+    def echo(text: str) -> str:
+        """Echo tool for tests."""
+        return text
+
+    fake = FakeModel([tool_call("echo", text="hi"), "done"])
+    agent = Agent(model=fake, tools=[echo], reporter=None)
+    state = State(messages=[Message.user("Task")])
+    agent.run(state)
+    assert state.turn == 2
+    assert _stops(state) == [StoppedByUntil("is_answered")]  # one stop, at the end only
+
+
+def test_default_loop_on_a_state_that_is_already_answered_stops_at_turn_zero():
+    # A State whose last message is an answer is "answered": the loop stops before the first turn (and records it)
+    agent = Agent(model=FakeModel(["never used"]), reporter=None)
+    state = State(messages=[Message.user("Task"), Message.assistant("Already answered")])
+    # (an imported assistant message is not a model reply of this State, so state.answer stays None)
+    assert agent.run(state) is None
+    assert state.turn == 0
+    assert _stops(state) == [StoppedByUntil("is_answered")]
+
+
+def test_user_written_waiting_for_user_until_stops_a_loop_with_a_real_state():
+    # SPEC section 6: the 5-line user-written version replaces State.is_answered
+    @tool
+    def echo(text: str) -> str:
+        """Echo tool for tests."""
+        return text
+
+    @loop(until=waiting_for_user, limit=10)
+    def coding(agent, state):
+        agent.think(state)
+        if state.pending_calls:
+            agent.use_tools(state)
+
+    fake = FakeModel([tool_call("echo", text="hi"), "Done, what next?"])
+    agent = Agent(model=fake, tools=[echo], loop=coding, reporter=None)
+    state = State(messages=[Message.user("Task")])
+
+    assert agent.run(state) == "Done, what next?"
+    assert state.stopped == StoppedByUntil("waiting_for_user")
+    assert _stops(state) == [StoppedByUntil("waiting_for_user")]
+
+
+def test_chat_style_loop_waits_for_the_user_and_runs_again_after_add_message():
+    # the use the until exists for: stop when the model waits for the user, go on when the user writes
+    fake = FakeModel(["Hello! What would you like?", "Sure, here it is."])
+
+    @loop(until=waiting_for_user, limit=10)
+    def chat(agent, state):
+        agent.think(state)
+
+    agent = Agent(model=fake, loop=chat, reporter=None)
+    state = State(messages=[Message.user("Hi")])
+    assert agent.run(state) == "Hello! What would you like?"
+    state.add_message(Message.user("A summary please"))
+    assert agent.run(state) == "Sure, here it is."
+    assert _stops(state) == [StoppedByUntil("waiting_for_user")] * 2
+
+
+def test_a_loop_limit_stop_is_recorded_as_a_stop_entry():
+    def never(state):
+        return False
+
+    @loop(until=never, limit=2)
+    def think_only(agent, state):
+        agent.think(state)
+
+    agent = Agent(model=FakeModel(["one", "two"]), loop=think_only, reporter=None)
+    state = State(messages=[Message.user("Task")])
+    agent.run(state)
+    assert _stops(state) == [StoppedByLimit(2)]
+    assert state.stopped == StoppedByLimit(2)
+
+
+def test_nested_loops_the_outer_loop_going_on_clears_the_inner_stop_with_stop_entry_none():
+    # "An outer loop that goes on clears an inner loop's until/limit stop: StopEntry(content=None)"
+    def never(state):
+        return False
+
+    @loop(until=never, limit=1)
+    def inner(agent, state):
+        agent.think(state)
+
+    def after_two_turns(state):
+        return state.turn >= 2
+
+    seen_stopped = []
+
+    @loop(until=after_two_turns, limit=10)
+    def outer(agent, state):
+        seen_stopped.append(state.stopped)  # what the body sees at the start of each outer turn
+        inner(agent, state)
+
+    agent = Agent(model=FakeModel(["one", "two"]), loop=outer, reporter=None)
+    state = State(messages=[Message.user("Task")])
+    agent.run(state)
+
+    assert _stops(state) == [
+        StoppedByLimit(1),  # inner, first call
+        None,  # the outer loop goes on: the inner stop is cleared
+        StoppedByLimit(1),  # inner, second call
+        StoppedByUntil("after_two_turns"),  # the outer loop's own stop
+    ]
+    assert seen_stopped == [None, None]  # the cleared stop is not visible to the body
+    assert state.stopped == StoppedByUntil("after_two_turns")
+    # the cleared stop is the history's fact too: replaying gives the same value
+    assert State(history=state.history).stopped == state.stopped
+
+
+def test_finish_in_a_loop_is_one_stop_entry_with_the_answer_and_the_loop_adds_none():
+    # "finish recorded as StopEntry(StoppedByFinish(answer))"; the loop sees it is already recorded
+    @loop(until=waiting_for_user, limit=5)
+    def finishing_loop(agent, state):
+        state.finish("finished answer")
+
+    agent = Agent(model=FakeModel([]), loop=finishing_loop, reporter=None)
+    state = State(messages=[Message.user("Task")])
+    assert agent.run(state) == "finished answer"
+    assert _stops(state) == [StoppedByFinish("finished answer")]
+    assert state.finished and state.answer == "finished answer"
+
+
+def test_finish_inside_a_nested_loop_ends_the_outer_loop_too():
+    # a stop decided by the run (finish) is not cleared by an outer loop
+    def never(state):
+        return False
+
+    @loop(until=never, limit=5)
+    def inner(agent, state):
+        agent.think(state)
+        state.finish("inner decided")
+
+    calls = []
+
+    @loop(until=never, limit=5)
+    def outer(agent, state):
+        calls.append(1)
+        inner(agent, state)
+
+    agent = Agent(model=FakeModel(["thinking"]), loop=outer, reporter=None)
+    state = State(messages=[Message.user("Task")])
+    assert agent.run(state) == "inner decided"
+    assert calls == [1]
+    assert _stops(state) == [StoppedByFinish("inner decided")]
+
+
+def test_a_new_run_starts_with_no_stop_even_after_a_stopped_one():
+    # RunStartEntry resets state.stopped, so the previous reason does not stop the next run before it begins
+    fake = FakeModel(["first", "second"])
+
+    @loop(until=waiting_for_user, limit=5)
+    def chat(agent, state):
+        agent.think(state)
+
+    agent = Agent(model=fake, loop=chat, reporter=None)
+    state = State(messages=[Message.user("Task")])
+    agent.run(state)
+    state.add_message(Message.user("More"))
+    agent.run(state)
+    assert state.turn == 2
+    assert [h.kind for h in state.history if h.kind in ("run_start", "stop")] == [
+        "run_start",
+        "stop",
+        "run_start",
+        "stop",
+    ]
 
 
 # ============================================================ blocks.compact_if_full / CompactIfFull
@@ -554,19 +775,19 @@ def test_compact_if_full_default_instance_shape():
 
 
 def test_compact_if_full_does_not_trigger_below_threshold():
-    # "if state.context_used > 0.6: agent.compact(state)" - no compaction below the threshold
+    # "if agent.context_used(state) > 0.6: agent.compact(state)" - no compaction below the threshold
     fake = FakeModel(["short answer", "must not be used"], context_window=1_000_000)
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
-    assert state.context_used <= 0.6
+    assert agent.context_used(state) <= 0.6
     before_remaining = fake.remaining
 
     compact_if_full(agent, state)
 
     assert fake.remaining == before_remaining  # agent.compact was not called
-    assert state.context[-1].role == "assistant"  # not replaced by compaction (a summary user message)
+    assert state.messages[-1].role == "assistant"  # not replaced by compaction (a summary user message)
 
 
 #: Size that pushes context_used above 0.6 while the compaction request (with COMPACT_PROMPT) still fits.
@@ -575,28 +796,28 @@ _OVER_060_WINDOW = 330
 
 
 def test_compact_if_full_triggers_above_threshold():
-    # "if state.context_used > 0.6: agent.compact(state)" - compacts above the threshold
+    # "if agent.context_used(state) > 0.6: agent.compact(state)" - compacts above the threshold
     fake = FakeModel([_LONG_REPLY, "This is the summary"], context_window=_OVER_060_WINDOW)
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
-    assert state.context_used > 0.6
+    assert agent.context_used(state) > 0.6
     before_remaining = fake.remaining
 
     compact_if_full(agent, state)
 
     assert fake.remaining == before_remaining - 1  # agent.compact called the model once more
-    assert state.context[-1].role == "user"  # replaced by start_from(summary)
-    assert "This is the summary" in state.context[-1].text
-    assert len(state.context) == 2  # "replaced by two: the original task + the summary"
+    assert state.messages[-1].role == "user"  # replaced by compact(summary)
+    assert "This is the summary" in state.messages[-1].text
+    assert len(state.messages) == 2  # "replaced by two: the original task + the summary"
 
 
 def test_compact_if_full_instructions_reach_model_request():
     # "what to keep | task content | user (instructions)" - CompactIfFull(instructions=...) reaches the request
     fake = FakeModel([_LONG_REPLY, "summarized"], context_window=_OVER_060_WINDOW)
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
     block = CompactIfFull(instructions="Keep only the key points")
@@ -610,16 +831,16 @@ def test_compact_if_full_custom_at_changes_trigger_point():
     # "Blocks that need settings are classes" - at sets 'when' to compact as a number visible in code
     fake = FakeModel(["short answer", "summary1"], context_window=1_000_000)
     agent = Agent(model=fake, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
-    assert state.context_used < 0.6  # would not be compacted at the default threshold (0.6)
+    assert agent.context_used(state) < 0.6  # would not be compacted at the default threshold (0.6)
 
-    lenient = CompactIfFull(at=state.context_used / 2)
+    lenient = CompactIfFull(at=agent.context_used(state) / 2)
     lenient(agent, state)
 
-    assert state.context[-1].role == "user"  # compaction happened because of the lowered threshold
-    assert "summary1" in state.context[-1].text
+    assert state.messages[-1].role == "user"  # compaction happened because of the lowered threshold
+    assert "summary1" in state.messages[-1].text
 
 
 def test_missing_compact_block_lets_context_overflow_error_surface():
@@ -627,12 +848,12 @@ def test_missing_compact_block_lets_context_overflow_error_surface():
     #  context overflows. It never compacts silently" (checked here with the overflow FakeModel simulates)
     fake = FakeModel(["any answer"], context_window=1)
 
-    @loop(until=State.is_answered, limit=5)
+    @loop(until=waiting_for_user, limit=5)
     def no_compact_loop(agent, state):
         agent.think(state)  # no compact_if_full
 
     agent = Agent(model=fake, loop=no_compact_loop, reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     with pytest.raises(ContextTooLongError):
         agent.run(state)

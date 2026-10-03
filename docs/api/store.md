@@ -6,6 +6,6 @@ Guide: [Save and resume](../guides/resume.md).
 
 ::: alpineagents.FileStore
 
-::: alpineagents.SavedState
+::: alpineagents.StateInfo
 
 ::: alpineagents.store.Record

@@ -10,8 +10,7 @@ Use the async versions in async code, such as a web server. They have the same b
 | `agent.compact` | `await agent.acompact` |
 | `agent.ask` | `await agent.aask` |
 | `agent.ask_human` | `await agent.aask_human` |
-| `agent.save` | `await agent.asave` |
-| `store.load`, `store.list`, `store.delete` | `await store.aload`, `await store.alist`, `await store.adelete` |
+| `store.save`, `store.load`, `store.list`, `store.delete` | `await store.asave`, `await store.aload`, `await store.alist`, `await store.adelete` |
 | `compact_if_full` | `await acompact_if_full` |
 | `CompactIfFull(...)(agent, state)` | `await CompactIfFull(...).acall(agent, state)` |
 | `default_loop` | `adefault_loop` |

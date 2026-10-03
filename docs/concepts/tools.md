@@ -78,13 +78,13 @@ def screenshot(url: str) -> list:
   bytes (or pass `media_type="image/png"`).
 - In the list, a `str` is text, and anything else that is not an `Image` is sent as JSON text.
 - The result is the tuple of blocks the model gets: `(TextBlock("Screenshot of ..."), Image(image/png, 34.2KB))`. It
-  is the `content` of the call's `ToolResultBlock` and `tool_result` history entry, and the `result` a Reporter's
+  is the `content` of the call's `ToolResultBlock` and `ToolResultEntry` history entry, and the `result` a Reporter's
   `on_tool_end` gets. `result_text(result)` from `alpineagents.types` turns it into one line of text, with each image
   as `(image/png, 34.2KB)`.
 - Anthropic takes images in the tool result. Chat Completions APIs (`OpenAICompatible`) take only text there, so the
   adapter sends the images in a user message right after, marked as the call's result. The model must accept images.
-- The context size estimate counts each image as 1,600 tokens. Images are large: `state.clear_tool_results()` clears
-  them with the rest of old results, and a compaction summary keeps only what the model wrote about them. History
+- The context size estimate (`agent.context_tokens(state)`) counts each image as 1,600 tokens. Images are large:
+  `state.clear_tool_results()` clears them with the rest of old results, and a compaction summary keeps only what the model wrote about them. History
   and the store keep them.
 
 ## When a call goes wrong
@@ -151,8 +151,9 @@ def post_json(url: str, body: dict[str, str]) -> str:
 an exception the handler does not take, and how to decide where a failure belongs.
 
 An error result shows up as `error fetch_url: ...` in the terminal, as `outcome.kind == "error"` in a
-[Reporter](../guides/progress.md), and as a `tool_result` entry with `is_error=True` in `state.history`. That entry's
-`error` holds the `ToolError`, and its `__cause__` holds the exception the handler took.
+[Reporter](../guides/progress.md), and as a `ToolResultEntry` with `outcome == "error"` (so `is_error` is true) in
+`state.history`. That entry's `error` holds the `ToolError`, and its `__cause__` holds the exception the handler took.
+A store does not save `error`; the entry's `content` keeps the text.
 
 ## Tools that use the State
 
@@ -166,6 +167,17 @@ from alpineagents import State, tool
 def submit(summary: str, state: State) -> None:
     """Submit the finished work"""
     state.finish(summary)
+```
+
+A tool can read `state.messages`, `state.extra_data` and the rest, and change the State through its methods:
+`state.finish(...)`, `state.add_message(...)`, and `state.edit_extra_data()` to keep values of your own.
+
+```python
+@tool
+def remember(note: str, state: State) -> None:
+    """Remember something for later"""
+    with state.edit_extra_data() as data:
+        data.setdefault("notes", []).append(note)
 ```
 
 See [Tools that use the State](../guides/tool-state.md).
@@ -210,7 +222,8 @@ agent = Agent(model="claude-sonnet-5", tools=[Webhook(**row) for row in rows])
 
 - `super().__init__` takes `name`, `description`, `input_schema` (an object schema, left out for no arguments),
   `parallel` and the [hints](#describe-what-a-tool-does).
-- `run(args, state)` gets the model's arguments as a dict, not checked against `input_schema`. Check what you rely
+- `run(args, state)` gets the model's arguments as a dict, not checked against `input_schema`. It is your own copy:
+  changing it does not change the recorded call, whose `args` are read-only. Check what you rely
   on and raise `ToolInputError` when it is wrong.
 - What `run` returns (an `Image` included) and raises works as for `@tool`: see [Return values](#return-values) and
   [When a call goes wrong](#when-a-call-goes-wrong). Arguments that are not valid JSON never reach `run`.
@@ -315,7 +328,7 @@ A reply can ask for several tool calls. `use_tools` runs them like this:
 
 1. Tools with `parallel=True` (the default) run at the same time, on worker threads.
 2. Then tools with `parallel=False` run one at a time, in the order the model asked.
-3. The results go into the context in the order the model asked.
+3. The results go into `state.messages` in the order the model asked, together, once the last call has one.
 
 Use `parallel=False` for tools that must not overlap, such as two writes to the same file.
 

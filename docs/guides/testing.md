@@ -43,12 +43,12 @@ A failure the model should handle, raised with `ToolError`, becomes an error res
 --8<-- "docs_src/test_tool_failure.py"
 ```
 
-- The `tool_result` entry in `state.history` has the message the model got, and `is_error=True`.
+- The `tool_result` entry in `state.history` has the message the model got, `outcome == "error"` and `is_error=True`.
 - `state.stopped == StoppedByUntil("is_answered")` shows the run went on after the failure. An exception that is not a
   `ToolError` would have stopped the run and been raised by `run`.
 - To test only the tool, call it without an Agent. A `@tool` function runs as a plain function
   (`read_file("missing.py")` raises the `ToolError`), and a [`Tool` subclass](../concepts/tools.md#tools-that-are-not-functions)
-  has `run(args, state)`: `Webhook(...).run({"title": "x"}, State("test"))`.
+  has `run(args, state)`: `Webhook(...).run({"title": "x"}, State())`.
 
 ## Questions to the person
 
@@ -56,12 +56,12 @@ A failure the model should handle, raised with `ToolError`, becomes an error res
 [Ask before a tool runs](approval.md):
 
 ```python
-from alpineagents import State, StoppedByPermission
+from alpineagents import Message, State, StoppedByPermission
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 
 fake = FakeModel([tool_call("write_file", path="a.md", content="x")])
 human = FakeHuman(["no"])
-state = State("Write a.md")
+state = State(messages=[Message.user("Write a.md")])
 agent.copy(model=fake, human=human, reporter=None).run(state)
 assert human.remaining == 0
 assert isinstance(state.stopped, StoppedByPermission)
@@ -85,10 +85,12 @@ Use a `FileStore` in pytest's `tmp_path`, then load the State as another process
 
 ```python
 store = FileStore(tmp_path)
-agent.copy(model=FakeModel(["Done"]), reporter=None, store=store).run(State("Fix it", id="t1"))
+state = State(id="t1", messages=[Message.user("Fix it")])
+agent.copy(model=FakeModel(["Done"]), reporter=None, store=store).run(state)
 
-state = store.load("t1")
-assert state.answer == "Done"
+loaded = store.load("t1")
+assert loaded.answer == "Done"
+assert loaded.snapshot() == state.snapshot()  # a loaded State equals the saved one
 ```
 
 ## Related

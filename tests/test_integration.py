@@ -10,14 +10,22 @@ import time
 
 import pytest
 
-from alpineagents import Agent, Reporter, State, StoppedByFinish, StoppedByUntil, loop, tool
+from alpineagents import Agent, Reporter, State, StopEntry, StoppedByFinish, StoppedByUntil, loop, tool
 from alpineagents._tokens import context_tokens, estimate_overhead_tokens
 from alpineagents.testing import FakeModel, tool_call
-from alpineagents.types import Message, Reply, ToolResultBlock, Usage
+from alpineagents.types import Message, Reply, ToolOutcomeKind, ToolResultBlock, Usage
+
+
+def waiting_for_user(state: State) -> bool:
+    """The user-written until function of SPEC section 6 (State.is_answered is gone)."""
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
 
 
 def _result_texts(state: State) -> list[str]:
-    return [b.content for m in state.context for b in m.content if isinstance(b, ToolResultBlock)]
+    return [b.content for m in state.messages for b in m.content if isinstance(b, ToolResultBlock)]
 
 
 # ================================================================ notices added by tools
@@ -31,7 +39,7 @@ def test_notice_added_by_tool_lands_after_all_results_of_the_turn():
     def quick(state: State) -> str:
         """Finishes first and leaves a notice."""
         slow_started.wait(2)
-        state.add_notice("notice from quick")
+        state.add_message(Message.notice("notice from quick"))
         return "fast"
 
     @tool
@@ -42,12 +50,12 @@ def test_notice_added_by_tool_lands_after_all_results_of_the_turn():
         return "slow"
 
     fake = FakeModel([[tool_call("quick"), tool_call("slow")], "Done"])
-    state = State("Do both")
+    state = State(messages=[Message.user("Do both")])
     Agent(fake, tools=[quick, slow], reporter=None).run(state)
 
     roles_and_texts = [
         (m.role, [getattr(b, "content", None) or getattr(b, "text", None) for b in m.content])
-        for m in state.context
+        for m in state.messages
     ]
     # One result message (in request order), then the notice right after it, then the next answer.
     assert roles_and_texts[2] == ("user", ["fast", "slow"])
@@ -80,7 +88,7 @@ def test_tool_exception_waits_for_other_calls_and_keeps_type_and_message_with_no
         raise TimeoutError("too slow, failed")
 
     fake = FakeModel([[tool_call("slow", n=1), tool_call("boom", path="a.txt")]])
-    state = State("Do it")
+    state = State(messages=[Message.user("Do it")])
     with pytest.raises(TimeoutError) as info:
         Agent(fake, tools=[slow, boom], reporter=None).run(state)
 
@@ -112,7 +120,7 @@ def test_serial_tools_do_not_start_after_a_parallel_call_failed():
 
     fake = FakeModel([[tool_call("write_file", path="a"), tool_call("boom")]])
     agent = Agent(fake, tools=[write_file, boom], reporter=None)
-    state = State("Do it")
+    state = State(messages=[Message.user("Do it")])
     agent.think(state)
     with pytest.raises(ValueError):
         agent.use_tools(state)
@@ -143,7 +151,7 @@ def test_serial_tools_run_one_at_a_time_in_request_order():
 
     calls = [tool_call("write_file", path=p) for p in ("a", "b", "c")]
     fake = FakeModel([calls, "Done"])
-    state = State("Write")
+    state = State(messages=[Message.user("Write")])
     Agent(fake, tools=[write_file], reporter=None).run(state)
     assert max_active == 1
     assert order == ["a", "b", "c"]
@@ -153,10 +161,10 @@ def test_serial_tools_run_one_at_a_time_in_request_order():
 # ================================================================ think rollback
 
 
-def test_exception_after_reply_recorded_rolls_back_reply_and_its_calls():
-    """"think (during the model request) → roll back to just before that think." Even when on_think_end
-    (Reporter) raises, it is still the think step, so the recorded reply and its pending calls are rolled back
-    from the context. History is not erased."""
+def test_exception_after_reply_recorded_does_not_roll_back_the_reply():
+    """"An exception after the reply entry (e.g. raised by Reporter.on_think_end) does NOT undo the reply."
+    Only a request that got no reply is taken back. The reply and its calls stay, and because the exception
+    leaves run(), the calls are closed as aborted (the State stays saveable and runnable)."""
 
     class Broken(Reporter):
         def on_think_end(self, state, reply):
@@ -168,17 +176,25 @@ def test_exception_after_reply_recorded_rolls_back_reply_and_its_calls():
         return "contents"
 
     fake = FakeModel([tool_call("read_file", path="a")])
-    state = State("Read it")
+    state = State(messages=[Message.user("Read it")])
     with pytest.raises(RuntimeError, match="screen broken"):
         Agent(fake, tools=[read_file], reporter=Broken()).run(state)
 
-    assert [m.role for m in state.context] == ["user"]
-    assert state.pending_calls == ()
-    assert state.turn == 0
+    assert [m.role for m in state.messages] == ["user", "assistant", "user"]
+    assert state.messages[1].tool_calls and state.pending_calls == ()
+    assert state.turn == 1
     kinds = [h.kind for h in state.history]
-    assert kinds == ["user", "reply", "error", "context_change"]
-    # It was rolled back, so there is no call to close.
-    assert not any(h.kind == "tool_result" for h in state.history)
+    assert kinds == [
+        "context_change",
+        "run_start",
+        "model_request",
+        "model_reply",
+        "error",
+        "tool_result",
+    ]
+    # The call was not run: it is closed with the aborted marker.
+    assert _result_texts(state) == ["(aborted: RuntimeError)"]
+    assert state.history[-1].outcome == ToolOutcomeKind.ABORTED
 
 
 # ================================================================ finish and stopped
@@ -187,7 +203,7 @@ def test_exception_after_reply_recorded_rolls_back_reply_and_its_calls():
 def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
     """"E.g. a submit(answer: str, state: State) tool, which the model calls when it finishes the task, calls
     state.finish(answer)." / "state.finish() was called → stop when that turn ends and return state.answer"
-    (stopped == StoppedByFinish())."""
+    (stopped == StoppedByFinish(answer))."""
 
     @tool
     def submit(answer: str, state: State) -> None:
@@ -195,11 +211,12 @@ def test_submit_tool_calling_finish_ends_the_run_after_that_turn():
         state.finish(answer)
 
     fake = FakeModel([tool_call("submit", answer="42")])
-    state = State("Give the answer")
+    state = State(messages=[Message.user("Give the answer")])
     result = Agent(fake, tools=[submit], reporter=None).run(state)
     assert result == "42"
     assert state.answer == "42"
-    assert state.stopped == StoppedByFinish()
+    assert state.stopped == StoppedByFinish("42")
+    assert [h.content for h in state.history if isinstance(h, StopEntry)] == [StoppedByFinish("42")]
     assert _result_texts(state) == ["(done)"]
     with pytest.raises(ValueError):
         Agent(fake, reporter=None).run(state)
@@ -210,11 +227,11 @@ def test_stopped_is_cleared_when_a_later_run_raises():
     reason from the previous run does not linger."""
     fake = FakeModel(["First answer", RuntimeError("API broken")])
     agent = Agent(fake, reporter=None)
-    state = State("Question")
+    state = State(messages=[Message.user("Question")])
     agent.run(state)
     assert state.stopped == StoppedByUntil("is_answered")
 
-    state.add_user_message("One more")
+    state.add_message(Message.user("One more"))
     with pytest.raises(RuntimeError):
         agent.run(state)
     assert state.stopped is None
@@ -228,10 +245,10 @@ def test_until_callable_object_without_name_uses_class_name_for_stopped():
         def __call__(self, state: State) -> bool:
             return state.turn >= 1
 
-    @loop(until=[State.is_answered, OverBudget()], limit=10)
+    @loop(until=[waiting_for_user, OverBudget()], limit=10)
     def body(agent: Agent, state: State):
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             agent.use_tools(state)
 
     @tool
@@ -240,7 +257,7 @@ def test_until_callable_object_without_name_uses_class_name_for_stopped():
         return "ok"
 
     fake = FakeModel([tool_call("noop"), "Done"])
-    state = State("Do it")
+    state = State(messages=[Message.user("Do it")])
     Agent(fake, tools=[noop], loop=body, reporter=None).run(state)
     assert state.stopped == StoppedByUntil("OverBudget")
     assert state.turn == 1
@@ -249,9 +266,10 @@ def test_until_callable_object_without_name_uses_class_name_for_stopped():
 # ================================================================ context size estimate
 
 
-def test_use_tools_keeps_the_overhead_of_the_tools_the_last_think_showed():
-    """"think(state, tools=...) — given a list, it shows only those tools." / context_used is the context size of
-    the next think. use_tools does not know which tools were shown, so it keeps the last think's estimate."""
+def test_context_tokens_counts_the_overhead_of_all_the_agents_tools_whatever_think_showed():
+    """"agent.context_tokens(state): estimate with this Agent's system/tool overhead." The State no longer
+    remembers which tools the last think(tools=...) showed, so the estimate always uses the Agent's whole tool
+    list (the 0.4 "keeps the last think's overhead" rule is gone with the State's own window)."""
 
     @tool
     def small() -> str:
@@ -267,13 +285,15 @@ def test_use_tools_keeps_the_overhead_of_the_tools_the_last_think_showed():
     reply = Reply(Message("assistant", (call,)), Usage(requests=1), context_tokens=None)
     fake = FakeModel([reply])
     agent = Agent(fake, system="System", tools=[small, big], reporter=None)
-    state = State("Do it")
+    state = State(messages=[Message.user("Do it")])
     agent.think(state, tools=[small])
+    overhead_all = estimate_overhead_tokens("System", [small.spec, big.spec])
     overhead_small = estimate_overhead_tokens("System", [small.spec])
-    assert state.context_tokens == context_tokens(state.context, overhead_small)
+    assert overhead_all > overhead_small
+    assert agent.context_tokens(state) == context_tokens(state.messages, overhead_all)
 
     agent.use_tools(state)
-    assert state.context_tokens == context_tokens(state.context, overhead_small)
+    assert agent.context_tokens(state) == context_tokens(state.messages, overhead_all)
 
 
 # ================================================================ mistake-proofing errors
@@ -293,21 +313,24 @@ def test_putting_a_class_instead_of_an_object_in_tools_says_how_to_fix():
         Agent(FakeModel([]), tools=[FileSystem], reporter=None)
 
 
-def test_ask_by_another_agent_does_not_take_ownership_and_owner_keeps_thinking():
-    """"The first Agent to think becomes the owner; another Agent that thinks gets an error. Other Agents only
-    read through ask.\""""
+def test_another_agent_can_ask_think_and_compact_and_the_first_one_continues():
+    """The 0.4 owner rule is gone: any Agent can ask, think, use_tools and compact a State. An ask changes
+    neither the messages nor the turn; a think by the second Agent is an ordinary turn."""
     coder = Agent(FakeModel(["Wrote the code", "Fixed"]), reporter=None)
-    reviewer = Agent(FakeModel(["Looks good"]), reporter=None)
-    state = State("Write the code")
+    reviewer = Agent(FakeModel(["Looks good", "Reviewed", "Summary of the work"]), reporter=None)
+    state = State(messages=[Message.user("Write the code")])
     coder.think(state)
+    before = state.messages
     assert reviewer.ask(state, "Review this") == "Looks good"
-    with pytest.raises(ValueError, match="ask"):
-        reviewer.think(state)
-    with pytest.raises(ValueError):
-        reviewer.use_tools(state)
-    with pytest.raises(ValueError):
-        reviewer.compact(state)
-    state.add_user_message("Fix it")
+    assert state.messages == before and state.turn == 1
+
+    reviewer.think(state)  # does not raise
+    assert state.answer == "Reviewed" and state.turn == 2
+    reviewer.use_tools(state)  # nothing pending: does nothing
+    reviewer.compact(state)
+    assert state.messages[-1].text.endswith("Summary of the work")
+
+    state.add_message(Message.user("Fix it"))
     coder.think(state)
     assert state.answer == "Fixed"
     assert [h.kind for h in state.history].count("ask") == 1
@@ -325,16 +348,17 @@ def test_interrupt_caught_inside_the_loop_keeps_calls_pending_for_deny():
         await asyncio.sleep(5)
         return "finished"
 
-    @loop(until=State.is_answered, limit=3)
+    @loop(until=waiting_for_user, limit=3)
     def careful(agent: Agent, state: State):
         agent.think(state)
-        if state.wants_tools():
+        if state.pending_calls:
             try:
                 agent.use_tools(state)
             except KeyboardInterrupt:
                 assert [c.name for c in state.pending_calls] == ["long_job"]
                 for call in state.pending_calls:
-                    state._deny(call, "stopped by the user")  # what a permission's denial records
+                    # what a permission's denial records
+                    state._tool_result(call, "stopped by the user", ToolOutcomeKind.DENIED)
 
     class InterruptOnStart(Reporter):
         def on_tool_start(self, state, call):
@@ -347,8 +371,9 @@ def test_interrupt_caught_inside_the_loop_keeps_calls_pending_for_deny():
             threading.Thread(target=fire, daemon=True).start()
 
     fake = FakeModel([tool_call("long_job"), "Got it"])
-    state = State("A long job")
+    state = State(messages=[Message.user("A long job")])
     answer = Agent(fake, tools=[long_job], loop=careful, reporter=InterruptOnStart()).run(state)
     assert answer == "Got it"
     assert _result_texts(state) == ["stopped by the user"]
-    assert not any(h.kind == "tool_result" for h in state.history)
+    # the denial is a tool_result entry with outcome "denied" (there is no separate NotRun entry any more)
+    assert [h.outcome for h in state.history if h.kind == "tool_result"] == [ToolOutcomeKind.DENIED]

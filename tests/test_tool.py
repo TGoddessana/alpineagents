@@ -12,6 +12,7 @@ dataclass/TypedDict/Pydantic models defined locally inside test functions direct
 """
 
 import asyncio
+import dataclasses
 import json
 import threading
 import time
@@ -25,9 +26,11 @@ from pydantic import BaseModel
 # On Python 3.11 (the minimum version), Pydantic does not accept typing.TypedDict.
 from typing_extensions import TypedDict
 
-from alpineagents import Agent, State, tool
+from alpineagents import Agent, FileStore, Message, Reporter, State, Tool, ToolError, ToolOutcomeKind, tool
+from alpineagents.permissions import AllowByDefault, DenyPermission, Denied
 from alpineagents.testing import FakeModel, tool_call
-from alpineagents.types import ToolResultBlock
+from alpineagents._frozen import FrozenDict, FrozenList
+from alpineagents.types import ToolResultBlock, ToolResultEntry
 
 
 def make_agent(fake, tools):
@@ -39,10 +42,10 @@ def single_call_result(t, **args):
     """Calls one tool once and returns the result string the model receives."""
     fake = FakeModel([tool_call(t.name, **args), "done"])
     agent = make_agent(fake, [t])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
-    return state.context[-1].content[0].content
+    return state.messages[-1].content[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +110,7 @@ def test_tool_injects_current_state_regardless_of_parameter_name():
 
     fake = FakeModel([tool_call("peek"), "done"])
     agent = make_agent(fake, [peek])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
@@ -239,11 +242,11 @@ def test_object_with_multiple_tool_methods_registers_all_of_them():
     calc = Calc()
     fake = FakeModel([[tool_call("add", a=2, b=3), tool_call("sub", a=5, b=1)], "done"])
     agent = make_agent(fake, [calc])
-    state = State("Calculate")
+    state = State(messages=[Message.user("Calculate")])
     agent.think(state)
     agent.use_tools(state)
 
-    results = {b.name: b.content for b in state.context[-1].content}
+    results = {b.name: b.content for b in state.messages[-1].content}
     assert results["add"] == "5"
     assert results["sub"] == "4"
 
@@ -264,11 +267,11 @@ def test_object_single_bound_method_registers_only_that_tool():
     calc = Calc()
     fake = FakeModel([[tool_call("add", a=1, b=1), tool_call("sub", a=1, b=1)], "done"])
     agent = make_agent(fake, [calc.add])
-    state = State("Calculate")
+    state = State(messages=[Message.user("Calculate")])
     agent.think(state)
     agent.use_tools(state)
 
-    results = {b.name: b.content for b in state.context[-1].content}
+    results = {b.name: b.content for b in state.messages[-1].content}
     assert results["add"] == "2"
     # sub was not put in tools=, so it is not in the tool list
     assert results["sub"].startswith("(input error:")
@@ -353,7 +356,7 @@ def test_tool_return_value_that_cannot_be_jsoned_raises_error():
 
     fake = FakeModel([tool_call("bad"), "done"])
     agent = make_agent(fake, [bad])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     with pytest.raises(TypeError, match="JSON"):
         agent.use_tools(state)
@@ -369,7 +372,7 @@ def test_tool_exception_propagates_and_execution_stops():
 
     fake = FakeModel([tool_call("boom"), "later reply"])
     agent = make_agent(fake, [boom])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
     with pytest.raises(RuntimeError, match="pipe burst"):
@@ -406,11 +409,11 @@ def test_invalid_arguments_return_input_error_without_calling_the_tool():
 
     fake = FakeModel([tool_call("strict", n="not a number"), "done"])
     agent = make_agent(fake, [strict])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
-    content = state.context[-1].content[0].content
+    content = state.messages[-1].content[0].content
     assert content.startswith("(input error:")
     assert called == []  # if the arguments do not match the schema, the tool is not called at all
 
@@ -436,7 +439,7 @@ def test_tool_calls_in_one_turn_run_concurrently():
 
     fake = FakeModel([[tool_call("slow_a"), tool_call("slow_b")], "done"])
     agent = make_agent(fake, [slow_a, slow_b])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
     start = time.monotonic()
@@ -478,7 +481,7 @@ def test_parallel_false_tool_runs_only_after_the_rest_finish():
 
     fake = FakeModel([[tool_call("fast_a"), tool_call("fast_b"), tool_call("writer")], "done"])
     agent = make_agent(fake, [fast_a, fast_b, writer])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
@@ -508,30 +511,32 @@ def test_tool_can_finish_the_state():
 
     fake = FakeModel([tool_call("submit", answer="This is the answer"), "done"])
     agent = make_agent(fake, [submit])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
-    assert state.is_finished() is True
+    assert state.finished is True
     assert state.answer == "This is the answer"
 
 
-def test_tool_can_add_notice_and_write_to_data():
-    # "A tool can read the injected State and use finish(), add_notice() and data."
+def test_tool_can_add_notice_and_write_to_extra_data():
+    # "A tool can read the injected State and use finish(), add_message(Message.notice(...)) and
+    # edit_extra_data()."
     @tool
     def record(state: State) -> str:
-        """A tool that uses State's add_notice and data"""
-        state.data["found"] = 42
-        state.add_notice("Recorded it")
+        """A tool that uses State's add_message and extra_data"""
+        with state.edit_extra_data() as data:
+            data["found"] = 42
+        state.add_message(Message.notice("Recorded it"))
         return "ok"
 
     fake = FakeModel([tool_call("record"), "done"])
     agent = make_agent(fake, [record])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
-    assert state.data["found"] == 42
+    assert state.extra_data["found"] == 42
     notice_entries = [h.content for h in state.history if h.kind == "notice"]
     assert notice_entries == ["[notice] Recorded it"]
 
@@ -541,16 +546,16 @@ def test_notice_added_during_tool_run_is_deferred_until_turn_closes():
     @tool
     def note_then_return(state: State) -> str:
         """A tool that adds a notice while it runs"""
-        state.add_notice("notice first")
+        state.add_message(Message.notice("notice first"))
         return "result next"
 
     fake = FakeModel([tool_call("note_then_return"), "done"])
     agent = make_agent(fake, [note_then_return])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
-    ctx = state.context
+    ctx = state.messages
     result_message, notice_message = ctx[-2], ctx[-1]
     assert isinstance(result_message.content[0], ToolResultBlock)
     assert result_message.content[0].content == "result next"
@@ -558,24 +563,24 @@ def test_notice_added_during_tool_run_is_deferred_until_turn_closes():
     assert notice_message.text == "[notice] notice first"
 
 
-def test_concurrent_data_mutation_is_protected_by_state_lock():
-    # "Code that changes data in several steps (e.g. appending to a list) goes inside with state.lock:.
-    # It may run at the same time as other tools in the same turn. Parallel execution is kept."
+def test_concurrent_extra_data_edits_are_serialized_by_edit_extra_data():
+    # "edit_extra_data() holds a lock for the whole block, so a read-modify-write (e.g. appending to a list)
+    # is atomic. Tools may run at the same time in the same turn. Parallel execution is kept."
     @tool
     def collect(i: int, state: State) -> None:
-        """Several tools append to state.data at the same time"""
-        with state.lock:
-            state.data.setdefault("items", []).append(i)
+        """Several tools append to state.extra_data at the same time"""
+        with state.edit_extra_data() as data:
+            data.setdefault("items", []).append(i)
 
     calls = [tool_call("collect", i=i) for i in range(20)]
     fake = FakeModel([calls, "done"])
     agent = make_agent(fake, [collect])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
 
     # Concurrent appends without a lock can lose values. If the lock held, all 20 remain.
-    assert sorted(state.data["items"]) == list(range(20))
+    assert sorted(state.extra_data["items"]) == list(range(20))
 
 
 def test_changing_context_while_calls_are_pending_raises_error():
@@ -587,9 +592,299 @@ def test_changing_context_while_calls_are_pending_raises_error():
 
     fake = FakeModel([tool_call("anything"), "done"])
     agent = make_agent(fake, [anything])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)  # this creates a pending call, so state.pending_calls is not empty
 
-    assert state.wants_tools() is True
+    assert state.pending_calls
     with pytest.raises(ValueError, match="calls are pending"):
         agent.compact(state)
+
+
+# ---------------------------------------------------------------------------
+# ToolResultEntry.outcome: one entry kind for every way a call can end
+# ---------------------------------------------------------------------------
+
+
+@tool
+def fine(x: int) -> str:
+    """Works"""
+    return "fine"
+
+
+@tool
+def failing() -> str:
+    """Raises a ToolError"""
+    raise ToolError("nope")
+
+
+@tool
+def boom() -> str:
+    """Raises a plain exception"""
+    raise RuntimeError("boom")
+
+
+@tool
+def ctrl_c() -> str:
+    """Stops right away, imitating Ctrl+C while it runs"""
+    raise KeyboardInterrupt()
+
+
+class DenyFailing(DenyPermission):
+    def check(self, state, call, tool_):
+        return Denied("not allowed") if call.name == "failing" else None
+
+
+class StopOnFailing(DenyPermission):
+    def check(self, state, call, tool_):
+        return Denied("not allowed", stop=True) if call.name == "failing" else None
+
+
+class EndSpy(Reporter):
+    def __init__(self):
+        self.ends = []
+
+    def on_tool_end(self, state, call, result, outcome):
+        self.ends.append((call.name, outcome.kind))
+
+
+class Ran:
+    """What a run of one turn of calls left: the State, the Reporter's view, and the exception that ended the run."""
+
+    def __init__(self, state, spy, raised):
+        self.state, self.spy, self.raised = state, spy, raised
+
+    @property
+    def results(self):
+        return [e for e in self.state.history if isinstance(e, ToolResultEntry)]
+
+
+def run_calls(calls, tools, *, store=None, state_id=None, **settings):
+    """Runs one turn of calls (the second model reply is a plain answer). A run that a plain exception or Ctrl+C
+    ends does not raise here: the exception is in ``.raised``."""
+    spy = EndSpy()
+    settings.setdefault("human", None)
+    agent = Agent(model=FakeModel([calls, "done"]), tools=tools, reporter=spy, store=store, **settings)
+    state = State(messages=[Message.user("Task")], id=state_id)
+    raised = None
+    try:
+        agent.run(state)
+    except (RuntimeError, KeyboardInterrupt) as e:
+        raised = e
+    return Ran(state, spy, raised)
+
+
+def test_done_outcome():
+    (entry,) = run_calls([tool_call("fine", x=1)], [fine]).results
+    assert (entry.outcome, entry.content, entry.is_error, entry.late) == (ToolOutcomeKind.DONE, "fine", False, False)
+    assert entry.error is None and entry.call.name == "fine"
+
+
+def test_error_outcome_keeps_the_tool_error():
+    ran = run_calls([tool_call("failing")], [failing])
+    (entry,) = ran.results
+    assert (entry.outcome, entry.content, entry.is_error) == (ToolOutcomeKind.ERROR, "nope", True)
+    assert isinstance(entry.error, ToolError)
+    assert ran.raised is None
+
+
+def test_input_error_outcome_for_bad_arguments_and_for_an_unknown_tool():
+    ran = run_calls([tool_call("fine", x="not a number"), tool_call("missing_tool")], [fine])
+    by_name = {e.call.name: e for e in ran.results}
+    assert [e.outcome for e in by_name.values()] == [ToolOutcomeKind.INPUT_ERROR] * 2
+    assert all(e.is_error and e.error is None for e in by_name.values())
+    assert by_name["fine"].content.startswith("(input error:")
+    assert "unknown tool" in by_name["missing_tool"].content
+
+
+def test_aborted_outcome_when_a_tool_raises_and_the_run_stops():
+    ran = run_calls([tool_call("boom")], [boom])
+    assert isinstance(ran.raised, RuntimeError)
+    (entry,) = ran.results
+    assert (entry.outcome, entry.content, entry.is_error) == (ToolOutcomeKind.ABORTED, "(aborted: RuntimeError)", True)
+    assert entry.error is ran.raised
+    assert ran.state.pending_calls == ()
+
+
+def test_interrupted_outcome_for_ctrl_c():
+    ran = run_calls([tool_call("ctrl_c")], [ctrl_c])
+    assert isinstance(ran.raised, KeyboardInterrupt)
+    (entry,) = ran.results
+    assert entry.outcome == ToolOutcomeKind.INTERRUPTED
+    assert (entry.content, entry.is_error) == ("(interrupted by user)", True)
+    assert entry.error is ran.raised
+    assert ran.state.pending_calls == ()
+
+
+def test_denied_outcome_for_a_permission_that_denies():
+    ran = run_calls(
+        [tool_call("fine", x=1), tool_call("failing")], [fine, failing], permissions=[DenyFailing(), AllowByDefault()]
+    )
+    by_name = {e.call.name: e for e in ran.results}
+    assert by_name["failing"].outcome == ToolOutcomeKind.DENIED
+    assert (by_name["failing"].content, by_name["failing"].is_error) == ("not allowed", True)
+    assert by_name["fine"].outcome == ToolOutcomeKind.DONE and not by_name["fine"].is_error  # the other call ran
+    assert str(ran.state.stopped) == "stopped by is_answered"  # a plain denial does not stop the run
+
+
+def test_cancelled_outcome_for_the_calls_of_a_stopped_turn():
+    calls = [tool_call("fine", x=1), tool_call("failing"), tool_call("fine", x=2)]
+    ran = run_calls(calls, [fine, failing], permissions=[StopOnFailing(), AllowByDefault()])
+    assert [(e.call.name, e.outcome) for e in ran.results] == [
+        ("failing", ToolOutcomeKind.DENIED),
+        ("fine", ToolOutcomeKind.CANCELLED),
+        ("fine", ToolOutcomeKind.CANCELLED),
+    ]
+    assert all(e.is_error for e in ran.results)
+
+
+def test_is_error_is_a_read_only_property_of_the_outcome():
+    (entry,) = run_calls([tool_call("fine", x=1)], [fine]).results
+    assert isinstance(ToolResultEntry.is_error, property)
+    assert "is_error" not in {f.name for f in dataclasses.fields(entry)}
+    with pytest.raises(AttributeError):
+        entry.is_error = True  # type: ignore[misc]
+    for kind in ToolOutcomeKind:
+        made = ToolResultEntry(content="x", call=entry.call, outcome=kind, turn=1)
+        assert made.is_error is (kind != ToolOutcomeKind.DONE)
+    assert ToolResultEntry(content="x", call=entry.call, outcome="denied", turn=1).outcome is ToolOutcomeKind.DENIED
+    with pytest.raises(ValueError):
+        ToolResultEntry(content="x", call=entry.call, outcome="exploded", turn=1)
+
+
+ALL_PATHS = {
+    "done": ([tool_call("fine", x=1)], [fine], {}),
+    "error": ([tool_call("failing")], [failing], {}),
+    "input_error": ([tool_call("missing_tool")], [fine], {}),
+    "aborted": ([tool_call("boom")], [boom], {}),
+    "interrupted": ([tool_call("ctrl_c")], [ctrl_c], {}),
+    "denied": ([tool_call("failing")], [failing], {"permissions": [DenyFailing(), AllowByDefault()]}),
+    "cancelled": (
+        [tool_call("failing"), tool_call("fine", x=1)],
+        [failing, fine],
+        {"permissions": [StopOnFailing(), AllowByDefault()]},
+    ),
+}
+
+
+@pytest.mark.parametrize("path", ALL_PATHS)
+def test_the_reporter_outcome_matches_the_entry_outcome_on_every_path(path):
+    calls, tools, settings = ALL_PATHS[path]
+    ran = run_calls(calls, tools, **settings)
+    assert sorted((e.call.name, e.outcome) for e in ran.results) == sorted(ran.spy.ends)
+    assert path in {str(e.outcome) for e in ran.results}  # every outcome kind is reachable from a run
+
+
+def test_every_outcome_kind_is_covered_by_the_paths():
+    assert set(ALL_PATHS) == {str(kind) for kind in ToolOutcomeKind}
+
+
+@pytest.mark.parametrize("path", ALL_PATHS)
+def test_every_outcome_survives_a_store_round_trip(tmp_path, path):
+    calls, tools, settings = ALL_PATHS[path]
+    store = FileStore(tmp_path)
+    ran = run_calls(calls, tools, store=store, state_id="s1", **settings)
+    store.save(ran.state)
+    loaded = store.load("s1")
+    loaded_results = [e for e in loaded.history if isinstance(e, ToolResultEntry)]
+    assert [(e.call.name, e.outcome, e.content, e.is_error) for e in loaded_results] == [
+        (e.call.name, e.outcome, e.content, e.is_error) for e in ran.results
+    ]
+    assert path in {str(e.outcome) for e in loaded_results}
+    assert all(e.error is None for e in loaded_results)  # a live exception is never saved
+    assert loaded.snapshot() == ran.state.snapshot()
+    assert State(history=ran.state.history).snapshot() == ran.state.snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Plain mutable arguments for tools; ToolCall.args stays frozen
+# ---------------------------------------------------------------------------
+
+
+def test_a_tool_function_gets_plain_mutable_arguments_and_the_recorded_call_stays_frozen():
+    seen = {}
+
+    @tool
+    def plan(steps: list[str], options: dict[str, list[int]]) -> str:
+        """Takes containers and edits them"""
+        seen["types"] = (type(steps), type(options), type(options["sizes"]))
+        steps.append("extra")
+        options["sizes"].append(99)
+        options["new"] = [0]
+        return f"{len(steps)} steps"
+
+    ran = run_calls([tool_call("plan", steps=["a", "b"], options={"sizes": [1, 2]})], [plan])
+    assert seen["types"] == (list, dict, list)
+    (entry,) = ran.results
+    assert entry.content == "3 steps"
+    args = entry.call.args
+    assert isinstance(args, FrozenDict) and isinstance(args["steps"], FrozenList)
+    assert args == {"steps": ["a", "b"], "options": {"sizes": [1, 2]}}  # what the model sent, unchanged
+    with pytest.raises(TypeError):
+        args["steps"].append("x")
+    assert ran.state.messages[1].tool_calls[0].args == {"steps": ["a", "b"], "options": {"sizes": [1, 2]}}
+
+
+def test_a_tool_class_gets_plain_nested_arguments():
+    seen = {}
+
+    class Edit(Tool):
+        def __init__(self):
+            super().__init__(name="edit", description="Edit", input_schema={"type": "object", "properties": {}})
+
+        def run(self, args, state):
+            seen["types"] = (type(args), type(args["lines"]), type(args["opts"]), type(args["opts"]["tags"]))
+            args["lines"].append(3)
+            args["opts"]["tags"].append("z")
+            args.pop("lines")
+            return "edited"
+
+    (entry,) = run_calls([tool_call("edit", lines=[1, 2], opts={"tags": ["a"]})], [Edit()]).results
+    assert seen["types"] == (dict, list, dict, list)
+    assert entry.content == "edited"
+    assert entry.call.args == {"lines": [1, 2], "opts": {"tags": ["a"]}}
+
+
+def test_each_run_of_a_tool_gets_its_own_copy_of_the_arguments():
+    seen = []
+
+    @tool
+    def take(items: list[int]) -> str:
+        """Appends to its argument"""
+        items.append(len(seen))
+        seen.append(items)
+        return "ok"
+
+    state = State(messages=[Message.user("Task")])
+    model = FakeModel([tool_call("take", items=[0]), tool_call("take", items=[0]), "done"])
+    Agent(model=model, tools=[take], reporter=None).run(state)
+    assert seen == [[0, 0], [0, 1]]  # the second call did not see the first call's append
+    results = [e for e in state.history if isinstance(e, ToolResultEntry)]
+    assert [e.call.args for e in results] == [{"items": [0]}, {"items": [0]}]
+
+
+def test_permissions_and_reporters_see_the_frozen_arguments():
+    seen = {}
+
+    class Look(DenyPermission):
+        def check(self, state, call, tool_):
+            seen["permission"] = (type(call.args), type(call.args["items"]))
+            return None
+
+    class Watch(Reporter):
+        def on_tool_start(self, state, call):
+            seen["reporter"] = type(call.args)
+
+    @tool
+    def take(items: list[int]) -> str:
+        """Takes a list"""
+        return "ok"
+
+    agent = Agent(
+        model=FakeModel([tool_call("take", items=[1]), "done"]),
+        tools=[take],
+        reporter=Watch(),
+        human=None,
+        permissions=[Look(), AllowByDefault()],
+    )
+    agent.run("Task")
+    assert seen == {"permission": (FrozenDict, FrozenList), "reporter": FrozenDict}

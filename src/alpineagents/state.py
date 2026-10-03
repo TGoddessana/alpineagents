@@ -197,10 +197,12 @@ class StateSnapshot:
     calls, otherwise ``None``."""
     stopped: Stopped | None = None
     """Why the current or last run is set to stop, or ``None`` (a new run clears it)."""
-    created_at: datetime | None = None
-    """The ``at`` of the first history entry, or ``None`` while the history is empty."""
-    updated_at: datetime | None = None
-    """The ``at`` of the latest history entry, or ``None`` while the history is empty."""
+    # The times are left out of ``==`` because entries ignore ``at`` in ``==``: two States with equal histories
+    # recorded at different moments must still give equal snapshots.
+    created_at: datetime | None = field(default=None, compare=False)
+    """The ``at`` of the first history entry, or ``None`` while the history is empty. Not compared by ``==``."""
+    updated_at: datetime | None = field(default=None, compare=False)
+    """The ``at`` of the latest history entry, or ``None`` while the history is empty. Not compared by ``==``."""
 
     # Bookkeeping of the fold. Not part of the value: ``compare=False`` keeps it out of ``==``, and the public
     # fields above are enough to tell two snapshots apart (they come from the same history).
@@ -595,7 +597,17 @@ class State:
                     example,
                 )
             )
-        items = tuple(messages)
+        try:
+            items = tuple(messages)
+        except TypeError:
+            raise TypeError(
+                fix_message(
+                    f"State(messages=...) takes a list of Message objects (got: {type(messages).__name__})",
+                    "pass a list of messages, wrapping each one with Message.user(...), Message.notice(...) or "
+                    "Message.assistant(...)",
+                    example,
+                )
+            ) from None
         for item in items:
             if not isinstance(item, Message):
                 raise TypeError(
@@ -868,7 +880,11 @@ class State:
                     example,
                 )
             )
-        if not message.text.strip() and not any(isinstance(block, Image) for block in message.content):
+        # A notice's text starts with the prefix ``Message.notice`` added, so look at what follows it.
+        text = message.text
+        if text.startswith(NOTICE_PREFIX):
+            text = text[len(NOTICE_PREFIX) :]
+        if not text.strip() and not any(isinstance(block, Image) for block in message.content):
             raise ValueError(
                 fix_message(
                     f"add_message() got a message with no text and no image (text: {message.text!r}). Providers "

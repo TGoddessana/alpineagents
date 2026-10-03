@@ -6,9 +6,16 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from alpineagents import MCP, Agent, MCPTool, State, loop, tool
+from alpineagents import MCP, Agent, MCPTool, Message, State, loop, tool
 from alpineagents.permissions import Allowed, DecidePermission, Denied
 from alpineagents.testing import FakeModel, tool_call
+
+
+def waiting_for_user(state: State) -> bool:
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
 
 
 def hints(t):
@@ -172,13 +179,13 @@ def test_approval_permission_reads_the_hints():
             return Denied("The user declined")
 
     fake = FakeModel([[tool_call("read_file", path="a"), tool_call("bash", command="rm -rf /")], "done"])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent = Agent(model=fake, tools=[read_file, bash], permissions=[DeclineChanges()], reporter=None, human=None)
     agent.run(state)
 
     assert asked == ["bash"]
-    results = [(e.kind, e.call.name) for e in state.history if e.kind in ("tool_result", "denied", "cancelled")]
-    assert results == [("denied", "bash"), ("tool_result", "read_file")]  # denied first, then the tools run
+    results = [(e.outcome, e.call.name) for e in state.history if e.kind == "tool_result"]
+    assert results == [("denied", "bash"), ("done", "read_file")]  # denied first, then the tools run
 
 
 def test_think_with_the_read_only_tools_of_the_map():
@@ -189,7 +196,7 @@ def test_think_with_the_read_only_tools_of_the_map():
         return "done"
 
     agent = make_agent([reply], [read_file, Files(), bash])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state, tools=[t for t in agent.tool_map.values() if t.read_only])
     assert seen == [["read_file", "list_files"]]
 
@@ -257,7 +264,7 @@ def test_mcp_tools_are_listed_only_while_connected(github):
 def test_tool_map_during_a_run_has_the_mcp_tools(github):
     seen = []
 
-    @loop(until=State.is_answered, limit=5)
+    @loop(until=waiting_for_user, limit=5)
     def look(agent: Agent, state: State):
         seen.append(agent.tool_map["github__get_issue"].read_only)
         agent.think(state)
@@ -276,7 +283,7 @@ def test_think_takes_mcp_tools_from_the_map(github):
     agent = make_agent([reply], [read_file, github])
     with agent:
         readers = [t for t in agent.tool_map.values() if t.read_only]
-        agent.think(State("Task"), tools=readers)
+        agent.think(State(messages=[Message.user("Task")]), tools=readers)
     assert seen == [["read_file", "github__get_issue"]]
 
 
@@ -287,4 +294,4 @@ def test_think_rejects_an_mcp_tool_of_another_agent(github):
         foreign = one.tool_map["github__get_issue"]
         assert foreign is not other.tool_map["github__get_issue"]
         with pytest.raises(ValueError, match="not a connected MCP tool of this Agent"):
-            other.think(State("Task"), tools=[foreign])
+            other.think(State(messages=[Message.user("Task")]), tools=[foreign])

@@ -7,7 +7,8 @@
 A Python agent framework where the agent loop is a function you write.
 
 - `Agent` holds the settings: the model, the system prompt and the tools.
-- `State` holds one task: the messages so far and the answer.
+- `State` holds one conversation: its history, the messages the model sees next, and the answer. You change it only
+  through its methods.
 - A loop takes both and repeats one turn until a stop condition is true.
 
 ## Why
@@ -109,11 +110,18 @@ def write_file(path: str, content: str) -> None:
     Path(path).write_text(content)
 
 
-@loop(until=State.is_answered, limit=30)
+def waiting_for_user(state: State) -> bool:
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
+
+
+@loop(until=waiting_for_user, limit=30)
 def coding(agent: Agent, state: State):
     compact_if_full(agent, state)
     agent.think(state)
-    if state.wants_tools():
+    if state.pending_calls:
         agent.use_tools(state)
 
 
@@ -127,8 +135,31 @@ print(agent.run("Add a test for the add() function in calc.py"))
 ```
 
 - `coding` is one turn: summarize the context if it is more than 60% full, ask the model, run the tools it asked for.
-- `@loop` repeats the turn. It stops when `State.is_answered` is true, or after 30 turns.
+- `@loop` repeats the turn. It stops when `waiting_for_user` is true, a function you write that says the model has
+  answered, or after 30 turns.
 - To change the agent, add, remove or reorder lines in `coding`.
+
+## Keep and inspect the State
+
+`agent.run("text")` creates a State and throws it away. To keep it, create it yourself:
+
+```python
+from alpineagents import Message, State
+
+state = State(messages=[Message.user("Add a test for the add() function in calc.py")])
+agent.run(state)
+
+print(state.answer, state.stopped, state.usage.cost)
+state.add_message(Message.user("Now run the tests"))   # the one way to talk to it
+agent.run(state)                                       # continues the same conversation
+```
+
+- Every change to a State adds one entry to `state.history`, and `state.messages`, `state.turn` and `state.answer` are
+  computed from it. Nothing else is saved, and nothing is hidden.
+- `state.snapshot()` returns a frozen `StateSnapshot`. `state.restore(snapshot)` goes back to it, and `state.fork()`
+  gives a copy to try something on.
+- `state.extra_data` is a notepad for your own values. Change it with `with state.edit_extra_data() as data:`.
+- `FileStore("runs")` with `Agent(store=...)` saves the history, so `store.load(id)` continues it in another process.
 
 ## Documentation
 

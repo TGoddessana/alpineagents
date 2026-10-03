@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from alpineagents import Agent, Reporter, State, tool
+from alpineagents import Agent, Message, Reporter, State, tool
 from alpineagents import _runner
 from alpineagents._structured import parse_reply
 from alpineagents.state import INTERRUPTED, closed_result
 from alpineagents.testing import FakeModel, tool_call
-from alpineagents.types import ToolOutcome
+from alpineagents.types import ToolOutcome, ToolOutcomeKind
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -109,7 +109,7 @@ def test_ask_accepts_json_answer_with_fence_in_string_value():
     reply = json.dumps({"approved": False, "comments": _FENCED_COMMENT}, ensure_ascii=False)
     fake = FakeModel([reply])
     agent = Agent(model=fake, reporter=None)
-    review = agent.ask(State("Task"), "Review this", returns=Review)
+    review = agent.ask(State(messages=[Message.user("Task")]), "Review this", returns=Review)
     assert review == Review(approved=False, comments=_FENCED_COMMENT)
     assert len(fake.requests) == 1
 
@@ -120,7 +120,7 @@ def test_ask_accepts_json_answer_with_fence_in_string_value():
 _CHILD = """
 import os, signal, sys, threading, time
 sys.path.insert(0, {src!r})
-from alpineagents import Agent, State, tool
+from alpineagents import Agent, Message, State, tool
 from alpineagents.testing import FakeModel, tool_call
 
 t0 = time.monotonic()
@@ -138,7 +138,7 @@ def send_sigint():
 agent = Agent(model=FakeModel([tool_call("slow_tool")]), tools=[slow_tool], reporter=None)
 threading.Thread(target=send_sigint, daemon=True).start()
 try:
-    agent.run(State("Task"))
+    agent.run(State(messages=[Message.user("Task")]))
 except KeyboardInterrupt:
     print(f"RAISED_AT={{time.monotonic() - t0:.3f}}", flush=True)
     sys.exit(1)
@@ -170,7 +170,7 @@ def test_process_exits_promptly_after_ctrlc_during_blocked_sync_tool(tmp_path):
 def _two_pending_calls():
     call_a, call_b = tool_call("a"), tool_call("b")
     agent = Agent(model=FakeModel([[call_a, call_b]]), tools=[], reporter=None)
-    state = State("task")
+    state = State(messages=[Message.user("task")])
     agent.think(state)
     return state, call_a, call_b
 
@@ -182,50 +182,45 @@ def _done_job(call, result: str) -> _runner._Job:
     return job
 
 
-def test_finish_does_not_raise_when_deny_races_the_check(monkeypatch):
-    """"If a finished call is no longer a pending call by then, its result is not recorded": another thread's
-    State._deny cannot slip in between the check and the record."""
-    state, call_a, call_b = _two_pending_calls()
-    job = _done_job(call_b, "b's result")
+def test_finish_does_not_raise_when_deny_races_the_check():
+    """"If a finished call is no longer a pending call by then, its result is not recorded": the check and the
+    record are one step (``_tool_result(..., if_pending=True)``), so another thread's denial cannot slip in
+    between them. Whoever comes first closes the call; the other one records nothing and raises nothing."""
+    for _ in range(25):
+        state, call_a, call_b = _two_pending_calls()
+        job = _done_job(call_b, "b's result")
+        barrier = threading.Barrier(2)
+        deny_errors: list[BaseException] = []
+        failures: list = []
 
-    barrier = threading.Barrier(2)
-    orig_is_pending = _runner._is_pending
+        def deny_from_other_tool():
+            barrier.wait(timeout=5)
+            try:
+                state._tool_result(call_b, "tool a denied b concurrently", ToolOutcomeKind.DENIED)
+            except ValueError as e:  # if recorded first, there is no call to deny (the contract of a result)
+                deny_errors.append(e)
 
-    def widened_is_pending(state, call):
-        result = orig_is_pending(state, call)
+        denier = threading.Thread(target=deny_from_other_tool)
+        denier.start()
         barrier.wait(timeout=5)
-        time.sleep(0.1)  # widen the gap between the check and the record
-        return result
+        _runner._finish(state, None, job, failures)
+        denier.join()
 
-    monkeypatch.setattr(_runner, "_is_pending", widened_is_pending)
-    deny_errors: list[BaseException] = []
-
-    def deny_from_other_tool():
-        barrier.wait(timeout=5)
-        try:
-            state._deny(call_b, "tool a denied b concurrently")
-        except ValueError as e:  # if recorded first, there is no call to deny (deny's contract)
-            deny_errors.append(e)
-
-    denier = threading.Thread(target=deny_from_other_tool)
-    denier.start()
-    failures: list = []
-    _runner._finish(state, None, job, failures)
-    denier.join()
-
-    assert failures == []
-    assert [c.id for c in state.pending_calls] == [call_a.id]
-    closings = [h for h in state.history if h.kind in ("tool_result", "denied") and h.call.id == call_b.id]
-    assert len(closings) == 1
+        assert failures == []
+        assert [c.id for c in state.pending_calls] == [call_a.id]
+        closings = [h for h in state.history if h.kind == "tool_result" and h.call.id == call_b.id]
+        assert len(closings) == 1  # exactly one result for b, whoever won
+        assert closings[0].outcome in (ToolOutcomeKind.DONE, ToolOutcomeKind.DENIED)
 
 
 def test_finish_skips_a_call_denied_before_it_finished():
-    """If _deny closed it first, the finished result is not recorded and nothing is raised."""
+    """If the denial closed it first, the finished result is not recorded and nothing is raised."""
     state, call_a, call_b = _two_pending_calls()
-    state._deny(call_b, "denied")
+    state._tool_result(call_b, "denied", ToolOutcomeKind.DENIED)
     _runner._finish(state, None, _done_job(call_b, "late"), [])
     assert [c.id for c in state.pending_calls] == [call_a.id]
-    assert not any(h.kind == "tool_result" for h in state.history)
+    results = [h for h in state.history if h.kind == "tool_result"]
+    assert [(h.call.id, h.outcome) for h in results] == [(call_b.id, ToolOutcomeKind.DENIED)]
 
 
 # ================================================================ on_tool_start / on_tool_end pairs
@@ -246,7 +241,7 @@ def test_failed_parallel_tool_call_gets_matching_on_tool_end():
 
     recorder = _Recorder()
     agent = Agent(model=FakeModel([[tool_call("boom"), tool_call("ok")]]), tools=[ok, boom], reporter=recorder)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(TimeoutError):
         agent.run(state)
 
@@ -278,7 +273,7 @@ def test_serial_tool_not_started_after_failure_gets_no_tool_events():
     recorder = _Recorder()
     agent = Agent(model=FakeModel([[tool_call("boom"), tool_call("seq")]]), tools=[boom, seq], reporter=recorder)
     with pytest.raises(TimeoutError):
-        agent.run(State("Task"))
+        agent.run(State(messages=[Message.user("Task")]))
     assert recorder.names("on_tool_start") == ["boom"]
     assert recorder.names("on_tool_end") == ["boom"]
 
@@ -311,7 +306,7 @@ def test_interrupted_calls_get_matching_on_tool_end():
         reporter=recorder,
     )
     with pytest.raises(KeyboardInterrupt):
-        agent.run(State("Task"))
+        agent.run(State(messages=[Message.user("Task")]))
 
     assert sorted(recorder.names("on_tool_start")) == ["slow_async", "slow_sync"]
     assert sorted(recorder.names("on_tool_end")) == ["slow_async", "slow_sync"]
@@ -354,7 +349,7 @@ def test_late_result_after_submit_interrupt_is_not_lost(monkeypatch):
         return "exit 0"
 
     agent = Agent(model=FakeModel([tool_call("slow_tool"), "Got it"]), tools=[slow_tool], reporter=None)
-    state = State("run the slow tool")
+    state = State(messages=[Message.user("run the slow tool")])
     agent.think(state)
 
     _interrupt_right_after_submit(monkeypatch, started)
@@ -372,7 +367,7 @@ def test_late_result_after_submit_interrupt_is_not_lost(monkeypatch):
     assert [h.content for h in late] == ["exit 0"]
 
     agent.think(state)
-    assert any("finished later" in m.text and "exit 0" in m.text for m in state.context if m.role == "user")
+    assert any("finished later" in m.text and "exit 0" in m.text for m in state.messages if m.role == "user")
 
 
 def test_async_tool_is_cancelled_after_submit_interrupt(monkeypatch):
@@ -392,7 +387,7 @@ def test_async_tool_is_cancelled_after_submit_interrupt(monkeypatch):
         return "never"
 
     agent = Agent(model=FakeModel([tool_call("slow_async")]), tools=[slow_async], reporter=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
 
     _interrupt_right_after_submit(monkeypatch, started)

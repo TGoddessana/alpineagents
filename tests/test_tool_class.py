@@ -10,6 +10,7 @@ from alpineagents import (
     Agent,
     FunctionTool,
     MCPTool,
+    Message,
     Reporter,
     State,
     StoppedByUntil,
@@ -58,13 +59,13 @@ def make_agent(replies, tools, **settings):
 
 
 def run_once(t, **args):
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call(t.name, **args), "done"], [t]).run(state)
     return state
 
 
 def block(state) -> ToolResultBlock:
-    return next(b for m in state.context for b in m.content if isinstance(b, ToolResultBlock))
+    return next(b for m in state.messages for b in m.content if isinstance(b, ToolResultBlock))
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,27 @@ def test_every_tool_is_a_tool():
     assert repr(f) == "FunctionTool('f')"
 
 
+def test_is_async_is_a_read_only_property_on_every_tool():
+    # It was a method in 0.4: ``tool.is_async()`` became ``tool.is_async``.
+    @tool
+    def sync_fn(x: str) -> str:
+        """Sync"""
+        return x
+
+    @tool
+    async def async_fn(x: str) -> str:
+        """Async"""
+        return x
+
+    for cls in (Tool, FunctionTool, MCPTool):
+        assert isinstance(cls.is_async, property)
+        assert cls.is_async.fset is None
+    assert sync_fn.is_async is False and async_fn.is_async is True
+    assert Ticket().is_async is False and AsyncTicket().is_async is True
+    with pytest.raises(AttributeError):
+        sync_fn.is_async = True  # type: ignore[misc]
+
+
 # ---------------------------------------------------------------------------
 # Running one
 # ---------------------------------------------------------------------------
@@ -130,7 +152,7 @@ def test_run_gets_a_copy_of_the_arguments():
             return "ok"
 
     state = run_once(Mutating(), title="hello")
-    assert state.context[1].tool_calls[0].args == {"title": "hello"}
+    assert state.messages[1].tool_calls[0].args == {"title": "hello"}
 
 
 @pytest.mark.parametrize(
@@ -147,14 +169,14 @@ def test_tool_input_error_and_tool_error(args, content, kind):
         def on_tool_end(self, state, call, result, outcome):
             kinds.append(outcome.kind)
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("create_ticket", **args), "done"], [Ticket()], reporter=Outcomes()).run(state)
     assert (block(state).content, block(state).is_error) == (content, True)
     assert kinds == [kind] and state.stopped == StoppedByUntil("is_answered")
 
 
 def test_other_exceptions_stop_the_run():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(KeyError):
         make_agent([tool_call("create_ticket", title="bug"), "done"], [Ticket()]).run(state)
     assert block(state).content == "(aborted: KeyError)"
@@ -163,7 +185,7 @@ def test_other_exceptions_stop_the_run():
 def test_arguments_that_are_not_json_never_reach_run():
     ticket = Ticket()
     broken = ToolCall(name="create_ticket", args={INVALID_ARGS_KEY: '{"title": '}, id="c1")
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([broken, "done"], [ticket]).run(state)
     assert block(state).content == '(input error: arguments are not valid JSON: {"title": )'
     assert ticket.calls == []
@@ -174,13 +196,13 @@ def test_async_run_in_a_sync_run():
 
 
 async def test_async_run_in_arun():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     await make_agent([tool_call("create_ticket", title="x"), "done"], [AsyncTicket()]).arun(state)
     assert block(state).content == "async x"
 
 
 async def test_sync_run_in_arun():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     await make_agent([tool_call("create_ticket", title="x"), "done"], [Ticket()]).arun(state)
     assert block(state).content == '{"id": 7, "title": "x"}'
 
@@ -198,7 +220,7 @@ def test_tool_map_think_and_hints_work_the_same():
 
     seen = []
     agent = make_agent([lambda request: seen.append([s.name for s in request.tools]) or "done"], [search, ticket])
-    agent.think(State("Task"), tools=[ticket])
+    agent.think(State(messages=[Message.user("Task")]), tools=[ticket])
     assert seen == [["create_ticket"]]
 
 

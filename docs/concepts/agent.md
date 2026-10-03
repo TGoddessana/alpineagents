@@ -41,21 +41,23 @@ quiet = agent.copy(reporter=None)
 
 Every action except `run` takes the State it works on.
 
-| Action | What it does | Changes the context |
+| Action | What it does | Changes `state.messages` |
 | --- | --- | --- |
-| `run(task)` | Runs the loop on a task string or a State, and returns the answer | Yes |
-| `think(state)` | Sends the context to the model once, and records the reply | Yes |
+| `run(prompt_or_state)` | Runs the loop on a prompt string or a State, and returns the answer | Yes |
+| `think(state)` | Sends the messages to the model once, and records the request and the reply | Yes |
 | `use_tools(state)` | Runs the pending calls, and records the results | Yes |
-| `compact(state)` | Replaces the context with the task and a summary written by the model | Yes |
+| `compact(state)` | Replaces the messages with the first message and a summary written by the model | Yes |
 | `ask(state, prompt, returns=...)` | Asks the model a side question, and returns the answer | No |
 | `ask_human(state, prompt, returns=...)` | Asks the person, and returns the answer | No |
-| `save(state)` | Saves what the store does not have yet. The other actions save by themselves | No |
+| `context_tokens(state)` | Estimates the size of what the model would receive next, in tokens | No |
+| `context_used(state)` | The fraction of the model's context window that fills | No |
 
 You call `run`. The loop body calls `think`, `use_tools` and `compact`. `ask` and `ask_human` work in the loop body
-and after a run.
+and after a run. Every action records what it did in the State's history, and with a store, saves by itself. To save
+at a time you choose, use the store: `store.save(state)`.
 
 Each action has an async version with an `a` prefix: `arun`, `athink`, `ause_tools`, `acompact`, `aask`,
-`aask_human`, `asave`. See [Async](../guides/async.md).
+`aask_human`. See [Async](../guides/async.md).
 
 ## think and use_tools
 
@@ -63,31 +65,33 @@ A turn usually looks like this:
 
 ```python
 agent.think(state)
-if state.wants_tools():
+if state.pending_calls:
     agent.use_tools(state)
 ```
 
-1. `think` sends one request to the model. The reply is either an answer, or a request to call tools.
-2. Requested tool calls become pending calls in `state.pending_calls`. `state.wants_tools()` is true while any are
-   pending.
-3. `use_tools` runs every pending call. The results go into the context, so the model sees them at the next `think`.
+1. `think` records a `ModelRequestEntry`, sends one request to the model, and records the `ModelReplyEntry`. The reply
+   is either an answer, or a request to call tools.
+2. Requested tool calls become pending calls in `state.pending_calls`.
+3. `use_tools` runs every pending call and records a `ToolResultEntry` for each. The results go into
+   `state.messages`, so the model sees them at the next `think`.
 
 Rules:
 
-- `think` raises `ValueError` while calls are pending. Run them with `use_tools`. With `Agent(permissions=[...])`,
+- `think` raises `ValueError` while calls are pending, and on a State with no messages. Run them with `use_tools`. With `Agent(permissions=[...])`,
   `use_tools` first asks the permissions, and a call they refuse does not run. See
   [Ask before a tool runs](../guides/approval.md).
 - `think(state, tools=[...])` limits the tools the model sees in this request. `tools=[]` shows none.
 - `agent.tool_map` has every tool the model can call, by name. Use it to find the tool of a pending call, for example
   to read its hints. See
   [Tools: describe what a tool does](tools.md#describe-what-a-tool-does).
-- If `think` fails, the context goes back to how it was before the call, and the turn does not count.
+- If `think` fails, the request is taken back: `state.messages` is as it was before the call, and the turn does not count.
+  History keeps the request and an `ErrorEntry`.
 
 ## ask compared with think
 
 |  | `think` | `ask` |
 | --- | --- | --- |
-| Adds the reply to the context | Yes | No |
+| Adds the reply to `state.messages` | Yes | No |
 | The model can call tools | Yes | No |
 | Returns | Nothing. The reply is recorded in the State | The answer as `str`, a dataclass or a Pydantic model |
 | Adds to `state.turn` | Yes | No |
@@ -95,15 +99,22 @@ Rules:
 Use `ask` to get a decision or a typed result from the run so far without changing the run. See
 [Structured output](../guides/structured-output.md).
 
-## One State belongs to one Agent
+## Any Agent can continue a State
 
-The first Agent that calls `think`, `use_tools` or `compact` on a State owns it. The same calls from another Agent
-raise `ValueError`. `ask` works from any Agent.
+A State does not belong to an Agent. Any Agent can run, think, use tools and compact on any State, so
+`agent.copy(model=...)` continues a conversation with another model:
 
-`agent.copy(...)` returns another Agent. It cannot continue a State that the original Agent already ran.
+```python
+agent.run(state)
+cheaper = agent.copy(model="claude-haiku-4-5")
+cheaper.run(state)
+```
 
-A State loaded with `store.load(id)` has no owner yet, so the Agent in your code can continue it. See
-[Save and resume](../guides/resume.md).
+The State records which Agent started each run (`RunStartEntry`, with an `AgentInfo`), and which model every request
+went to (`ModelRequestEntry`). One run at a time: a State that another `run` is running raises `ValueError`.
+
+A State loaded with `store.load(id)` warns with `ResumeWarning` the first time an Agent that differs from its last
+one runs it. See [State](state.md#a-state-saved-by-another-agent) and [Save and resume](../guides/resume.md).
 
 ## After finish
 

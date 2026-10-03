@@ -24,11 +24,18 @@ def write_file(path: str, content: str) -> None:
     Path(path).write_text(content)
 
 
-@loop(until=State.is_answered, limit=30)
+def waiting_for_user(state: State) -> bool:
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
+
+
+@loop(until=waiting_for_user, limit=30)
 def coding(agent: Agent, state: State):
     compact_if_full(agent, state)
     agent.think(state)
-    if state.wants_tools():
+    if state.pending_calls:
         agent.use_tools(state)
 
 

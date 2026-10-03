@@ -12,15 +12,15 @@ class AskWithAlways(DecidePermission):
         self.human = human
 
     def check(self, state, call, tool):
-        always = state.root.data.setdefault("always", [])
-        if call.name in always:
+        if call.name in state.root.extra_data.get("always", []):
             return Allowed()
         choices = Literal["yes", "no", "always"]
         answer = self.human.ask(state, f"Run {format_call(call)}?", choices)
         if answer == "no":
             return Denied("The user declined this call. Wait for their next message.", stop=True)
         if answer == "always":
-            always.append(call.name)
+            with state.root.edit_extra_data() as data:
+                data.setdefault("always", []).append(call.name)
         return Allowed()
 
 

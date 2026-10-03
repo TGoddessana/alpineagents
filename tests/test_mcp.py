@@ -17,7 +17,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent
 
-from alpineagents import MCP, Agent, Image, MCPConnectionError, Reporter, State, tool
+from alpineagents import MCP, Agent, Image, MCPConnectionError, Message, Reporter, State, tool
 from alpineagents.testing import FakeModel, tool_call
 from alpineagents.types import TextBlock, ToolResultBlock
 
@@ -118,26 +118,30 @@ def test_run_calls_prefixed_tools_and_closes_the_connection(demo):
         [demo],
         reporter=outcomes,
     )
-    state = State("1 + 2?")
+    state = State(messages=[Message.user("1 + 2?")])
     assert agent.run(state) == "It is 3"
     assert sorted(results(state)) == [("demo__add", "3"), ("demo__fail", "Error executing tool fail: nope")]
-    blocks = {b.name: b for m in state.context for b in m.content if isinstance(b, ToolResultBlock)}
+    blocks = {b.name: b for m in state.messages for b in m.content if isinstance(b, ToolResultBlock)}
     assert blocks["demo__fail"].is_error and not blocks["demo__add"].is_error
     assert sorted(outcomes.ends) == [("demo__add", "done"), ("demo__fail", "error")]
+    # the same outcomes are on the history entries: an MCP isError result is outcome error, and is_error follows it
+    entries = {e.call.name: e for e in state.history if e.kind == "tool_result"}
+    assert (entries["demo__add"].outcome, entries["demo__add"].is_error) == ("done", False)
+    assert (entries["demo__fail"].outcome, entries["demo__fail"].is_error) == ("error", True)
     assert [s.name for s in agent.model.requests[0].tools] == ["demo__add", "demo__fail", "demo__search-code"]
     assert demo._conn is None
 
 
 def test_pick_tools_with_attribute_and_item(demo):
     agent = make_agent([tool_call("demo__search-code", query="x"), "done"], [demo.add, demo["search-code"]])
-    state = State("Find x")
+    state = State(messages=[Message.user("Find x")])
     agent.run(state)
     assert [s.name for s in agent.model.requests[0].tools] == ["demo__add", "demo__search-code"]
     assert results(state) == [("demo__search-code", "found x")]
 
 
 def test_a_picked_tool_that_does_not_exist_is_an_error_on_connect(demo):
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(ValueError, match="has no tool 'serch'"):
         make_agent(["x"], [demo.serch]).run(state)
     assert state.history[-1].kind == "error"
@@ -156,7 +160,7 @@ def test_a_name_collision_with_another_tool_is_an_error_on_connect(demo):
 
 
 def test_missing_required_argument_is_an_input_error(demo):
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("demo__add", a=1), "done"], [demo]).run(state)
     assert results(state) == [("demo__add", "(input error: missing required arguments: b)")]
 
@@ -197,14 +201,14 @@ def image_server() -> MCP:
 
 
 def test_image_content_reaches_the_model_as_an_image():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("shots__shot"), "done"], [image_server()]).run(state)
     ((_, content),) = results(state)
     assert content == (TextBlock("Loaded\nin 1.2s"), Image(PNG))
 
 
 def test_an_image_type_providers_do_not_take_becomes_a_placeholder():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("shots__vector"), "done"], [image_server()]).run(state)
     assert results(state) == [
         ("shots__vector", "Logo\n(image image/svg+xml not shown: this image type is not supported)")
@@ -212,7 +216,7 @@ def test_an_image_type_providers_do_not_take_becomes_a_placeholder():
 
 
 def test_an_error_result_with_an_image_is_text():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("shots__broken"), "done"], [image_server()]).run(state)
     assert results(state) == [("shots__broken", "render failed\n(image/png image)")]
 
@@ -223,14 +227,14 @@ def test_mixed_with_regular_tools(demo):
         """Double a number"""
         return n * 2
 
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([[tool_call("double", n=2), tool_call("demo__add", a=2, b=2)], "4"], [double, demo]).run(state)
     assert sorted(results(state)) == [("demo__add", "4"), ("double", "4")]
 
 
 def test_think_can_show_only_some_mcp_tools(demo):
     agent = make_agent(["ok"], [demo])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with agent:
         agent.think(state, tools=[demo.add])
     assert [s.name for s in agent.model.requests[0].tools] == ["demo__add"]
@@ -256,7 +260,7 @@ def test_with_agent_keeps_one_connection_across_runs(demo):
 
 def test_think_outside_run_connects_on_first_use(demo):
     agent = make_agent([tool_call("demo__add", a=1, b=1)], [demo])
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
     assert results(state) == [("demo__add", "2")]
@@ -279,7 +283,7 @@ def test_two_agents_share_one_connection(demo):
 async def test_arun_and_async_with(demo):
     agent = make_agent([tool_call("demo__add", a=3, b=4), "7"], [demo])
     async with agent:
-        state = State("3 + 4?")
+        state = State(messages=[Message.user("3 + 4?")])
         assert await agent.arun(state) == "7"
         assert demo._conn is not None
     assert results(state) == [("demo__add", "7")]
@@ -293,7 +297,7 @@ async def test_concurrent_aruns_share_the_connection(demo):
         reporter=None,
         human=None,
     )
-    states = [State("A"), State("B")]
+    states = [State(messages=[Message.user("A")]), State(messages=[Message.user("B")])]
     await asyncio.gather(*(agent.arun(s) for s in states))
     assert [results(s) for s in states] == [[("demo__add", "2")], [("demo__add", "2")]]
     assert demo._conn is None
@@ -351,7 +355,7 @@ def test_a_result_the_sdk_rejects_goes_to_the_model_and_keeps_the_connection():
     # The server stops checking its own output (the schema is still advertised), so the client SDK rejects it.
     server._tool_manager._tools["count"].fn_metadata.output_model = None
     strict = MCP(server=server, name="strict")
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("strict__count"), tool_call("strict__one"), "done"], [strict]).run(state)
     (first, second) = results(state)
     assert first[1].startswith("(error from MCP server 'strict'")
@@ -363,14 +367,14 @@ def test_a_result_the_sdk_rejects_goes_to_the_model_and_keeps_the_connection():
 
 def test_stdio_server_with_env():
     local = MCP(f"{sys.executable} {DEMO_SERVER}", name="local", env={"GREETING": "hi"})
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     make_agent([tool_call("local__greeting"), "done"], [local]).run(state)
     assert results(state) == [("local__greeting", "hi")]
 
 
 def test_lost_connection_raises():
     local = MCP(f"{sys.executable} {DEMO_SERVER}", name="local")
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(MCPConnectionError, match="Lost the connection"):
         make_agent([tool_call("local__crash"), "never"], [local]).run(state)
     assert not state.pending_calls
@@ -378,7 +382,7 @@ def test_lost_connection_raises():
 
 
 def test_a_server_that_cannot_start_raises_on_run():
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     with pytest.raises(MCPConnectionError, match="Could not connect to MCP server 'bad'"):
         make_agent(["x"], [MCP("definitely-not-a-command-alpineagents", name="bad")]).run(state)
     assert state.history[-1].kind == "error"
@@ -402,7 +406,7 @@ def test_streamable_http_server_with_headers():
                     raise
                 time.sleep(0.05)
         remote = MCP(url=f"http://127.0.0.1:{port}/mcp", name="remote", headers={"X-Test": "1"})
-        state = State("Task")
+        state = State(messages=[Message.user("Task")])
         make_agent([tool_call("remote__add", a=4, b=5), "9"], [remote]).run(state)
         assert results(state) == [("remote__add", "9")]
     finally:

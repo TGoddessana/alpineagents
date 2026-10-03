@@ -7,12 +7,13 @@ A long run fills the model's context window. When a request is larger than the w
 
 | Method | Makes a model request | The context afterwards |
 | --- | --- | --- |
-| `compact_if_full(agent, state)` | Only when the context is more than 60% full | The task and a summary |
-| `agent.compact(state)` | Yes | The task and a summary |
+| `compact_if_full(agent, state)` | Only when the context is more than 60% full | The first user message and a summary |
+| `agent.compact(state)` | Yes | The first user message and a summary |
 | `state.clear_tool_results(keep_last=5)` | No | Every message, with old tool results (images included) replaced by `(cleared: kept in history)` |
-| `state.start_from(summary)` | No | The task and your summary |
+| `state.compact(summary)` | No | The first user message and your summary |
 
-All four change only the context. `state.history` keeps everything.
+All four change only `state.messages`, what the model sees next. `state.history` keeps everything, including a
+`context_change` entry that says what was shrunk.
 
 ## Example
 
@@ -24,15 +25,17 @@ All four change only the context. `state.history` keeps everything.
 2. `instructions` tells the model what the summary must keep.
 3. After the tools run, `clear_tool_results(keep_last=10)` blanks every tool result except the latest ten.
 
-`clear_tool_results` raises `ValueError` while calls are pending, so call it after `use_tools`.
+`clear_tool_results` and `compact` raise `ValueError` while calls are pending, so call them after `use_tools`.
 
 ## Watch the size
 
-| Property | Value |
+| Call | Value |
 | --- | --- |
-| `state.context_tokens` | Estimated size of the context, in tokens. Each image in a tool result counts as 1,600 |
-| `state.context_used` | `context_tokens` divided by the model's context window |
+| `agent.context_tokens(state)` | Estimated size of the context, in tokens, with the Agent's system prompt and tools. Each image counts as 1,600 |
+| `agent.context_used(state)` | `context_tokens` divided by the context window of the Agent's model |
 
+They are on the Agent, not the State, because the size depends on the model that will read the context. The same
+State is a different fraction of a small window and a large one.
 The terminal shows each compaction under the next turn header:
 
 ```text

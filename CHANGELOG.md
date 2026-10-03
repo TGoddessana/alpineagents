@@ -4,6 +4,222 @@ All notable changes to alpineagents are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/)
 (while the version is 0.x, a minor release may change the API).
 
+## [Unreleased]
+
+This release rebuilds the State on its history, and it is a breaking one: nothing removed keeps an alias. Read
+**Breaking changes** and the migration table first. The short version: a State is made with
+`State(messages=[Message.user("...")])`, changed only through its methods, and read through properties that are all
+computed from `state.history`.
+
+### Breaking changes
+
+- **The State constructor takes keywords only.** `State("text")` is a `TypeError` that shows the new form:
+
+  ```python
+  # before
+  state = State("Fix calc.py", id="bug-1")
+
+  # now
+  state = State(messages=[Message.user("Fix calc.py")], id="bug-1", extra_data={"repo": "api"})
+  ```
+
+  `messages=` takes `Message` objects (a `str` is a `TypeError`), `extra_data=` takes JSON values, and `history=`
+  takes entries to rebuild a State from. `history=` cannot be combined with `messages=` or `extra_data=`. A State may
+  start empty; `agent.think` on a State with no messages raises `ValueError`. `agent.run("text")` still works.
+  `state.task` is removed: read the first message from `state.messages`, or `StateInfo.first_message` in a listing.
+
+- **`state.data` is `state.extra_data`, and it is read-only.** Change it with `edit_extra_data()`, which records
+  the change in the history:
+
+  ```python
+  # before
+  with state.lock:
+      state.data["calls"] = state.data.get("calls", 0) + 1
+
+  # now
+  with state.edit_extra_data() as data:
+      data["calls"] = data.get("calls", 0) + 1
+  ```
+
+  `state.extra_data["x"] = 1` raises `TypeError` that points to `edit_extra_data()`. The block holds a lock of its
+  own, so two threads' edits take turns and no update is lost. `state.lock` is removed: no State method needs you
+  to hold a lock.
+
+- **Renamed or replaced State members**, with no aliases (see the table below): `state.context` is
+  `state.messages`; `add_user_message(text)` and `add_notice(text)` are `add_message(Message.user(text))` and
+  `add_message(Message.notice(text))`; `start_from(summary)` is `compact(summary)`; `wants_tools()` is
+  `state.pending_calls`; `is_finished()` is `state.finished`; `State.is_answered` is a function you write;
+  `state.context_tokens` and `state.context_used` are now `agent.context_tokens(state)` and
+  `agent.context_used(state)`, because they need the Agent's model and tools.
+
+- **`State.is_answered` is gone.** An `until` function is now always one you write, or the default loop's. The
+  default loops stop on a private function that is still named `is_answered`, so `StoppedByUntil("is_answered")` and
+  `stopped by is_answered` are unchanged:
+
+  ```python
+  # before
+  @loop(until=State.is_answered, limit=30)
+
+  # now
+  def waiting_for_user(state: State) -> bool:
+      if state.pending_calls or not state.messages:
+          return False
+      last = state.messages[-1]
+      return last.role == "assistant" and not last.tool_calls
+
+  @loop(until=waiting_for_user, limit=30)
+  ```
+
+- **`agent.save(state)` and `agent.asave(state)` are `store.save(state)` and `await store.asave(state)`.** The
+  Agent still saves at the same points when it has `store=`.
+
+- **The owner rule is gone.** A State no longer belongs to the first Agent that thought on it: any Agent can run,
+  think, use tools on and compact any State, so `agent.copy(model=...)` can carry on a State another model started.
+  The `ValueError` for "a different Agent" is removed. What remains is one run at a time: a State that another
+  `run` or `arun` is running right now raises `ValueError` (use `state.fork()` to run a copy).
+
+- **History entries were renamed and merged.** There are 11 classes now, all frozen:
+
+  | 0.4 | 0.5 |
+  | --- | --- |
+  | `ReplyEntry`, kind `"reply"` | `ModelReplyEntry`, kind `"model_reply"` |
+  | `NotRunEntry`, kinds `"denied"` and `"cancelled"` | `ToolResultEntry`, kind `"tool_result"`, with `outcome` `DENIED` or `CANCELLED` |
+  | `ToolResultEntry(is_error=...)` | `ToolResultEntry(outcome=...)`. `is_error` is a read-only property: `outcome != DONE` |
+  | `ContextChange` kinds `"start_from"` and `"rollback"` | `"compact"` (a `compact` call, or the model's), and no entry: a failed `think` is taken back by an `ErrorEntry` |
+
+  Code that checks `entry.kind in ("tool_result", "denied", "cancelled")` checks `entry.kind == "tool_result"` and
+  reads `entry.outcome`. `ToolResultEntry.outcome` is a required keyword, and `StoppedByFinish` has a new field
+  `answer`.
+
+- **`SavedState` is `StateInfo`**, what `store.list()` returns. It has `first_message` where `SavedState` had `task`,
+  and `created_at` and `updated_at` can be `None` for a State saved with no history. Implementers of a Store build
+  one with `StateInfo.from_info(state_id, info)`, which replaces `SavedState.from_snapshot`.
+
+- **Stores save in format version 4, and 0.5 cannot load what 0.4 saved.** `store.load` raises `ValueError` ("saved
+  by an older alpineagents (format 3, 0.4.x); 0.5 cannot load it"), and there is no converter. A State saved by a
+  newer version is refused the same way. `FileStore` keeps `log.jsonl` and replaces `snapshot.json` with
+  `info.json`; `store.list()` skips the folders of 0.4 States. Finish or export what you need with 0.4 first.
+
+- **`Store.write` takes `info`, not a snapshot.** A Store you wrote changes `write(state_id, entries, snapshot, *,
+  create=False)` to `write(state_id, entries, info, *, create=False)`, and `Record(entries, snapshot)` to
+  `Record(entries, info)`. `info` is a small JSON dict with the fields of `StateInfo` and `"v": 4`, to be stored as
+  is and given back in `Record.info`. It has no messages and no history. `load` no longer builds a State from a
+  snapshot and the entries after it: it replays all the entries (see Changed).
+
+- **`state.extra_data`, `ToolCall.args`, `RawBlock.data`, `ModelEvent.data`, `Exchange.answer` and
+  the `finish` answer are read-only** (`FrozenDict` and `FrozenList`, subclasses of `dict` and `list`). Reading,
+  `json.dumps`, `**args` and `==` with plain values work as before; assigning or calling `append`, `pop`, `update`
+  and the like raises `TypeError`. A tool still gets its own plain, editable copy of its arguments. Code that edits
+  `call.args` (in a permission or a Reporter) copies first: `dict(call.args)`.
+
+- **`ResumeWarning` fires only on the first run after `store.load`**, and compares with the last `RunStartEntry`.
+  Switching the model of a State in memory never warns. The values in `ResumeWarning.changes` are tuples.
+
+- **`state.created_at` and `state.updated_at` can be `None`**, for a State with no history.
+
+### Added
+
+- **`StateSnapshot`**, the frozen value of a State. `state.snapshot()` returns it, and every property of the State
+  (`messages`, `history`, `pending_calls`, `turn`, `usage`, `extra_data`, `finished`, `answer`, `stopped`,
+  `created_at`, `updated_at`) reads the current one. Take a snapshot when several values must belong together. See
+  the [State](https://tgoddessana.github.io/alpineagents/concepts/state/) concept page.
+  - Every value of a snapshot is computed from its `history`, so `State(history=state.history).snapshot() ==
+    state.snapshot()` holds at any moment, also in the middle of a turn.
+  - `state.fork()` makes a State with the same history, a new id, and no store or running Agent.
+    `state.restore(snapshot)` goes back to a snapshot of the same State: `messages`, `turn`, `extra_data`, `finished`,
+    `answer` and `stopped` go back, `usage` stays (the tokens were spent), and `history` keeps everything and gains
+    a `context_change` entry of kind `"restore"`.
+- **`state.edit_extra_data()`**, described above. A block that changes nothing records nothing; one that raises
+  changes nothing. A value that is not JSON raises `TypeError` naming the key.
+- **`Message.notice(text)` and `Message.assistant(text)`**, next to `Message.user(text)`. `Message.notice` adds the
+  `"[notice] "` prefix if it is missing, and `message.is_notice` tells whether a message is one. `add_message`
+  takes user messages and notices; to import a conversation that has assistant messages, use `State(messages=[...])`.
+- **Images in the user's messages.** `Message.user("What is wrong in this screenshot?", Image.from_path("shot.png"))`.
+  `Anthropic` sends them as image blocks and `OpenAICompatible` as `image_url` parts with a data URL, and the stores
+  save them. They count 1,600 tokens each in `agent.context_tokens(state)`.
+- **Model switching.** Any Agent continues any State: `agent.copy(model="gpt-...").run(state)`. Each request records
+  `ModelRequestEntry` with the model it was sent to, so the history shows which model answered which turn.
+- **`store.save(state)` and `await store.asave(state)`**, to save right away what the Agent's save points would save
+  later, such as the person's next message in a chat loop. See the
+  [Save and resume](https://tgoddessana.github.io/alpineagents/guides/resume/) guide.
+- **`StateInfo`** (what `store.list()` returns) and **`AgentInfo`** (name, model as `provider/name`, system prompt
+  hash, tool names, MCP server names), exported from `alpineagents`.
+- **New history entry kinds**, all exported: `ModelRequestEntry` (`"model_request"`, recorded when `think` sends a
+  request), `RunStartEntry` (`"run_start"`, holds the `AgentInfo` of the Agent that started the run),
+  `StopEntry` (`"stop"`, holds why the run is set to stop: `finish`, a permission, `until` or `limit`) and
+  `ExtraDataEntry` (`"extra_data"`, the changed keys and the removed ones). `ModelReplyEntry` replaces `ReplyEntry`.
+  Every public value of a State is a fold of these entries.
+- **`ToolResultEntry.outcome`**, a `ToolOutcomeKind`, on every tool result: `DONE`, `ERROR`, `INPUT_ERROR`,
+  `ABORTED`, `INTERRUPTED`, `DENIED` or `CANCELLED`. A denied or cancelled call is a `tool_result` entry now.
+- `ExchangeEntry.usage`, the tokens an `ask` used (`None` for a question to a human), and `ContextChange.usage`, the
+  tokens of a compaction the model wrote. `state.usage` is the sum of replies, asks and compactions, and a loaded
+  State has the same total as the State that was saved. `ContextChange` also has `kept`, `cleared`, `messages` and
+  `restored_to` for the kinds above.
+- **`agent.context_tokens(state)` and `agent.context_used(state)`**: the estimate of what the next request holds,
+  and the fraction of the model's context window it fills, with this Agent's system prompt and tool definitions.
+  `compact_if_full` uses them.
+
+### Changed
+
+- **History is the only source of truth.** A State holds one frozen `StateSnapshot`, and every change builds one
+  history entry and folds it into a new snapshot. There is no second path for "recording" and for "replaying": a
+  State rebuilt from its history (`State(history=...)`, `store.load`, `state.fork()`) equals the one that made it.
+  `state.history` is a tuple that only grows.
+- **`store.load` replays every saved entry** through the same fold, instead of starting from a snapshot and
+  replaying the entries after it. A State that was saved in the middle of a turn is closed with entries that get
+  saved with the next save: a request that was waiting on the model gets an `ErrorEntry` ("process stopped while
+  waiting for the model", which takes the request back), and each tool call without a saved result gets a
+  `ToolResultEntry` with outcome `ABORTED` saying it may or may not have run. The tool is not run again. The
+  `UNSAVED_STEPS` notice and the case "a tail that cannot be replayed" no longer exist.
+- **A failed `think` is taken back by its `ErrorEntry`.** The request is on record (`ModelRequestEntry`), and an error
+  before the reply returns `messages` and `turn` to what they were. An exception after the reply was recorded, such
+  as one raised by `Reporter.on_think_end`, no longer undoes the reply. The `"rollback"` context change and its
+  Reporter notification are gone.
+- **`run` records `RunStartEntry` at its start**, which clears `state.stopped`. A loop's `until` or `limit` stop and
+  `finish()` are `StopEntry` entries. `finish()` called twice: the last answer given wins, and `finish()` with no
+  answer keeps an earlier one.
+- **Values in history are frozen**, so an entry never changes after it is recorded: `entry.content` of a
+  tool call's arguments, an `ask` answer, a `finish` answer, and `extra_data` values.
+- The Anthropic and OpenAI adapters send plain copies of `ToolCall.args` and `RawBlock.data` to their SDKs.
+- Context changes reach the Reporter for `compact`, `clear_tool_results` and `restore` (not for the import of
+  `State(messages=...)`), on the Reporter of the Agent that last ran or thought on the State. The Terminal prints
+  `context restored` for a restore.
+- `Message.user("", image)` holds the image only: an empty text block is not sent.
+
+### Fixed
+
+- `FileStore` no longer writes a duplicate entry when two `FileStore` objects for the same folder save the same
+  State.
+
+### Migrating from 0.4
+
+| 0.4 | 0.5 |
+| --- | --- |
+| `State("task", id="x")` | `State(messages=[Message.user("task")], id="x")` |
+| `state.task` | the first message in `state.messages`, or `StateInfo.first_message` |
+| `state.context` | `state.messages` |
+| `state.data["k"] = v` | `with state.edit_extra_data() as data: data["k"] = v` |
+| `state.data` | `state.extra_data` |
+| `with state.lock: ...` | `state.edit_extra_data()` (atomic), or `state.snapshot()` for a consistent read |
+| `state.add_user_message(text)` | `state.add_message(Message.user(text))` |
+| `state.add_notice(text)` | `state.add_message(Message.notice(text))` |
+| `state.start_from(summary)` | `state.compact(summary)` |
+| `state.wants_tools()` | `state.pending_calls` (a tuple: truthy when there are calls) |
+| `state.is_finished()` | `state.finished` |
+| `@loop(until=State.is_answered, ...)` | `@loop(until=waiting_for_user, ...)` with your own function |
+| `state.context_tokens`, `state.context_used` | `agent.context_tokens(state)`, `agent.context_used(state)` |
+| `agent.save(state)`, `agent.asave(state)` | `store.save(state)`, `await store.asave(state)` |
+| `SavedState`, `SavedState.task` | `StateInfo`, `StateInfo.first_message` |
+| `SavedState.from_snapshot(...)` | `StateInfo.from_info(state_id, info)` |
+| `Store.write(id, entries, snapshot)`, `Record(entries, snapshot)` | `Store.write(id, entries, info)`, `Record(entries, info)` |
+| `ReplyEntry`, `entry.kind == "reply"` | `ModelReplyEntry`, `entry.kind == "model_reply"` |
+| `NotRunEntry`, kinds `"denied"`, `"cancelled"` | `ToolResultEntry` with `outcome` `DENIED`, `CANCELLED` |
+| `entry.is_error` on a tool result | unchanged to read; it is `entry.outcome != ToolOutcomeKind.DONE` |
+| `ContextChange` kind `"start_from"` | `"compact"` |
+| `ContextChange` kind `"rollback"` | none: a failed `think` records an `ErrorEntry` |
+| a second Agent thinking on a State raised `ValueError` | allowed: `agent.copy(model=...).run(state)` |
+| States saved by 0.4 | not loadable by 0.5 (format 3, no converter) |
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

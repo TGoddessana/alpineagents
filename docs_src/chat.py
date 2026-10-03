@@ -1,8 +1,8 @@
-from alpineagents import Agent, State
+from alpineagents import Agent, Message, State
 
 agent = Agent(model="claude-sonnet-5", system="You are a helpful assistant.")
 
-state = State(input("> "))
+state = State(messages=[Message.user(input("> "))])
 while True:
     print(agent.run(state))
-    state.add_user_message(input("> "))
+    state.add_message(Message.user(input("> ")))

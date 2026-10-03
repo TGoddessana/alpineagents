@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, StoppedByUntil, tool
+from alpineagents import Agent, Message, State, StoppedByUntil, tool
 from alpineagents.testing import FakeModel, tool_call
 
 
@@ -20,7 +20,7 @@ def test_reads_the_file_then_answers(tmp_path, monkeypatch):
         tool_call("read_file", path="main.py"),
         "Line 1 has a syntax error",
     ])
-    state = State("Find the bug in main.py")
+    state = State(messages=[Message.user("Find the bug in main.py")])
 
     agent.copy(model=fake, reporter=None).run(state)
 

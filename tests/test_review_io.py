@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from alpineagents import Agent, State, tool
+from alpineagents import Agent, Message, State, tool
 from alpineagents.terminal import Terminal
 from alpineagents.testing import FakeModel, tool_call
 
@@ -142,7 +142,7 @@ def test_compaction_line_appears_after_new_turn_header():
         """Echo tool for tests."""
         return _LONG_REPLY
 
-    # Turn 1: tool call (echo returns a large result, pushing context_used above 0.6)
+    # Turn 1: tool call (echo returns a large result, pushing agent.context_used(state) above 0.6)
     # Turn 2: the final answer, after compaction steps in
     # Sizes: the context after turn 1 (~267 tokens) must be above 0.6 * context_window, and the compaction request
     # (that context + COMPACT_PROMPT, ~83 tokens) must still fit in context_window.
@@ -153,7 +153,7 @@ def test_compaction_line_appears_after_new_turn_header():
     buf = io.StringIO()
     term = Terminal(output=buf, input=lambda p: "")
     agent = Agent(model=fake, tools=[echo], reporter=term, human=term)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
 
     answer = agent.run(state)
     # Confirms compaction really happened (otherwise "Here is the summary" would be the answer).
@@ -248,7 +248,7 @@ def test_tty_answer_does_not_leave_a_blank_line(monkeypatch):
 
 def test_empty_string_answer_is_asked_again():
     """An empty answer for ``returns=str`` is asked again, so a chat loop (``text = agent.ask_human(state, ">")``
-    then ``add_user_message(text)``) does not stop on a single Enter."""
+    then ``add_message(Message.user(text))``) does not stop on a single Enter."""
     answers = iter(["", "   ", "hello"])
     out = io.StringIO()
     terminal = Terminal(output=out, input=lambda prompt: next(answers))

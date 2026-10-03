@@ -10,7 +10,7 @@ continue it, for example after a crash or a deploy, or when a person comes back 
 1. `FileStore(".agent-runs")` keeps each State in a folder of its own under `.agent-runs/`.
 2. `Agent(store=store)` saves every State this Agent runs. Nothing else in the loop changes.
 3. `store.list()` returns the saved States, most recently updated first. `store.load(id)` rebuilds one.
-4. `agent.save(state)` saves the person's message right away, so it is not lost if the process stops before the
+4. `store.save(state)` saves the person's message right away, so it is not lost if the process stops before the
    next `run`.
 
 `python chat.py --resume` continues the last conversation where it stopped.
@@ -20,7 +20,7 @@ continue it, for example after a crash or a deploy, or when a person comes back 
 Each State has an `id`, random unless you give one. Give your own when you want to find the State again by name:
 
 ```python
-state = State("Review pull request 42", id="review-pr-42")
+state = State(id="review-pr-42", messages=[Message.user("Review pull request 42")])
 ```
 
 An id has letters, digits, `_` and `-`, at most 128 characters. It names one conversation. A new State with an id the
@@ -35,24 +35,27 @@ store already has is refused before the first model request (`ValueError`): cont
 | Before and after each `think` | Everything not saved yet |
 | After each tool result | The result, right away, so a long or expensive tool's result is kept even if the process stops while other tools of the same turn still run |
 | After `use_tools` and `compact` | Everything not saved yet |
-| `agent.save(state)` | Everything not saved yet. Use it for changes outside the Agent's steps |
+| `store.save(state)` | Everything not saved yet. Use it for changes outside the Agent's steps. `await store.asave(state)` in async code |
 
 A save writes only what the store does not have yet, and nothing when nothing changed.
 
 ## If the process stops
 
 Ctrl+C, an exception or `sys.exit` end the run the usual way: calls without a result are closed, and the State is
-saved. A process that is killed does not get that far. The loaded State then continues from the last steps that
-were saved:
+saved. A process that is killed does not get that far. History is the only thing a store keeps, and `store.load`
+replays all of it, so the loaded State is exactly what was saved. If it was saved in the middle of a turn, `load`
+closes that turn with entries of its own, and the next save writes them:
 
-- A tool call that was running when the process stopped gets this result:
+- A tool call that was running when the process stopped gets this result, with `outcome == "aborted"`:
   `(unknown: the run stopped before this result was saved, so the tool may or may not have run. Check whether it
   took effect before relying on it or running it again)`. The tool is not run again. The model decides, for
   example by checking whether the email was sent.
-- A model request that was running is dropped, as if `think` had failed. The next `run` asks again.
-- If a store failed halfway, the saved steps can end after a step that cannot be replayed, such as a compaction.
-  The State then continues from the last complete save with a notice that the steps after it are missing. The
-  notice names the tool calls that may or may not have run. `history` still has every saved entry.
+- A model request that was running gets an `error` entry, `(process stopped while waiting for the model)`, and is
+  taken back, as if `think` had failed. The next `run` asks again.
+- A saved message that was waiting for the reply or the results goes into the messages, in order.
+
+Nothing is lost: `state.history` has every entry that was saved, and a State loaded twice from the same save is the
+same State.
 
 ### Stop cleanly on SIGTERM
 
@@ -73,10 +76,11 @@ A store keeps JSON, so a loaded State differs from the one that was saved in a f
 
 | Value | After loading |
 | --- | --- |
-| `state.data` | Must hold only JSON values: dicts with string keys, lists, strings, numbers, booleans, `None`. Anything else raises `TypeError` when saving, before the next model request. Tuples come back as lists |
+| `state.extra_data` | Holds only JSON values: dicts with string keys, lists, strings, numbers, booleans, `None`. `edit_extra_data()` checks this when the block ends, so a set raises `TypeError` there and not at the save. Tuples become lists |
 | `finish(answer)` and `ask` answers | Pydantic models and dataclasses come back as dicts. Other values must be JSON values |
 | `error` of history entries | `None`. The entry's text still holds the exception type and message |
-| The Agent | Not saved. The Agent in your code runs the State, and the first `run` warns with `ResumeWarning` if it differs from the one that saved it. See [State](../concepts/state.md#a-state-saved-by-another-agent) |
+| Everything else | Equal: `store.load(id).snapshot() == state.snapshot()` after a save |
+| The Agent | Not saved. The Agent in your code runs the State, and the first `run` warns with `ResumeWarning` if it differs from the one that saved it. See [State](../concepts/state.md#a-state-saved-by-another-agent). Switching models in your own code never warns: see [Models](models.md#switch-models-in-one-conversation) |
 
 ## If saving fails
 
@@ -96,14 +100,43 @@ Nothing that failed to save is lost from the State: the next save writes it.
 - One process at a time runs a given State. Two processes running the same id at once are not supported.
 - `FileStore` files are readable only by their owner, because history holds tool results and messages.
 - Images in tool results are saved in the files as base64, so a run with many screenshots makes large files.
-- A State saved by a newer alpineagents may not load in an older one: `store.load` raises `ValueError` and says to
-  upgrade. States saved by older versions load.
+- Saved States have a format version. `store.load` raises `ValueError` for a State saved in another format: one saved
+  by alpineagents 0.4 (format 3) does not load in 0.5, and one saved by a newer alpineagents says to upgrade. There
+  is no converter, so finish or export 0.4 conversations before you upgrade.
+
+## Go back, or try something else
+
+`state.snapshot()` returns a `StateSnapshot`: the State's value at that moment, frozen, so it never changes. Take one
+before something you may want to undo, and `state.restore(snapshot)` goes back:
+
+```python
+--8<-- "docs_src/snapshot.py"
+```
+
+- `messages`, `turn`, `extra_data`, `finished`, `answer` and `stopped` go back to what they were. `usage` does not:
+  the tokens were spent. `history` does not shrink either: it keeps everything and gets one `context_change` entry
+  with `kind == "restore"`, so a store saves the going back like any other step.
+- `restore` takes a snapshot taken from the same State. It raises `ValueError` for another State's snapshot, while
+  tool calls are pending, and while the model is being waited on. Take snapshots between turns.
+- A snapshot lives in memory. To keep one, keep what a store keeps, its history:
+  `State(history=snapshot.history)` rebuilds the same value, in this process or another.
+
+`state.fork()` makes a new State with the same history and a new id, bound to no store and to no running Agent. Use it
+to try a different next step and keep the original:
+
+```python
+--8<-- "docs_src/fork.py"
+```
+
+- A fork is independent: running or changing it leaves `state` as it was.
+- With `Agent(store=...)`, the fork is saved under its own id the first time the Agent runs it.
+- `fork().snapshot() == state.snapshot()`: equal histories give equal snapshots.
 
 ## List and delete
 
 ```python
-for saved in store.list():
-    print(saved.id, saved.task, saved.updated_at, saved.stopped)
+for saved in store.list():  # a StateInfo for each
+    print(saved.id, saved.first_message, saved.updated_at, saved.stopped)
 
 store.delete("review-pr-42")
 ```
@@ -119,16 +152,19 @@ from alpineagents.store import Record
 
 
 class PostgresStore(Store):
-    async def awrite(self, state_id, entries, snapshot, *, create=False):
-        ...  # insert entries whose seq is new, then replace the snapshot, in one transaction
+    async def awrite(self, state_id, entries, info, *, create=False):
+        ...  # insert entries whose seq is new, then replace the info, in one transaction
 
     async def aread(self, state_id):
-        ...  # return Record(entries, snapshot), or None
+        ...  # return Record(entries, info), or None
 ```
 
 - `entries` are history entries as dicts, each with `seq`, its position in history. Skip entries whose `seq` you
   already have: after a failed write, the Agent sends them again.
-- `snapshot` is a dict with the rest of the State, or `None` to keep the current one.
+- `info` is a small JSON dict with what `store.list()` shows (`first_message`, `created_at`, `updated_at`, `turn`,
+  `stopped`, `finished`) and the format version under `"v"`. It is never `None`. Keep it as it is, and give it back in
+  `Record.info`. `StateInfo.from_info(state_id, info)` turns it into a `StateInfo` for your `list`.
+- Nothing else is saved: `load` rebuilds the State by replaying `entries`.
 - `create=True` is the first write of a new State. Refuse an id you already have with `ValueError`, and write all of
   it or nothing.
 

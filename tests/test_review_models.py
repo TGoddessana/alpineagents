@@ -202,7 +202,7 @@ def test_anthropic_empty_assistant_message_gets_non_empty_placeholder_content():
     window = (
         Message("user", (TextBlock("do the thing"),)),
         Message("assistant", ()),  # what _record_reply stores for content=[]
-        Message("user", (TextBlock("continue"),)),  # state.add_user_message
+        Message("user", (TextBlock("continue"),)),  # state.add_message(Message.user(...))
     )
 
     sent = model._to_anthropic_messages(window)
@@ -387,10 +387,10 @@ def _agent_runs_tool_and_reports_first_result(reply, tool_fn):
     was really called is checked separately with the ``called`` list)."""
     fake = FakeModel([reply, "done"])
     agent = Agent(model=fake, tools=[tool_fn], reporter=None, human=None)
-    state = State("Task")
+    state = State(messages=[Message.user("Task")])
     agent.think(state)
     agent.use_tools(state)
-    return state.context[-1].content[0].content
+    return state.messages[-1].content[0].content
 
 
 def test_anthropic_max_tokens_truncated_tool_call_is_marked_invalid(monkeypatch):

@@ -1,4 +1,4 @@
-from alpineagents import Agent, State, loop
+from alpineagents import Agent, Message, State, loop
 
 NUDGES = 2
 NUDGE = (
@@ -7,14 +7,23 @@ NUDGE = (
 )
 
 
-@loop(until=State.is_answered, limit=40)
+def waiting_for_user(state: State) -> bool:
+    if state.pending_calls or not state.messages:
+        return False
+    last = state.messages[-1]
+    return last.role == "assistant" and not last.tool_calls
+
+
+@loop(until=waiting_for_user, limit=40)
 def nudging(agent: Agent, state: State):
     agent.think(state)
-    if state.wants_tools():
-        state.data["nudges"] = 0
+    if state.pending_calls:
+        with state.edit_extra_data() as data:
+            data["nudges"] = 0
         agent.use_tools(state)
         return
-    nudges = state.data.get("nudges", 0)
+    nudges = state.extra_data.get("nudges", 0)
     if nudges < NUDGES:
-        state.data["nudges"] = nudges + 1
-        state.add_notice(NUDGE)
+        with state.edit_extra_data() as data:
+            data["nudges"] = nudges + 1
+        state.add_message(Message.notice(NUDGE))

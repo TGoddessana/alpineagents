@@ -9,7 +9,13 @@ A wrong use of the library raises `TypeError` or `ValueError` as early as possib
 TypeError: @loop needs both until and limit
 Fix: set both
 Example:
-    @loop(until=State.is_answered, limit=50)
+    def waiting_for_user(state: State) -> bool:
+        if state.pending_calls or not state.messages:
+            return False
+        last = state.messages[-1]
+        return last.role == "assistant" and not last.tool_calls
+
+    @loop(until=waiting_for_user, limit=50)
 ```
 
 ## Errors from outside
@@ -40,9 +46,9 @@ catch them or turn them into results, with the exceptions you choose: to let the
 
 | The exception happens in | The State afterwards |
 | --- | --- |
-| `think` | The context is as it was before `think`. `state.turn` does not change |
+| `think` | `state.messages` is as it was before `think`, and `state.turn` does not change. History keeps the `ModelRequestEntry` and adds an `ErrorEntry` |
 | `use_tools` | Results of the calls that finished are recorded. The other calls stay pending |
-| Anything, and leaves `run` | The error is recorded in `state.history`. Pending calls are closed with a result such as `(aborted: TimeoutError)` |
+| Anything, and leaves `run` | The error is recorded in `state.history` as an `ErrorEntry`. Pending calls are closed with a `ToolResultEntry` such as `(aborted: TimeoutError)`, with outcome `aborted` |
 
 After `run` raises, `state.stopped` is `None`, and you can call `run` with the same State again. `agent` is the
 Agent from the [quick start](../index.md#quick-start):
@@ -50,9 +56,9 @@ Agent from the [quick start](../index.md#quick-start):
 ```python
 import time
 
-from alpineagents import RateLimitError, State
+from alpineagents import Message, RateLimitError, State
 
-state = State("Find the bug in main.py")
+state = State(messages=[Message.user("Find the bug in main.py")])
 try:
     agent.run(state)
 except RateLimitError:
@@ -78,10 +84,11 @@ except TimeoutError:
 
 ## Ctrl+C and cancellation
 
-- Ctrl+C during `run` closes pending calls with the result `(interrupted by user)`. `run(state)` continues from there.
+- Ctrl+C during `run` closes pending calls with the result `(interrupted by user)`, outcome `interrupted`.
+  `run(state)` continues from there.
 - A sync tool that is still running keeps running in its thread. If it finishes later, the model gets its result as a
   notice at the next `think`.
 - In async code, cancelling the task follows the same rules. See [Async](../guides/async.md).
 - A process that is killed (SIGKILL, or SIGTERM without a handler) stops at once, without closing calls. With a
   store, `store.load(id)` closes the calls that were running with a result telling the model they may or may not
-  have run. See [Save and resume](../guides/resume.md#if-the-process-stops).
+  have run (outcome `aborted`), and a request that never got its reply with an `ErrorEntry`. See [Save and resume](../guides/resume.md#if-the-process-stops).

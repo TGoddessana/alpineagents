@@ -2,6 +2,7 @@
 ``_client``."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx2
@@ -18,6 +19,7 @@ from anthropic import (
 from alpineagents.errors import AuthError, ContextTooLongError, ProviderError, RateLimitError
 from alpineagents.models.anthropic import Anthropic, _looks_like_context_overflow
 from alpineagents.types import (
+    Image,
     Message,
     Price,
     RawBlock,
@@ -730,3 +732,105 @@ async def test_real_sdk_complete_stream_still_works(monkeypatch, use_async):
     assert seen == ["Hel"]
     assert reply.message.content == (TextBlock("Hel"),)
     assert reply.stop_reason == "end_turn"
+
+
+# ---------------------------------------------------------------- images in user messages
+
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(40))
+JPEG = b"\xff\xd8\xff\xe0" + bytes(range(40))
+
+
+def _image_block(image):
+    return {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.base64}}
+
+
+def test_a_user_message_image_becomes_an_anthropic_image_block():
+    model = Anthropic("claude-sonnet-5")
+    message = Message.user("What is wrong in this chart?", Image(PNG))
+    assert model._to_anthropic_content(message) == [
+        {"type": "text", "text": "What is wrong in this chart?"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": Image(PNG).base64}},
+    ]
+
+
+def test_user_message_images_keep_block_order_and_each_media_type():
+    model = Anthropic("claude-sonnet-5")
+    message = Message("user", (Image(PNG), TextBlock("between"), Image(JPEG), TextBlock("after")))
+    assert model._to_anthropic_content(message) == [
+        _image_block(Image(PNG)),
+        {"type": "text", "text": "between"},
+        _image_block(Image(JPEG)),
+        {"type": "text", "text": "after"},
+    ]
+    assert _image_block(Image(JPEG))["source"]["media_type"] == "image/jpeg"
+
+
+def test_an_image_only_user_message_has_no_placeholder_text():
+    model = Anthropic("claude-sonnet-5")
+    message = Message.user("", Image(PNG))  # the empty text is dropped when there are images
+    assert message.content == (Image(PNG),)
+    assert model._to_anthropic_content(message) == [_image_block(Image(PNG))]
+    assert model._to_anthropic_messages((message,)) == [{"role": "user", "content": [_image_block(Image(PNG))]}]
+
+
+def test_user_images_and_tool_results_in_one_message_put_the_tool_results_first():
+    model = Anthropic("claude-sonnet-5")
+    call = ToolCall("look", {}, "c1")
+    message = Message(
+        "user", (TextBlock("also this"), Image(PNG), ToolResultBlock(call_id="c1", content="ok", name="look"))
+    )
+    content = model._to_anthropic_content(message)
+    assert [c["type"] for c in content] == ["tool_result", "text", "image"]
+    messages = model._to_anthropic_messages((Message.user("Task"), Message("assistant", (call,)), message))
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+
+
+def test_an_image_in_an_assistant_message_is_dropped():
+    # The API rejects images in assistant messages; one can only get there through an imported conversation.
+    model = Anthropic("claude-sonnet-5")
+    message = Message("assistant", (TextBlock("here"), Image(PNG)))
+    assert model._to_anthropic_content(message) == [{"type": "text", "text": "here"}]
+
+
+def test_user_images_are_sent_even_when_vision_is_not_declared():
+    # Like tool-result images: supports only declares, nothing gates on it.
+    model = Anthropic("claude-sonnet-5", supports=frozenset())
+    assert model._to_anthropic_content(Message.user("x", Image(PNG)))[1] == _image_block(Image(PNG))
+
+
+def test_respond_sends_user_message_images_to_the_sdk(monkeypatch):
+    model = Anthropic("claude-sonnet-5")
+    final_message = SimpleNamespace(
+        content=[fake_block("text", text="A cat")], usage=fake_usage(input_tokens=1700, output_tokens=3), stop_reason="end_turn"
+    )
+    client = install_fake_client(monkeypatch, model, FakeStreamCM(text_chunks=["A cat"], final_message=final_message))
+    model.respond(Request(system=None, messages=(Message.user("What is this?", Image(PNG), Image(JPEG)),)))
+    (call,) = client.messages.calls
+    (sent,) = call["messages"]
+    assert sent["role"] == "user"
+    assert [b["type"] for b in sent["content"]] == ["text", "image", "image"]
+    assert sent["content"][1] == _image_block(Image(PNG)) and sent["content"][2] == _image_block(Image(JPEG))
+    assert json.loads(json.dumps(sent)) == sent  # plain dicts the SDK can serialize
+
+
+def test_respond_sends_nothing_frozen_to_the_sdk(monkeypatch):
+    # ToolCall.args and RawBlock.data are deep-frozen in history; the request holds plain containers.
+    model = Anthropic("claude-sonnet-5")
+    final_message = SimpleNamespace(
+        content=[fake_block("text", text="ok")], usage=fake_usage(input_tokens=5, output_tokens=1), stop_reason="end_turn"
+    )
+    client = install_fake_client(monkeypatch, model, FakeStreamCM(final_message=final_message))
+    call = ToolCall("look", {"opts": {"tags": ["a"]}}, "c1")
+    thinking = RawBlock("anthropic", {"type": "thinking", "thinking": "hm", "parts": ["a"]})
+    messages = (
+        Message.user("Task"),
+        Message("assistant", (thinking, call)),
+        Message("user", (ToolResultBlock(call_id="c1", content="ok", name="look"),)),
+    )
+    model.respond(Request(system=None, messages=messages))
+    sent = client.messages.calls[0]["messages"]
+    tool_use = sent[1]["content"][1]["input"]
+    assert type(tool_use) is dict and type(tool_use["opts"]) is dict and type(tool_use["opts"]["tags"]) is list
+    assert type(sent[1]["content"][0]["parts"]) is list
+    tool_use["opts"]["tags"].append("b")  # editing the request never reaches the recorded call
+    assert call.args == {"opts": {"tags": ["a"]}}
