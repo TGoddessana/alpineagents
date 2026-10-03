@@ -1,6 +1,6 @@
 # Reporter, Human, Terminal
 
-Guide: [Progress and questions](../guides/progress.md).
+Guide: [Show progress and ask the person](../guides/progress.md).
 
 ::: alpineagents.Reporter
 

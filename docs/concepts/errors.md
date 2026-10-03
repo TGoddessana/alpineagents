@@ -18,6 +18,8 @@ Example:
     @loop(until=waiting_for_user, limit=50)
 ```
 
+Each such error is listed under `Raises` in the [API reference](../api/agent.md) of the method that raises it.
+
 ## Errors from outside
 
 Every exception below inherits from `AlpineAgentsError`.
@@ -39,8 +41,7 @@ For `ProviderError` and `MCPConnectionError`, the original exception is in `__ca
 Exceptions from tools, from the loop body and from `until` functions propagate as they are. alpineagents does not
 catch them or turn them into results, with the exceptions you choose: to let the model handle a failure, raise
 `ToolError` (or `ToolInputError` for wrong arguments) in the tool, or name the exceptions in the tool's
-`exception_handler`. See
-[Tools](tools.md#when-a-call-goes-wrong).
+`exception_handler`. See [Tool calls](tools.md#when-a-call-goes-wrong).
 
 ## The State after an exception
 
@@ -50,14 +51,14 @@ catch them or turn them into results, with the exceptions you choose: to let the
 | `use_tools` | Results of the calls that finished are recorded. The other calls stay pending |
 | Anything, and leaves `run` | The error is recorded in `state.history` as an `ErrorEntry`. Pending calls are closed with a `ToolResultEntry` such as `(aborted: TimeoutError)`, with outcome `aborted` |
 
-After `run` raises, `state.stopped` is `None`, and you can call `run` with the same State again. `agent` is the
-Agent from the [quick start](../index.md#quick-start):
+After `run` raises, `state.stopped` is `None`, and you can call `run` with the same State again:
 
 ```python
 import time
 
-from alpineagents import Message, RateLimitError, State
+from alpineagents import Agent, Message, RateLimitError, State
 
+agent = Agent(model="claude-sonnet-5")
 state = State(messages=[Message.user("Find the bug in main.py")])
 try:
     agent.run(state)
@@ -66,21 +67,12 @@ except RateLimitError:
     agent.run(state)
 ```
 
-With a [store](../guides/resume.md), the State is saved after an exception too. If that save also fails, the original
-exception is raised with a note about the failed save, so `except RateLimitError:` still catches it.
-
-## Catch an exception inside the loop body
+With a [store](../guides/production.md), the State is saved after an exception too. If that save also fails, the
+original exception is raised with a note about the failed save, so `except RateLimitError:` still catches it.
 
 If the loop body catches an exception from `use_tools`, the calls that did not finish stay pending, and the next
-`think` raises `ValueError`. Run them again with `use_tools` first (calls that already have a result do not run
-again), or let the exception leave the run, which closes them:
-
-```python
-try:
-    agent.use_tools(state)
-except TimeoutError:
-    agent.use_tools(state)  # one more try for the calls that did not finish
-```
+`think` raises `ValueError`. Call `use_tools` again first (calls that already have a result do not run again), or let
+the exception leave the run, which closes them.
 
 ## Ctrl+C and cancellation
 
@@ -88,7 +80,8 @@ except TimeoutError:
   `run(state)` continues from there.
 - A sync tool that is still running keeps running in its thread. If it finishes later, the model gets its result as a
   notice at the next `think`.
-- In async code, cancelling the task follows the same rules. See [Async](../guides/async.md).
+- In async code, cancelling the task follows the same rules. See [Use async](../guides/async.md).
 - A process that is killed (SIGKILL, or SIGTERM without a handler) stops at once, without closing calls. With a
   store, `store.load(id)` closes the calls that were running with a result telling the model they may or may not
-  have run (outcome `aborted`), and a request that never got its reply with an `ErrorEntry`. See [Save and resume](../guides/resume.md#if-the-process-stops).
+  have run (outcome `aborted`), and a request that never got its reply with an `ErrorEntry`. See
+  [Survive crashes and restarts](../guides/production.md#if-the-process-stops).

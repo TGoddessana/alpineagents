@@ -69,6 +69,8 @@ raises `TypeError`. `dict(value)` makes an editable copy.
 
 ::: alpineagents.ContextChange
 
+::: alpineagents.types.Exchange
+
 ::: alpineagents.AgentInfo
 
 ::: alpineagents.ModelEvent
@@ -102,5 +104,7 @@ The parts of a `Message`. `ToolCall` above is also one.
       filters: ["!^_"]
 
 ::: alpineagents.types.result_text
+
+::: alpineagents.types.format_call
 
 ::: alpineagents.types.RawBlock

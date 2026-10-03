@@ -1,4 +1,4 @@
-# Structured output
+# Get structured output
 
 Get a typed result instead of text. There are two ways.
 
@@ -13,7 +13,7 @@ Get a typed result instead of text. There are two ways.
 --8<-- "docs_src/structured_output.py"
 ```
 
-1. `agent.run(state)` does the work on a State made with `State(messages=[Message.user(...)])`.
+1. `agent.run(state)` does the work on a State that starts with the person's message.
 2. `agent.ask(...)` asks the model one more question about the same context.
 3. `returns=Review` makes the answer a `Review` object.
 
@@ -29,7 +29,7 @@ About `ask`:
 ## A submit tool
 
 The model fills the tool's typed parameters, and the tool ends the run with them. See
-[Stop conditions: stop from a tool](stop-conditions.md#stop-from-a-tool). The answer is stored as JSON, so a
+[Stop a run: stop from a tool](stop-conditions.md#stop-from-a-tool). The answer is stored as JSON, so a
 dataclass or Pydantic model passed to `finish()` comes back as a dict. For a typed object, use `ask` with `returns=`.
 
 ## Related

@@ -35,7 +35,11 @@ class Reporter:
     change the State or the flow. Exceptions it raises are not swallowed.
 
     Methods may be called from several threads at once (a turn's tools run in parallel), so an implementation
-    must be thread-safe.
+    must be thread-safe. Agents in different threads share the default ``Terminal``.
+
+    A Reporter gets the State and the call, not the Agent. To read a tool's hints in ``on_tool_start``, keep a
+    reference to the Agent yourself (``reporter.agent = agent`` after creating both) and look the tool up in
+    ``agent.tool_map``.
 
     Example:
         ```python

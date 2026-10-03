@@ -1,4 +1,4 @@
-# Models that stall or drop streams
+# Handle unreliable models
 
 Some models, often small or local ones, are less steady than others. A stream breaks halfway through a reply. The
 model stops without calling a tool, in the middle of the task. It calls the same tool with the same arguments again
@@ -49,7 +49,7 @@ differ from the first. Whether that is worth it, and what the person sees, is up
 ## Hand back a reply with no tool call
 
 Some models stop to say what they will do next ("I will now read the file") instead of doing it. That reply has no
-tool call, so `waiting_for_user` is true and the loop stops. This loop hands it back:
+tool call, so `waiting_for_user` is true and the loop stops ([Write your own loop](../learn/loop.md)). This loop hands it back:
 
 ```python
 --8<-- "docs_src/nudge.py"
@@ -83,7 +83,7 @@ from the loop, as in the recipe above, and stop only if it repeats again.
 
 ## Related
 
-- [Stop conditions](stop-conditions.md)
+- [Stop a run](stop-conditions.md)
 - [Check the work before finishing](verify.md): another loop that adds a notice
-- [Models: write a Model](models.md#write-a-model)
-- [Progress and questions](progress.md): Reporters
+- [Use other models: write a Model](models.md#write-a-model)
+- [Show progress and ask the person](progress.md): Reporters

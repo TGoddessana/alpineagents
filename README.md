@@ -65,16 +65,30 @@ print(agent.run("Summarize README.md in three lines"))
 
 ### Without an API key
 
-`FakeModel` returns prepared replies in order. It needs no API key and no network. Replace the `print` line above with:
+`FakeModel` returns prepared replies in order. It needs no API key and no network:
 
 ```python
+from pathlib import Path
+
+from alpineagents import Agent, ToolError, tool
 from alpineagents.testing import FakeModel, tool_call
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a text file"""
+    file = Path(path)
+    if not file.exists():
+        raise ToolError(f"No such file: {path}")
+    return file.read_text()
+
 
 fake = FakeModel([
     tool_call("read_file", path="README.md"),
     "README.md describes a Python agent framework.",
 ])
-print(agent.copy(model=fake).run("Summarize README.md"))
+agent = Agent(model=fake, tools=[read_file])
+print(agent.run("Summarize README.md"))
 ```
 
 The first reply asks for `read_file`. The Agent runs the tool, and the second reply is the answer.
@@ -139,6 +153,8 @@ print(agent.run("Add a test for the add() function in calc.py"))
   answered, or after 30 turns.
 - To change the agent, add, remove or reorder lines in `coding`.
 
+[Write your own loop](https://tgoddessana.github.io/alpineagents/learn/loop/) explains each part.
+
 ## Keep and inspect the State
 
 `agent.run("text")` creates a State and throws it away. To keep it, create it yourself:
@@ -154,23 +170,26 @@ state.add_message(Message.user("Now run the tests"))   # the one way to talk to 
 agent.run(state)                                       # continues the same conversation
 ```
 
-- Every change to a State adds one entry to `state.history`, and `state.messages`, `state.turn` and `state.answer` are
-  computed from it. Nothing else is saved, and nothing is hidden.
-- `state.snapshot()` returns a frozen `StateSnapshot`. `state.restore(snapshot)` goes back to it, and `state.fork()`
-  gives a copy to try something on.
-- `state.extra_data` is a notepad for your own values. Change it with `with state.edit_extra_data() as data:`.
-- `FileStore("runs")` with `Agent(store=...)` saves the history, so `store.load(id)` continues it in another process.
+Every change to a State adds one entry to `state.history`, and everything else is computed from it. A snapshot goes
+back, a fork tries another path, and `FileStore` with `Agent(store=...)` saves the history to continue it in another
+process.
 
 ## Documentation
 
-[tgoddessana.github.io/alpineagents](https://tgoddessana.github.io/alpineagents/). Read it in this order:
+[tgoddessana.github.io/alpineagents](https://tgoddessana.github.io/alpineagents/)
 
-1. [Concepts](https://tgoddessana.github.io/alpineagents/concepts/overview/): how a run works, then Agent, State,
-   loops and tools. About 15 minutes.
-2. [Guides](https://tgoddessana.github.io/alpineagents/guides/stop-conditions/): one task per page, for example
-   [asking before a tool runs](https://tgoddessana.github.io/alpineagents/guides/approval/) or
-   [testing an agent](https://tgoddessana.github.io/alpineagents/guides/testing/).
-3. [API reference](https://tgoddessana.github.io/alpineagents/api/agent/): every class and method.
+1. [Learn](https://tgoddessana.github.io/alpineagents/learn/first-agent/): seven short pages, read in order.
+   [Your first agent](https://tgoddessana.github.io/alpineagents/learn/first-agent/),
+   [tools](https://tgoddessana.github.io/alpineagents/learn/tools/),
+   [your own loop](https://tgoddessana.github.io/alpineagents/learn/loop/),
+   [the conversation](https://tgoddessana.github.io/alpineagents/learn/conversation/),
+   [approval](https://tgoddessana.github.io/alpineagents/learn/approval/),
+   [save and resume](https://tgoddessana.github.io/alpineagents/learn/save-resume/) and
+   [testing](https://tgoddessana.github.io/alpineagents/learn/testing/).
+2. [Guides](https://tgoddessana.github.io/alpineagents/guides/stop-conditions/): one task per page, in any order, for
+   example [writing permission rules](https://tgoddessana.github.io/alpineagents/guides/permissions/).
+3. [Concepts](https://tgoddessana.github.io/alpineagents/concepts/overview/): how it works, with the precise rules.
+4. [API reference](https://tgoddessana.github.io/alpineagents/api/agent/): every class and method.
 
 ## Roadmap
 

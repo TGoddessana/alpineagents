@@ -165,6 +165,9 @@ class StateSnapshot:
     gives an equal snapshot. ``==`` compares the public fields, so equal histories give equal snapshots. Pass a
     snapshot to ``state.restore(snapshot)`` to go back to that point.
 
+    A snapshot lives in memory. To keep one across processes, keep its history: ``State(history=snapshot.history)``
+    rebuilds the same value, and so does a store.
+
     Example:
         ```python
         before = state.snapshot()
@@ -548,9 +551,10 @@ class State:
 
         Raises:
             TypeError: A positional argument, a keyword that does not exist (the 0.4 ones, ``task=``, ``context=`` and
-                ``data=``, get a message naming their replacement), an item of ``messages`` that is not a ``Message``, an
-                ``extra_data`` value that is not JSON, an item of ``history`` that is not a history entry, or
-                ``history`` together with ``messages`` or ``extra_data``.
+                ``data=``, get a message naming their replacement), ``messages`` that is not a list (a plain ``str``)
+                or has an item that is not a ``Message``, an ``extra_data`` value that is not JSON, an item of
+                ``history`` that is not a history entry, or ``history`` together with ``messages`` or
+                ``extra_data``.
             ValueError: ``id`` has other characters, or ``history`` is inconsistent (it gives the index of the
                 entry that cannot follow the ones before it).
         """
@@ -738,6 +742,12 @@ class State:
         Each entry is one of the ``HistoryEntry`` classes (``ModelReplyEntry``, ``ToolResultEntry``, ...). Checking
         ``kind`` tells which, so type checkers know what ``content`` is.
 
+        Values in history are read-only and in their JSON form from the moment they are recorded, on a live State
+        as well as a loaded one: a tool call's ``args`` and a recorded answer are frozen dicts and lists (indexing,
+        ``json.dumps`` and ``==`` work, a change raises ``TypeError``; ``dict(value)`` makes an editable copy), a
+        tuple becomes a list, and a dataclass or Pydantic model becomes a dict. A value that is not JSON raises
+        ``TypeError`` when it is recorded.
+
         Example:
             ```python
             for entry in state.history:
@@ -764,6 +774,10 @@ class State:
 
         A call leaves this tuple when it gets a result, is denied or cancelled by a permission, or is closed by an
         exception.
+
+        Every tool call needs a result before the model is asked again. While calls are pending, ``think``,
+        ``compact``, ``clear_tool_results`` and ``restore`` raise ``ValueError``, ``add_message`` waits (the message
+        goes into ``messages`` right after the results), and ``finish`` works as usual.
         """
         return self._snap.pending_calls
 
@@ -799,6 +813,10 @@ class State:
 
         The value given to ``finish(answer)`` if there is one, otherwise the text of the latest model reply
         without tool calls, otherwise ``None``. A ``think`` that fails does not change it.
+
+        It is in JSON form even before any save: a dataclass or Pydantic model given to ``finish`` comes back as
+        a read-only dict (``Review(**state.answer)`` rebuilds it). Use ``agent.ask(..., returns=Type)`` to get the
+        object itself.
         """
         return self._snap.answer
 
@@ -933,12 +951,18 @@ class State:
         Tools may call it (a ``submit`` tool, for example), even while other calls are pending. Calling it again
         is allowed; the last ``answer`` given wins.
 
+        It ends the State for good: afterwards ``think``, ``use_tools``, ``ask`` and ``run`` raise ``ValueError``,
+        and only ``restore`` to a snapshot taken before it takes it back. If a tool calls it, end the loop body
+        without another ``think``. A stop by a permission does not do this: the State is not finished, so add a
+        message and run again.
+
         Args:
             answer: If not ``None``, becomes ``state.answer``. Any JSON value, a Pydantic model or a dataclass
                 (turned into a dict), not only a string. ``None`` keeps an earlier answer.
 
         Raises:
-            TypeError: ``answer`` cannot be turned into JSON.
+            TypeError: ``answer`` cannot be turned into JSON (a set, ``Path``, ``datetime``, ``Enum`` or ``bytes``,
+                for example).
         """
         value = _serial.answer(answer, "the finish() answer")
         with self._lock:
@@ -962,9 +986,9 @@ class State:
     def clear_tool_results(self, keep_last: int = 5) -> None:
         """Shrink the context by blanking old tool results. History keeps the full results.
 
-        Every tool result except the last ``keep_last`` is replaced with ``"(cleared: kept in history)"``.
-        Results that are already cleared still count toward ``keep_last``. Nothing is recorded when nothing
-        changes.
+        Every tool result except the last ``keep_last`` is replaced with ``"(cleared: kept in history)"``. Images
+        in a result are cleared with its text. Results that are already cleared still count toward ``keep_last``.
+        Nothing is recorded when nothing changes.
 
         Args:
             keep_last: How many of the most recent tool results to keep.
@@ -1042,6 +1066,10 @@ class State:
         no ``think()`` behind the copy, so ``fork()`` refuses (fork before ``think``, or after it returns, e.g. in
         ``Reporter.on_think_end``). ``State(history=snapshot.history)`` of such a snapshot is still allowed: it is
         a plain replay.
+
+        The copy is independent: running or changing it leaves this State as it was, and
+        ``fork().snapshot() == state.snapshot()``. With ``Agent(store=...)``, the copy is saved under its own id the
+        first time the Agent runs it.
 
         Example:
             ```python

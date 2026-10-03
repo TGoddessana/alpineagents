@@ -1,10 +1,16 @@
-from alpineagents import Agent, Message, State, loop
+from alpineagents import Agent, Message, State, loop, tool
 
 NUDGES = 2
 NUDGE = (
     "Your last reply called no tool. If the task is not done, continue it with a tool call. "
     "If it is done, give your final answer again."
 )
+
+
+@tool
+def look() -> str:
+    """Look around the project"""
+    return "a README and a setup.py"
 
 
 def waiting_for_user(state: State) -> bool:
@@ -27,3 +33,7 @@ def nudging(agent: Agent, state: State):
         with state.edit_extra_data() as data:
             data["nudges"] = nudges + 1
         state.add_message(Message.notice(NUDGE))
+
+
+agent = Agent(model="ollama/qwen3:8b", tools=[look], loop=nudging)
+print(agent.run("Look around and tell me what this project is"))

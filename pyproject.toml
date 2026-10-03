@@ -49,6 +49,7 @@ mcp = [
 ]
 docs = [
     "mkdocs<2",
+    "mkdocs-llmstxt",
     "mkdocs-material",
     "mkdocstrings[python]",
 ]

@@ -9,6 +9,8 @@ theme:
   name: material
   features:
     - content.code.copy
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.footer
     - search.highlight
@@ -52,34 +54,91 @@ plugins:
             show_root_full_path: false
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+  - llmstxt:
+      markdown_description: alpineagents is a Python agent framework where the agent loop is a function you write. These pages teach it, then explain how it works, then list the API.
+      full_output: llms-full.txt
+      sections:
+        Learn:
+          - learn/first-agent.md: Your first agent
+          - learn/tools.md: Give the agent tools
+          - learn/loop.md: Write your own loop
+          - learn/conversation.md: Keep the conversation
+          - learn/approval.md: Ask before a tool runs
+          - learn/save-resume.md: Save and resume
+          - learn/testing.md: Test your agent
+        Guides:
+          - guides/stop-conditions.md: Stop a run
+          - guides/verify.md: Check the work before finishing
+          - guides/plan-first.md: Plan before acting
+          - guides/structured-output.md: Get structured output
+          - guides/tool-state.md: Let tools use the State
+          - guides/tool-failures.md: Let the model handle tool failures
+          - guides/more-tools.md: Tools on objects and from data
+          - guides/permissions.md: Write permission rules
+          - guides/context-size.md: Keep the context small
+          - guides/models.md: Use other models
+          - guides/unreliable-models.md: Handle unreliable models
+          - guides/progress.md: Show progress and ask the person
+          - guides/async.md: Use async
+          - guides/mcp.md: Use MCP servers
+          - guides/undo-and-fork.md: Go back or try another path
+          - guides/production.md: Survive crashes and restarts
+        Concepts:
+          - concepts/overview.md: How a run works
+          - concepts/agent.md: Agent
+          - concepts/state.md: State and history
+          - concepts/loops.md: Loops and stop rules
+          - concepts/tools.md: Tool calls
+          - concepts/errors.md: Errors and interruptions
+          - concepts/glossary.md: Glossary
+        API reference:
+          - api/agent.md: Agent
+          - api/state.md: State
+          - api/loops.md: Loops and blocks
+          - api/tools.md: Tools and MCP
+          - api/permissions.md: Permissions
+          - api/models.md: Models
+          - api/io.md: Reporter, Human, Terminal
+          - api/store.md: Store
+          - api/types.md: Data types
+          - api/errors.md: Errors
+          - api/testing.md: Testing
 
 nav:
   - Home: index.md
+  - Learn:
+      - Your first agent: learn/first-agent.md
+      - Give the agent tools: learn/tools.md
+      - Write your own loop: learn/loop.md
+      - Keep the conversation: learn/conversation.md
+      - Ask before a tool runs: learn/approval.md
+      - Save and resume: learn/save-resume.md
+      - Test your agent: learn/testing.md
+  - Guides:
+      - Stop a run: guides/stop-conditions.md
+      - Check the work before finishing: guides/verify.md
+      - Plan before acting: guides/plan-first.md
+      - Get structured output: guides/structured-output.md
+      - Let tools use the State: guides/tool-state.md
+      - Let the model handle tool failures: guides/tool-failures.md
+      - Tools on objects and from data: guides/more-tools.md
+      - Write permission rules: guides/permissions.md
+      - Keep the context small: guides/context-size.md
+      - Use other models: guides/models.md
+      - Handle unreliable models: guides/unreliable-models.md
+      - Show progress and ask the person: guides/progress.md
+      - Use async: guides/async.md
+      - Use MCP servers: guides/mcp.md
+      - Go back or try another path: guides/undo-and-fork.md
+      - Survive crashes and restarts: guides/production.md
   - Concepts:
       - How a run works: concepts/overview.md
       - Agent: concepts/agent.md
-      - State: concepts/state.md
-      - Loops: concepts/loops.md
-      - Tools: concepts/tools.md
+      - State and history: concepts/state.md
+      - Loops and stop rules: concepts/loops.md
+      - Tool calls: concepts/tools.md
       - Errors and interruptions: concepts/errors.md
       - Glossary: concepts/glossary.md
-  - Guides:
-      - Stop conditions: guides/stop-conditions.md
-      - Ask before a tool runs: guides/approval.md
-      - Check the work before finishing: guides/verify.md
-      - Plan before acting: guides/plan-first.md
-      - Chat: guides/chat.md
-      - Save and resume: guides/resume.md
-      - Structured output: guides/structured-output.md
-      - Tools that use the State: guides/tool-state.md
-      - Let the model handle tool failures: guides/tool-failures.md
-      - Context size: guides/context-size.md
-      - Models: guides/models.md
-      - Models that stall or drop streams: guides/unreliable-models.md
-      - Progress and questions: guides/progress.md
-      - Async: guides/async.md
-      - MCP servers: guides/mcp.md
-      - Testing: guides/testing.md
   - API reference:
       - Agent: api/agent.md
       - State: api/state.md

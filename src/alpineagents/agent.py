@@ -151,6 +151,9 @@ class Agent:
         Raises:
             TypeError: A setting has the wrong type, for example a function without ``@tool`` in ``tools=``,
                 a ``loop`` that is not callable, a Reporter, Human, Store or Permission class instead of an object.
+                In ``tools=``: an unbound method (``FileSystem.read_file``: create an object first), a ``Tool``
+                subclass instead of an object, a ``Tool`` object whose class does not call ``Tool.__init__`` or
+                does not define ``run``, or an object with no ``@tool`` methods.
             ValueError: Two tools share a name, or the model string is ambiguous.
         """
         # - model: resolve_model(model), no network.
@@ -434,9 +437,25 @@ class Agent:
         waiting for a result are closed (``(interrupted by user)`` after Ctrl+C), and the exception is
         raised as is. After Ctrl+C you can call ``run`` again with the same State.
 
+        Closed calls get ``(interrupted by user)`` after Ctrl+C or cancellation and ``(aborted: TimeoutError)``
+        (the exception's type) after another exception, ``SystemExit`` included (so turning SIGTERM into
+        ``SystemExit`` ends a run cleanly). A sync tool still running keeps running in its thread; if it finishes
+        later, the model gets its result as a notice at the next ``think``. Afterwards ``state.stopped`` is
+        ``None``.
+
+        Continuing a State that already ran: if its last run stopped at an ``until`` function that is still true,
+        the loop stops at once (add a message first). If it stopped at ``limit``, it runs up to ``limit`` more
+        turns, because each call counts turns from zero. A State ended with ``finish()`` raises ``ValueError``.
+
         With ``store=``, the State is saved as the run goes: at the start and end of the run, before and after
-        each ``think``, after each tool result, and after ``use_tools`` and ``compact``. If saving fails while
-        the run is already failing, the original exception is raised with a note about the failed save.
+        each ``think``, after each tool result, and after ``use_tools`` and ``compact``. What permission checks
+        recorded (denied calls, the person's answers) is saved before any tool of the turn runs. A save also
+        happens after an exception. If saving fails during a run that goes well, the run raises the store's
+        exception. If the run is already failing, the original exception is raised with a note about the failed
+        save, so ``except RateLimitError:`` still catches it; Ctrl+C or cancellation while saving is raised
+        instead of the original. A failed save after one tool result does not stop the other tools: the save at
+        the end of ``use_tools`` writes what is missing, or raises. Nothing that failed to save is lost: the next
+        save writes it.
 
         Args:
             prompt_or_state: A prompt string, which starts a new ``State``, or a ``State`` to continue.
@@ -451,8 +470,12 @@ class Agent:
             NoHumanError: A ``DecideByHuman()`` permission would ask the Agent's human, and the Agent has
                 ``human=None``.
             ValueError: The prompt is empty, the State was already ended with ``state.finish()``, another
-                ``run``/``arun`` is running it right now, or it is new and the store already has a State with
-                its id.
+                ``run``/``arun`` is running it right now, it is new and the store already has a State with
+                its id, it is saved in another store (a State is saved in one store only; two ``FileStore``
+                objects for the same folder count as one), or an MCP server has no tool that ``tools=`` picked,
+                or two of its tools get the same name (raised when the server connects, before the first
+                ``think``).
+            TypeError: Also when called inside an async run, where it would block the event loop (use ``arun``).
 
         Warns:
             ResumeWarning: The State was loaded from a store, and it was last run by an Agent with a different
@@ -604,6 +627,7 @@ class Agent:
         Raises:
             ValueError: The State is finished, has no messages, still has tool calls waiting for results, is
                 already waiting on a model, or ``tools`` has a tool this Agent does not have.
+            TypeError: Called inside an async run, where it would block the event loop (use ``athink``).
             ProviderError: The model provider failed (``RateLimitError``, ``AuthError``,
                 ``ContextTooLongError`` or another ``ProviderError``).
         """
@@ -657,8 +681,15 @@ class Agent:
 
         Calls to tools made with ``parallel=True`` (the default) run at the same time, then the rest run one
         by one. Does nothing if there are no calls. A tool that raises does not become an error result:
-        results of the calls that finished are recorded, and the exception is raised as is. Invalid arguments
-        and unknown tool names go back to the model as ``(input error: ...)`` results.
+        results of the calls that finished are recorded, and the exception is raised as is, with a note naming
+        the call. The calls that did not finish stay pending, so the next ``think`` raises ``ValueError``: call
+        ``use_tools`` again (calls that already have a result do not run again) or let the exception leave the
+        run, which closes them. Invalid arguments and unknown tool names go back to the model as
+        ``(input error: ...)`` results.
+
+        The calls run in this order: tools with ``parallel=True`` on worker threads at the same time, then tools
+        with ``parallel=False`` one at a time in the order the model asked. The results go into
+        ``state.messages`` together, in the order the model asked, once the last call has one.
 
         With ``permissions=``, every call is checked before any tool runs. A denied call does not run, and the
         model gets the reason as its error result. A denial with ``stop=True`` cancels the other calls of the
@@ -672,6 +703,8 @@ class Agent:
 
         Raises:
             ValueError: The State is finished.
+            TypeError: Called inside an async run, where it would block the event loop (use ``ause_tools``), or
+                a permission only checks asynchronously.
         """
         # state._ensure_open("use_tools") and state._attach(self) in _begin_use_tools, then _runner.run_calls.
         # Permission, concurrency, exception and interrupt rules are in _runner.run_calls.
@@ -714,20 +747,22 @@ class Agent:
 
         The question and answer are recorded in ``state.history`` but do not enter the context, so the run
         continues as if the question was never asked. The model cannot call tools while answering. Any Agent
-        can ask about a State, not only the one running it.
+        can ask about a State, not only the one running it. It adds nothing to ``state.turn`` and writes no
+        ``model_request`` entry, but its tokens count in ``state.usage``.
 
         Args:
             state: The State whose context the model reads.
             prompt: The question.
             returns: The answer format: ``str``, a dataclass or a Pydantic model.
-            retries: How many more times to ask when the answer does not fit ``returns``.
+            retries: How many more times to ask when the answer does not fit ``returns`` (2 by default).
 
         Returns:
             The answer, converted to ``returns``.
 
         Raises:
-            TypeError: ``returns`` is not a supported format.
-            ValueError: The State is finished.
+            TypeError: ``returns`` is not a supported format, or called inside an async run (use ``aask``).
+            ValueError: The State is finished (so do not combine ``ask`` with a ``submit`` tool that calls
+                ``finish`` on the same State).
             OutputError: The answer still did not fit ``returns`` after ``retries`` more tries.
             ProviderError: The model provider failed.
 
@@ -806,8 +841,8 @@ class Agent:
 
         Raises:
             NoHumanError: The Agent was created with ``human=None``.
-            TypeError: ``returns`` is not a supported format, or the Human only answers asynchronously
-                (use ``aask_human``).
+            TypeError: ``returns`` is not a supported format, the Human only answers asynchronously
+                (use ``aask_human``), or called inside an async run (use ``aask_human``).
 
         Example:
             ```python
@@ -832,7 +867,8 @@ class Agent:
         """Asks the model to summarize the messages, then replaces them with the first user message and that summary.
 
         It is the same change as ``state.compact(summary)`` with the model's summary, and the usage of the
-        request is added to ``state.usage``. Messages added while the model was writing the summary stay after it.
+        request is added to ``state.usage``. Like ``ask``, it writes no ``model_request`` entry, so the model that
+        wrote a summary is not in history. Messages added while the model was writing the summary stay after it.
         ``state.history`` keeps everything. If anything fails, the messages are left unchanged.
         In a loop, ``compact_if_full`` calls this only when the context is getting full.
 
@@ -843,6 +879,9 @@ class Agent:
         Raises:
             ValueError: The State still has tool calls waiting for results, or another compaction of it is
                 under way.
+            TypeError: Called inside an async run, where it would block the event loop (use ``acompact``; in a
+                loop, ``acompact_if_full``). ``compact_if_full`` raises this only when it first compacts, which
+                can be many turns in.
             OutputError: The model returned an empty summary.
             ProviderError: The model provider failed.
         """
@@ -892,7 +931,8 @@ class Agent:
         system prompt and tool definitions.
 
         An estimate: it starts from the token count the provider reported for the last reply and adds a
-        character-count guess for the messages after it.
+        character-count guess for the messages after it. Each image, in a user message or a tool result, counts
+        as 1,600 tokens.
 
         Example:
             ```python

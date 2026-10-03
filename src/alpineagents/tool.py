@@ -499,6 +499,12 @@ class Tool:
     - ``ToolError("...")``: a failure the model should handle. The model gets it as an error result.
     - Any other exception stops the run.
 
+    A subclass that does not call ``super().__init__``, or does not define ``run``, raises ``TypeError`` when the
+    Agent is created, and so does passing the class instead of an object. ``run`` gets the model's arguments as
+    your own copy: changing it does not change the recorded call, whose ``args`` are read-only. A ``Tool`` and a
+    ``FunctionTool`` (made by ``@tool``) are both ``Tool`` objects, and so is an MCP server's ``MCPTool``, so every
+    value of ``agent.tool_map`` is a ``Tool``.
+
     Arguments that are not valid JSON, or that were cut off by the output token limit, never reach ``run``: the model
     gets an input error. ``run`` can be ``async def``; ``agent.arun`` then awaits it on the event loop, and a regular
     ``run`` runs on a worker thread.
@@ -1035,7 +1041,9 @@ class FunctionTool(Tool):
 
         Args:
             **changes: Any ``@tool`` option: ``name``, ``description``, ``parallel``, ``exception_handler``,
-                ``hints_for``, ``read_only``, ``destructive``, ``idempotent`` or ``open_world``.
+                ``hints_for``, ``read_only``, ``destructive``, ``idempotent`` or ``open_world``. ``hints_for=None``
+                removes that function, and ``exception_handler=None`` removes the handler (the Agent itself does not
+                know about handlers).
 
         Returns:
             The new tool.
@@ -1118,6 +1126,14 @@ def tool(
     docstring describes each parameter. A parameter typed ``State`` is hidden from the model and receives the
     current State. The return value is sent to the model: a ``str`` as is, ``None`` as ``(done)``, an ``Image``
     (or a list of text and ``Image``s, such as ``["Page loaded", Image(png)]``) as an image, anything else as JSON.
+    In such a list a ``str`` is text and anything else that is not an ``Image`` is sent as JSON text. A value that
+    cannot become JSON raises ``TypeError``, which stops the run like any exception from a tool.
+
+    Every parameter needs a type hint. Supported: ``str``, ``int``, ``float``, ``bool``, ``Literal[...]``,
+    ``Enum``, ``list[T]``, ``dict[str, T]``, ``T | None``, dataclasses, ``TypedDict`` (on Python 3.11 import it
+    from ``typing_extensions``) and Pydantic models. Parameters with defaults are optional. A mistake in the
+    function raises ``TypeError`` when ``@tool`` runs, before any model request. ``tool.spec`` shows exactly what
+    the model sees.
 
     Use it bare (``@tool``) or with options (``@tool(name=..., description=..., parallel=...,
     exception_handler=..., hints_for=..., read_only=..., destructive=..., idempotent=..., open_world=...)``).

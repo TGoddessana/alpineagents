@@ -1,4 +1,4 @@
-# Context size
+# Keep the context small
 
 A long run fills the model's context window. When a request is larger than the window, the provider rejects it and
 `think` raises `ContextTooLongError`. Shrink the context before that happens.
@@ -45,4 +45,4 @@ The terminal shows each compaction under the next turn header:
 
 ## Related
 
-- [State: history and context](../concepts/state.md#history-and-context)
+- [State and history](../concepts/state.md#messages-and-history)

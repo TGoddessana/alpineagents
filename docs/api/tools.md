@@ -1,6 +1,6 @@
 # Tools and MCP
 
-Concepts: [Tools](../concepts/tools.md). Guide: [MCP servers](../guides/mcp.md).
+Learn: [Give the agent tools](../learn/tools.md). Concepts: [Tool calls](../concepts/tools.md). Guides: [Tools on objects and from data](../guides/more-tools.md), [Use MCP servers](../guides/mcp.md).
 
 ::: alpineagents.tool.tool
 

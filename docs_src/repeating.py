@@ -1,6 +1,12 @@
-from alpineagents import Agent, State, loop
+from alpineagents import Agent, State, loop, tool
 
 REPEATS = 3
+
+
+@tool
+def look(path: str) -> str:
+    """Look at a path"""
+    return "nothing here"
 
 
 def waiting_for_user(state: State) -> bool:
@@ -23,3 +29,7 @@ def watched(agent: Agent, state: State):
     agent.think(state)
     if state.pending_calls:
         agent.use_tools(state)
+
+
+agent = Agent(model="ollama/qwen3:8b", tools=[look], loop=watched)
+print(agent.run("Find the config file"))

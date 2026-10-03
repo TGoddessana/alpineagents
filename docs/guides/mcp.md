@@ -1,4 +1,4 @@
-# MCP servers
+# Use MCP servers
 
 Give an Agent the tools of an MCP server. Install the extra first:
 
@@ -32,8 +32,8 @@ Pass exactly one of `command`, `url=` and `server=`. `server=` takes an in-proce
 
 During a run, `agent.tool_map["github__create_issue"]` is the connected tool (`MCPTool`). Its hints (`read_only`,
 `destructive`, `idempotent`, `open_world`) come from the server's tool annotations. They are what the server says
-about itself, so do not trust them more than the server. See
-[Describe what a tool does](../concepts/tools.md#describe-what-a-tool-does).
+about itself, so do not trust them more than the server
+([Write permission rules](permissions.md#mcp-tools)).
 
 ## Connections
 
@@ -46,7 +46,7 @@ about itself, so do not trust them more than the server. See
 ## Results
 
 The server's text comes to the model as text, and its PNG, JPEG, GIF and WebP images as images (see
-[Images](../concepts/tools.md#images)). Other content, such as audio or an SVG image, becomes a short note saying it
+[Tools on objects and from data](more-tools.md#images-from-a-tool)). Other content, such as audio or an SVG image, becomes a short note saying it
 was not shown.
 
 ## Errors
@@ -58,5 +58,6 @@ was not shown.
 
 ## Related
 
-- [Tools](../concepts/tools.md)
+- [Tool calls](../concepts/tools.md)
+- [Write permission rules](permissions.md#mcp-tools)
 - [MCP API](../api/tools.md)

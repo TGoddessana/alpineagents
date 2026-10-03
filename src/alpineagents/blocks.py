@@ -14,7 +14,10 @@ __all__ = ["CompactIfFull", "compact_if_full", "acompact_if_full"]
 class CompactIfFull:
     """A block that compacts the messages when the context is fuller than ``at``.
 
-    Call it at the start of a turn, before ``agent.think``. ``compact_if_full`` is one with the defaults.
+    Call it at the start of a turn, before ``agent.think``. ``compact_if_full`` is one with the defaults (``at=0.6``,
+    no ``instructions``). Compaction replaces the messages with the first message and a summary and rebuilds the
+    provider's cache. In an async loop use ``acall`` (or ``acompact_if_full``): calling it in an async run raises
+    ``TypeError`` the first time it compacts, which can be many turns in.
 
     Example:
         ``CompactIfFull(at=0.5, instructions="Keep file paths and test results")(agent, state)``

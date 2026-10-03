@@ -1,6 +1,6 @@
 # Testing
 
-Guide: [Testing](../guides/testing.md).
+Learn: [Test your agent](../learn/testing.md).
 
 ::: alpineagents.testing.FakeModel
 

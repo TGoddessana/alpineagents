@@ -39,6 +39,9 @@ class Model(ABC):
     Rules for an adapter:
 
     - Only return a reply. Do not change the State; the Agent records the reply and its usage.
+    - User messages and tool results can hold ``Image`` blocks. Convert them to the provider's image format, as
+      ``Anthropic`` and ``OpenAICompatible`` do, or raise a clear error if the provider cannot read images.
+    - Call ``on_text`` with each piece of text as it streams in, if it is not ``None``.
     - Put the model that actually answered in ``Reply.model``: the name the provider reported, or ``self.name`` if
       it did not say. A Model that falls back to another model puts the fallback's name there.
     - Use no network and no credentials in ``__init__``. Create the SDK client on the first request, so an Agent

@@ -284,6 +284,7 @@ class DenyByName(DenyPermission):
             ValueError: ``reason`` is empty or whitespace only.
         """
         self.patterns = _patterns(patterns, "DenyByName")
+        """The tool names or ``fnmatch`` globs, as a tuple."""
         if reason is not None and (not isinstance(reason, str) or not reason.strip()):
             problem = (
                 f"DenyByName: reason= takes a string, what the model is told (got: {reason!r})"
@@ -299,8 +300,10 @@ class DenyByName(DenyPermission):
                 )
             )
         self.reason = reason
+        """What the model is told, or ``None`` for ``"{call.name} is not allowed."``."""
 
     def check(self, state: State, call: ToolCall, tool: Tool) -> Denied | None:
+        """Refuses a call whose name matches one of ``patterns``, with ``reason``. Has no opinion otherwise."""
         if any(fnmatch.fnmatchcase(call.name, pattern) for pattern in self.patterns):
             return Denied(self.reason if self.reason is not None else f"{call.name} is not allowed.")
         return None
@@ -329,8 +332,10 @@ class AllowByName(AllowPermission):
             TypeError: ``patterns`` is not a list of strings.
         """
         self.patterns = _patterns(patterns, "AllowByName")
+        """The tool names or ``fnmatch`` globs, as a tuple."""
 
     def check(self, state: State, call: ToolCall, tool: Tool) -> Allowed | None:
+        """Allows a call whose name matches one of ``patterns``. Has no opinion otherwise."""
         if any(fnmatch.fnmatchcase(call.name, pattern) for pattern in self.patterns):
             return Allowed()
         return None
@@ -362,8 +367,11 @@ class AllowByReadOnly(AllowPermission):
                 )
             )
         self.trust_mcp = trust_mcp
+        """Whether MCP servers' ``readOnlyHint`` is believed."""
 
     def check(self, state: State, call: ToolCall, tool: Tool) -> Allowed | None:
+        """Allows a call when ``tool.hints_for(call.args).read_only`` is true. Has no opinion otherwise, and
+        always for an ``MCPTool`` unless ``trust_mcp`` is true."""
         if isinstance(tool, MCPTool) and not self.trust_mcp:
             return None
         return Allowed() if tool.hints_for(call.args).read_only else None
@@ -376,6 +384,7 @@ class AllowByDefault(AllowPermission):
     """Allows every call. Put it last in the list to allow everything no permission before it denied."""
 
     def check(self, state: State, call: ToolCall, tool: Tool) -> Allowed:
+        """Allows the call."""
         return Allowed()
 
 
@@ -418,6 +427,7 @@ class DecideByHuman(DecidePermission):
                 )
             )
         self.human = human
+        """The Human asked instead of the Agent's ``human``, or ``None`` for the Agent's."""
 
     def question(self, call: ToolCall, tool: Tool) -> str:
         """The question to ask about ``call``. Override it to ask differently.
@@ -428,6 +438,8 @@ class DecideByHuman(DecidePermission):
         return f"Run {format_call(call)}?"
 
     def check(self, state: State, call: ToolCall, tool: Tool) -> Allowed | Denied | None:
+        """Asks the person ``question(call, tool)`` and allows the call on ``yes``. Any other answer denies it
+        with ``stop=True``. Raises ``ValueError`` if the State has no running Agent."""
         if type(self).acheck is not DecideByHuman.acheck and type(self).check is DecideByHuman.check:
             # A subclass that changed acheck (and not check) is async-only: check must not ask the human instead.
             return super().check(state, call, tool)
@@ -436,6 +448,7 @@ class DecideByHuman(DecidePermission):
         return self._verdict(answer)
 
     async def acheck(self, state: State, call: ToolCall, tool: Tool) -> Allowed | Denied | None:
+        """The async version of ``check``: asks the Human with ``aask`` (or ``ask`` on a worker thread)."""
         if type(self).check is not DecideByHuman.check:
             # A subclass that changed check (and not acheck) decides the same way in arun.
             return await super().acheck(state, call, tool)

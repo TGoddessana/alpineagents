@@ -1,7 +1,7 @@
 # How a run works
 
-This page follows one call to `agent.run` from start to end. The next pages explain each part in detail. Terms are
-defined in the [Glossary](glossary.md).
+This page follows one call to `agent.run` from start to end. The next pages explain each part. Terms are defined in the
+[Glossary](glossary.md). If you have not written an agent yet, start with [Your first agent](../learn/first-agent.md).
 
 ## Three parts
 
@@ -15,71 +15,43 @@ The Agent does the work. The State records it. The loop decides the order.
 
 ## One run, step by step
 
-`agent` is the Agent from the [quick start](../index.md#quick-start).
-
 ```python
-answer = agent.run("Find the bug in main.py")
+from pathlib import Path
+
+from alpineagents import Agent, Message, State, tool
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a text file"""
+    return Path(path).read_text()
+
+
+agent = Agent(model="claude-sonnet-5", tools=[read_file])
+state = State(messages=[Message.user("Find the bug in main.py")])
+answer = agent.run(state)
+print(state)
 ```
 
-1. `run` creates `State(messages=[Message.user("Find the bug in main.py")])`, and records that a run started.
+1. `run` records that a run started. Given a string instead of a State, it first creates
+   `State(messages=[Message.user(text)])`.
 2. `run` calls the Agent's loop with the Agent and the State.
-3. Before each turn, the loop checks whether to stop.
+3. Before each turn, the loop checks whether to stop. See [Loops and stop rules](loops.md#when-a-loop-stops).
 4. Each turn runs the loop body. The default body does three steps:
-    1. `compact_if_full(agent, state)`: if the messages are more than 60% of the model's context window, it replaces
+    1. `compact_if_full(agent, state)`: if the messages fill more than 60% of the model's context window, it replaces
        them with the first message and a summary.
-    2. `agent.think(state)`: sends the messages to the model and records the request and the reply in the State.
+    2. `agent.think(state)`: sends the messages to the model, and records the request and the reply.
     3. `agent.use_tools(state)`: if the reply asked for tool calls, runs them and records the results. With
        `Agent(permissions=[...])`, it first asks the permissions about every call of the turn, before any tool runs.
-       A refused call does not run, and the model gets the reason as its result. See
-       [Ask before a tool runs](../guides/approval.md).
+       A refused call does not run, and the model gets the reason as its result.
 5. When the loop stops, `run` returns `state.answer`.
 
-## The default loop
+The source of the default loop is in [Write your own loop](../learn/loop.md#the-default-loop). A loop you write has
+the same shape.
 
-An Agent created without `loop=` uses `default_loop`. This is its full source:
+## What the run recorded
 
-```python
-def is_answered(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
-
-
-@loop(until=is_answered, limit=50)
-def default_loop(agent: Agent, state: State):
-    compact_if_full(agent, state)
-    agent.think(state)
-    if state.pending_calls:
-        agent.use_tools(state)
-```
-
-- The function body is one turn.
-- `until=is_answered`: stop when the last message is a reply without tool calls and no call is pending.
-- `limit=50`: stop after 50 turns at most.
-- `is_answered` is a plain function inside the library, not part of the API. A `State` has no such method: a stop condition is a
-  function of the State that you write. [Loops](loops.md#until) shows the same function as `waiting_for_user`.
-
-A loop you write has the same shape. [Loops](loops.md) explains how.
-
-## Keep the State
-
-`run` also accepts a State. Create it yourself to inspect the run afterwards:
-
-```python
-from alpineagents import Message, State
-
-state = State(messages=[Message.user("Find the bug in main.py")])
-agent.run(state)
-
-state.answer   # the answer
-state.stopped  # why the loop stopped, for example StoppedByUntil("is_answered")
-state.turn     # how many turns it took
-state.usage    # tokens, requests and cost
-print(state)   # one line per history entry
-```
-
-`print(state)` shows what happened, in order:
+`print(state)` shows one line per history entry, in order:
 
 ```text
 [turn 0] context_change import: 1 messages
@@ -94,6 +66,14 @@ done: stopped by is_answered (2 turns)
 ```
 
 That list is `state.history`, and it is all a State is: `state.messages`, `state.turn`, `state.answer` and the rest are
-computed from it. See [State](state.md).
-To keep a State after the process ends, and continue it later, give the Agent a store. See
-[Save and resume](../guides/resume.md).
+computed from it. See [State and history](state.md).
+
+## When a run ends
+
+| How it ends | `run` | The State afterwards |
+| --- | --- | --- |
+| A stop rule fires, or `finish` is called | Returns `state.answer` | `state.stopped` says why |
+| An exception leaves the loop | Raises it | `state.stopped` is `None`; pending calls are closed. See [Errors and interruptions](errors.md) |
+| Ctrl+C | Raises `KeyboardInterrupt` | Pending calls are closed with `(interrupted by user)`. See [Errors and interruptions](errors.md#ctrlc-and-cancellation) |
+
+With `Agent(store=...)`, each State is saved as it runs. See [Save and resume](../learn/save-resume.md).

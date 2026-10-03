@@ -1,4 +1,4 @@
-# Async
+# Use async
 
 Use the async versions in async code, such as a web server. They have the same behavior and an `a` prefix.
 
@@ -41,9 +41,9 @@ State methods have no async versions. They do not wait on anything.
   tools are cancelled.
 - `Anthropic` and `OpenAICompatible` use the providers' async clients, so cancelling also closes the HTTP request.
 - A store with only async methods works only with `arun`. A sync store such as `FileStore` works with both: under
-  `arun`, its writes run on a worker thread. See [Save and resume](resume.md#your-own-store).
+  `arun`, its writes run on a worker thread. See [Survive crashes and restarts](production.md#write-your-own-store).
 
 ## Related
 
 - [Errors and interruptions](../concepts/errors.md#ctrlc-and-cancellation)
-- [Progress and questions](progress.md#write-a-human): a Human with `async def aask`
+- [Show progress and ask the person](progress.md#write-a-human): a Human with `async def aask`

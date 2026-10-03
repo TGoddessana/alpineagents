@@ -1,4 +1,4 @@
-from alpineagents import Message, Model, Reply, Usage
+from alpineagents import Agent, Message, Model, Reply, Usage
 from alpineagents.types import TextBlock
 
 
@@ -22,3 +22,7 @@ class Echo(Model):
             context_tokens=self.count_tokens(request),
             model=self.name,
         )
+
+
+agent = Agent(model=Echo())
+print(agent.run("hello"))

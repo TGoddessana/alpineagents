@@ -89,14 +89,7 @@ done: error JSONDecodeError: Expecting value: line 1 column 1 (char 0) (1 turn)
 State keeps what happened:
 
 ```python
-from alpineagents import Message, State
-
-state = State(messages=[Message.user("Get the settings from the legacy API")])
-try:
-    agent.run(state)
-except Exception as error:
-    print(error.__notes__)  # ['exception raised in tool get_json(path="/legacy")']
-    print(state)
+--8<-- "docs_src/tool_failure_abort.py"
 ```
 
 ```text
@@ -124,7 +117,17 @@ When an `aborted` line shows up, decide whether it is a bug or a failure the mod
 For the JSON case, the tool knows what went wrong and can say so:
 
 ```python
-from alpineagents import ToolError
+import httpx
+
+from alpineagents import Agent, ToolError, tool
+
+client = httpx.Client(base_url="https://api.example.com")
+
+
+def http_errors(error: httpx.HTTPError) -> str:
+    if isinstance(error, httpx.TimeoutException):
+        return f"Timed out: {error.request.url}. Try again later"
+    raise error
 
 
 @tool(exception_handler=http_errors)
@@ -140,6 +143,9 @@ def get_json(path: str) -> dict:
     except ValueError as error:
         content_type = response.headers.get("content-type")
         raise ToolError(f"{path} did not return JSON (content-type: {content_type})") from error
+
+
+agent = Agent(model="claude-sonnet-5", tools=[get_json])
 ```
 
 ```text
@@ -152,6 +158,6 @@ reach the model instead of you. Keep the type hint to the exceptions you expect.
 
 ## Related
 
-- [Tools: when a call goes wrong](../concepts/tools.md#when-a-call-goes-wrong)
+- [Tool calls: when a call goes wrong](../concepts/tools.md#when-a-call-goes-wrong)
 - [Errors and interruptions](../concepts/errors.md)
 - [Progress and questions](progress.md): `outcome.kind == "error"` in your own Reporter

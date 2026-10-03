@@ -1,4 +1,4 @@
-# Models
+# Use other models
 
 ## Model strings
 
@@ -16,8 +16,8 @@ Any other string raises `ValueError` with the strings you can use instead.
 
 ## Options with a model string
 
-`resolve_model` turns a model string into a Model, the same way `Agent(model=...)` does. Keyword options go to
-the Model it picks:
+`resolve_model` turns a model string into a Model, the same way `Agent(model=...)` does. Keyword options go to the
+Model it picks:
 
 ```python
 from alpineagents import Agent
@@ -27,23 +27,20 @@ model = resolve_model("anthropic/claude-sonnet-5", max_tokens=16_000, thinking=T
 # the same as Anthropic("claude-sonnet-5", max_tokens=16_000, thinking=True)
 
 agent = Agent(model=model)
+print(agent.run("Say hello"))
 ```
 
-- `"ollama/<name>"` uses `http://localhost:11434/v1` unless you pass `base_url=`, for an Ollama server on
-  another machine.
-- An option the picked Model does not take raises `TypeError` that lists the options it takes. For example,
-  `thinking=` with an `"openai/..."` string.
-- Passing a Model object together with options raises `TypeError`. Set the options when you create the Model.
+- `"ollama/<name>"` uses `http://localhost:11434/v1` unless you pass `base_url=`, for an Ollama server on another
+  machine.
+- An option the picked Model does not take raises `TypeError` that lists the options it takes.
 
-### `base_url` sends the whole string to an OpenAI-compatible server
-
-With `base_url=`, the string is not split into a provider and a name. The model is always `OpenAICompatible`,
-and the whole string is the model name the server receives. Routers such as OpenRouter name their models this
-way:
+With `base_url=`, the string is not split into a provider and a name. The model is always `OpenAICompatible`, and
+the whole string is the model name the server receives. Routers such as OpenRouter name their models this way:
 
 ```python
 import os
 
+from alpineagents import Agent
 from alpineagents.models import resolve_model
 
 model = resolve_model(
@@ -52,25 +49,17 @@ model = resolve_model(
     api_key=os.environ["OPENROUTER_API_KEY"],
 )
 # the same as OpenAICompatible("anthropic/claude-sonnet-5", base_url=..., api_key=...)
+
+agent = Agent(model=model)
+print(agent.run("Say hello"))
 ```
 
-`"ollama/<name>"` is the one exception: the `ollama/` prefix is still removed.
-
-A proxy that speaks the Anthropic API rather than the OpenAI one needs `Anthropic` itself. Create it directly:
+A proxy that speaks the Anthropic API rather than the OpenAI one needs `Anthropic` itself:
 `Anthropic("claude-sonnet-5", base_url="https://my-proxy/anthropic")`.
-
-### When to create the Model directly
-
-A model string with options is enough for the usual cases. Create `Anthropic(...)` or `OpenAICompatible(...)`
-yourself when:
-
-- the server speaks the Anthropic API at another URL (see above),
-- you want the Model class to be obvious to the reader, or type checkers to check its settings,
-- you [subclass or wrap a Model](#write-a-model).
 
 ## Model settings
 
-Pass a Model object to change its settings:
+Create the Model yourself to change its settings:
 
 ```python
 --8<-- "docs_src/model_settings.py"
@@ -89,9 +78,13 @@ See the [Models API](../api/models.md) for every setting.
 `state.usage.cost` is `None` unless the Model has prices. Prices are dollars per million tokens:
 
 ```python
-from alpineagents import Anthropic, Price
+from alpineagents import Agent, Anthropic, Message, Price, State
 
 model = Anthropic("claude-sonnet-5", price=Price(input=3, output=15, cache_read=0.3))
+agent = Agent(model=model)
+state = State(messages=[Message.user("Say hello")])
+agent.run(state)
+print(state.usage.cost)
 ```
 
 Each `Reply` records the model that answered in `reply.model`, as the provider reported it. It can differ from the
@@ -110,15 +103,14 @@ with every other setting the same:
 
 - Both runs add to `state`. The second model sees the whole conversation, including the replies of the first.
 - `state.history` records the model of every `think` request in a `model_request` entry, so you can see which model
-  wrote each reply. `ask` and `compact` requests are not recorded as `model_request` entries (so the model that wrote
-  a compaction summary is not in history), but their tokens count in `state.usage`. Its `cost` is `None` when any of them has no price.
-- Thinking blocks and other provider-specific blocks are sent back only to the provider that wrote them. A model of
-  another provider does not see them.
+  wrote each reply. Tokens of `ask` and `compact` requests count in `state.usage`, but they write no `model_request`
+  entry. `usage.cost` is `None` when any model used has no price.
+- Thinking blocks and other provider-specific blocks are sent back only to the provider that wrote them.
 - Providers cache a long context per model, so the first request after a switch pays for the whole context again.
 - The windows differ. Check `strong.context_used(state)` before you switch to a model with a smaller window, and
   compact first if needed: `strong.compact(state)`.
-- Switching is not a change the Agent warns about. `ResumeWarning` is only for the first run after `store.load`, when
-  the Agent differs from the one that saved the State. See [Save and resume](resume.md#what-changes-after-loading).
+- Switching never warns. `ResumeWarning` is only for the first run after `store.load`
+  ([State and history](../concepts/state.md#a-state-saved-by-another-agent)).
 
 ## Write a Model
 
@@ -131,10 +123,10 @@ Subclass `Model` to add a provider. Implement `respond` and `context_window`:
 Rules for a Model:
 
 - Return a `Reply`. Do not change the State. The Agent records the reply.
-- User messages can hold `Image` blocks. Convert them to the provider's image format, as `Anthropic` and
-  `OpenAICompatible` do, or raise a clear error if the provider cannot read images.
-- Put the model that actually answered in `Reply.model`: the name the provider reported, or the requested name
-  if it did not say. A Model that falls back to another model puts the fallback's name there.
+- User messages can hold `Image` blocks. Convert them to the provider's image format, or raise a clear error if the
+  provider cannot read images.
+- Put the model that actually answered in `Reply.model`: the name the provider reported, or the requested name if it
+  did not say.
 - Use no network and no credentials in `__init__`. Create the SDK client at the first request.
 - Call `on_text` with each piece of text as it streams in, if `on_text` is not `None`.
 - Wrap provider exceptions that finally fail as `RateLimitError`, `AuthError`, `ContextTooLongError` or
@@ -145,4 +137,5 @@ Rules for a Model:
 
 ## Related
 
-- [Testing](testing.md): `FakeModel` replaces the model in tests
+- [Test your agent](../learn/testing.md): `FakeModel` replaces the model in tests
+- [Handle unreliable models](unreliable-models.md): wrap a Model to retry

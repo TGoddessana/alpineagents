@@ -1,6 +1,6 @@
 # Store
 
-Guide: [Save and resume](../guides/resume.md).
+Learn: [Save and resume](../learn/save-resume.md). Guide: [Survive crashes and restarts](../guides/production.md).
 
 ::: alpineagents.Store
 

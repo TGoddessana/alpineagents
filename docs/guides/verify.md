@@ -12,16 +12,16 @@ When the model answers, your code checks the work. If the check fails, the model
 4. The notice comes after the answer, so `waiting_for_user` is false and the loop continues.
 5. If the tests pass, nothing is added. `waiting_for_user` is true and the loop stops before the next turn.
 
-`waiting_for_user` is the check from [Stop conditions](stop-conditions.md#stop-on-a-check).
-
-`limit=40` still caps the run if the model cannot fix the tests.
+`limit=40` still caps the run if the model cannot fix the tests. `waiting_for_user` is explained in
+[Write your own loop](../learn/loop.md).
 
 ## Why a notice
 
 `Message.notice(text)` makes a message from your code, marked with `[notice] ` so the model can tell it apart from the
-person. Use `Message.user(text)` for messages from the person. Both go in with `state.add_message(...)`.
+person. Use `Message.user(text)` for messages from the person. Both go in with `state.add_message(...)`
+([Keep the conversation](../learn/conversation.md#messages-from-your-code)).
 
 ## Related
 
-- [State: add a message](../concepts/state.md#add-a-message)
-- [Stop conditions](stop-conditions.md)
+- [Plan before acting](plan-first.md): the same notice technique
+- [Stop a run](stop-conditions.md)

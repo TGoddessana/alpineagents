@@ -92,6 +92,14 @@ class Loop:
     Exceptions from the body or the ``until`` functions propagate as is.
     An async loop (``async def`` body) returns a coroutine that does the same; its ``until`` functions stay
     plain functions.
+
+    The body must return ``None``: a returned value raises ``TypeError`` (set the answer with
+    ``state.finish(answer)``), and so does an awaitable returned by a sync loop. The checks run before each turn,
+    so an ``until`` function sees the State after the previous turn. A loop written without ``@loop`` makes none
+    of these checks: it tests ``state.stopped`` itself, and after a ``@loop`` called inside it stopped on its own
+    ``until`` or ``limit`` (which leaves ``state.stopped`` set), it tests only for ``StoppedByFinish`` and
+    ``StoppedByPermission`` or is itself written with ``@loop``. An ``until`` function can read
+    ``state.snapshot()`` first so that all the values it reads belong to one moment.
     """
 
     # __name__, __doc__ and __wrapped__ follow the body (functools.update_wrapper). Even when the body is another
@@ -349,6 +357,11 @@ def default_loop(agent: Agent, state: State):
     Each turn compacts the messages if the context is over 60% full, asks the model, and runs the tools it asked
     for. Stops when the model answers without tool calls (``stopped by is_answered``) or after 50 turns. Copy it as
     a starting point for your own loop.
+
+    Its stop check is a private function named ``is_answered``, which is not part of the API: it is the same check
+    as the ``waiting_for_user`` function in the examples, true when nothing waits for a tool result and the last
+    message is the model's reply without tool calls. That name is what ``StoppedByUntil("is_answered")``,
+    ``str(state.stopped)`` and the terminal's last line (``done: stopped by is_answered``) show.
     """
     compact_if_full(agent, state)
     agent.think(state)

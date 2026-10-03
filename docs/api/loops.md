@@ -1,6 +1,6 @@
 # Loops and blocks
 
-Concepts: [Loops](../concepts/loops.md).
+Learn: [Write your own loop](../learn/loop.md). Concepts: [Loops and stop rules](../concepts/loops.md). Guide: [Stop a run](../guides/stop-conditions.md).
 
 ::: alpineagents.loop.loop
 

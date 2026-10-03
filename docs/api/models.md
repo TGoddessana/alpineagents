@@ -1,6 +1,6 @@
 # Models
 
-Guide: [Models](../guides/models.md).
+Guide: [Use other models](../guides/models.md).
 
 ::: alpineagents.Model
 

@@ -1,6 +1,19 @@
 from pathlib import Path
 
+from alpineagents import Agent, tool
 from alpineagents.permissions import AllowByReadOnly, DecideByHuman, Denied, DenyPermission
+
+
+@tool(read_only=True, open_world=False)
+def read_file(path: str) -> str:
+    """Read a file"""
+    return Path(path).read_text()
+
+
+@tool(open_world=False)
+def write_file(path: str, content: str) -> None:
+    """Create a file, or replace its content"""
+    Path(path).write_text(content)
 
 
 class DenyOutsideFolder(DenyPermission):
@@ -21,4 +34,9 @@ class DenyOutsideFolder(DenyPermission):
         return f"DenyOutsideFolder({str(self.folder)!r})"
 
 
-agent = agent.copy(permissions=[DenyOutsideFolder("."), AllowByReadOnly(), DecideByHuman()])
+agent = Agent(
+    model="claude-sonnet-5",
+    tools=[read_file, write_file],
+    permissions=[DenyOutsideFolder("."), AllowByReadOnly(), DecideByHuman()],
+)
+print(agent.run("Read notes.md and write a summary next to it"))

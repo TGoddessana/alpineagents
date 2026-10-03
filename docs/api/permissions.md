@@ -1,6 +1,6 @@
 # Permissions
 
-Guide: [Ask before a tool runs](../guides/approval.md).
+Learn: [Ask before a tool runs](../learn/approval.md). Guide: [Write permission rules](../guides/permissions.md).
 
 Import these from `alpineagents.permissions`. `Agent(permissions=[...])` takes a list of them. Before any tool of a
 turn runs, `use_tools` asks them about every call: first every `DenyPermission` in list order, then the

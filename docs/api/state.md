@@ -1,6 +1,6 @@
 # State
 
-Concepts: [State](../concepts/state.md).
+Learn: [Keep the conversation](../learn/conversation.md). Concepts: [State and history](../concepts/state.md). Guide: [Go back or try another path](../guides/undo-and-fork.md).
 
 ::: alpineagents.State
     options:

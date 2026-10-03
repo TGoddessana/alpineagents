@@ -26,11 +26,24 @@ __all__ = [
 
 
 class AlpineAgentsError(Exception):
-    """Common parent of the errors alpineagents raises itself."""
+    """Common parent of the errors alpineagents raises itself: provider failures (``ProviderError`` and its
+    subclasses), ``OutputError``, ``NoHumanError`` and ``MCPConnectionError``.
+
+    A wrong use of the library (a bad argument, a mistake in a ``@tool`` function or a ``@loop``) raises a plain
+    ``TypeError`` or ``ValueError`` as early as possible instead: when the Agent is created, ``@tool`` or ``@loop``
+    is applied, or a method is called. Its message says what is wrong, then ``Fix:`` and ``Example:`` lines.
+
+    Nothing is swallowed: exceptions from tools, from the body of a loop and from ``until`` functions propagate as
+    they are, unless you turn them into results with ``ToolError`` or ``@tool(exception_handler=...)``.
+    """
 
 
 class ProviderError(AlpineAgentsError):
-    """The model API failed even after SDK retries. The original SDK exception is in ``__cause__``."""
+    """The model API failed even after SDK retries. The original SDK exception is in ``__cause__``.
+
+    ``RateLimitError``, ``AuthError`` and ``ContextTooLongError`` are subclasses. The SDK retries only a request
+    whose reply has not started: a stream that drops halfway raises ``ProviderError`` and is not retried.
+    """
 
 
 class RateLimitError(ProviderError):
@@ -47,7 +60,8 @@ class AuthError(ProviderError):
 
 
 class OutputError(AlpineAgentsError):
-    """``agent.ask(returns=...)`` did not get a well-formed answer, even after asking again.
+    """``agent.ask(returns=...)`` did not get a well-formed answer, even after asking again, or ``agent.compact``
+    got an empty summary.
 
     The last validation error is in ``__cause__``.
     """
@@ -71,7 +85,9 @@ class ResumeWarning(UserWarning):
     changed between saving and resuming, the run still works but may behave differently: the model gets an error
     result when it calls a removed tool, and provider-specific blocks are not sent to a model of another provider.
     This may be what you want after a deploy, so it is a warning and not an error. Each loaded State is checked
-    once, at its first ``run`` or ``arun``. Python's default warnings filter shows the same message from the same
+    once, at its first ``run`` or ``arun``. The system prompt is reported only as changed (history keeps its hash,
+    not its text). Switching the model with ``agent.copy(model=...)`` between runs of a State that did not come from
+    a store never warns. Python's default warnings filter shows the same message from the same
     line only once per process; a server that resumes many States should use ``catch_warnings`` or the
     ``"always"`` filter to see each one.
 

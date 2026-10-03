@@ -10,6 +10,7 @@ import builtins
 import logging
 import re
 import signal
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -31,6 +32,7 @@ from alpineagents import (
     StateSnapshot,
     StoppedByPermission,
     StoppedByUntil,
+    ToolInputError,
     Usage,
     tool,
 )
@@ -108,12 +110,9 @@ def test_quickstart(models, monkeypatch, capsys):
     assert "A Python agent framework" in last_request_text(fake)
 
 
-def test_no_api_key(models, monkeypatch, capsys):
+def test_no_api_key(monkeypatch, capsys):
     monkeypatch.chdir(ROOT)
-    models.append(FakeModel(["unused"]))
-    ns = run()
-    exec(compile(_without_last_line("quickstart"), "quickstart", "exec"), ns)
-    run("no_api_key", ns=ns)
+    run("no_api_key")
     assert "README.md describes a Python agent framework." in capsys.readouterr().out
 
 
@@ -137,10 +136,6 @@ def test_readme_code_matches_docs_src():
         assert (DOCS_SRC / f"{name}.py").read_text().strip() in readme, name
 
 
-def _without_last_line(name: str) -> str:
-    return "".join((DOCS_SRC / f"{name}.py").read_text().splitlines(keepends=True)[:-1])
-
-
 # ---------------------------------------------------------------- guides
 
 
@@ -156,8 +151,10 @@ def test_stop_conditions_guide_lists_every_way_a_loop_stops():
         assert f"`{way.__name__}(" in guide, way.__name__
 
 
-def test_stop_conditions():
+def test_stop_conditions(models, capsys):
+    models.append(FakeModel([tool_call("read_file", path="README.md"), "Done"]))
     ns = run("stop_conditions")
+    assert "stopped by waiting_for_user" in capsys.readouterr().out.splitlines()
     big = Reply(
         message=Message("assistant", (tool_call("unknown"),)),
         usage=Usage(output_tokens=30_000, requests=1),
@@ -167,21 +164,16 @@ def test_stop_conditions():
     assert state.stopped == StoppedByUntil("spent_too_much")
 
 
+def test_stop_conditions_reports_the_limit(models, capsys):
+    models.append(FakeModel([tool_call("read_file", path="README.md")] * 40))
+    run("stop_conditions")
+    assert "Stopped after 30 turns. The task may be unfinished." in capsys.readouterr().out
+
+
 def test_submit_tool(models, capsys):
     models.append(FakeModel([tool_call("submit", summary="Renamed", files_changed=["utils.py"])]))
     run("submit_tool")
     assert "'files_changed': ['utils.py']" in capsys.readouterr().out
-
-
-def test_approval_no(models, answers, monkeypatch, tmp_path, capsys):
-    monkeypatch.chdir(tmp_path)
-    fake = FakeModel([tool_call("write_file", path="README.md", content="# Hi"), "I did not write it"])
-    models.append(fake)
-    answers.append("no")
-    run("approval")
-    assert not Path("README.md").exists()
-    assert len(fake.requests) == 1  # the run stopped instead of asking the model again
-    assert capsys.readouterr().out.splitlines()[-1] == "None"
 
 
 def test_approval_stop(models, answers, monkeypatch, tmp_path, capsys):
@@ -191,11 +183,9 @@ def test_approval_stop(models, answers, monkeypatch, tmp_path, capsys):
         tool_call("write_file", path="README.txt", content="Hi"),
         "Wrote README.txt",
     ])
-    models.append(FakeModel(["Nothing to write"]))  # the run at the end of approval.py
-    ns = run("approval")
-    ns["agent"] = ns["agent"].copy(model=fake)
+    models.append(fake)
     answers.extend(["no", "Use README.txt instead", "yes"])
-    run("approval_stop", ns=ns)
+    run("approval_stop")
     assert Path("README.txt").read_text() == "Hi" and not Path("README.md").exists()
     assert "The user declined this call. Wait for their next message." in last_request_text(fake)
     assert "Use README.txt instead" in last_request_text(fake)
@@ -203,11 +193,22 @@ def test_approval_stop(models, answers, monkeypatch, tmp_path, capsys):
     assert answers == []
 
 
+def test_approval_no_stops_instead_of_asking_the_model_again(models, answers, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeModel([tool_call("write_file", path="README.md", content="# Hi"), "Not written"])
+    models.append(fake)
+    answers.extend(["no", EOFError()])
+    with pytest.raises(EOFError):  # the example asks what to do instead
+        run("approval_stop")
+    assert not Path("README.md").exists()
+    assert len(fake.requests) == 1
+
+
 def test_approval_yes(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     models.append(FakeModel([tool_call("write_file", path="README.md", content="# Hi"), "Done"]))
     answers.append("yes")
-    run("approval")
+    run("approval_stop")
     assert Path("README.md").read_text() == "# Hi"
 
 
@@ -216,27 +217,27 @@ def test_approval_read_only_runs_without_asking(models, answers, monkeypatch, tm
     Path("notes.md").write_text("hello")
     fake = FakeModel([tool_call("read_file", path="notes.md"), tool_call("made_up"), "It says hello"])
     models.append(fake)
-    run("approval")  # no answers queued: asking would fail
+    run("approval_stop")  # no answers queued: asking would fail
     assert "hello" in last_request_text(fake)
 
 
 def test_approval_always(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    models.append(FakeModel([tool_call("write_file", path="a.md", content="a"), "Done"]))
-    answers.append("yes")
-    fake = FakeModel([
-        tool_call("write_file", path="b.md", content="b"),
-        tool_call("write_file", path="c.md", content="c"),
+    models.append(FakeModel([
+        tool_call("write_file", path="README.md", content="a"),
+        tool_call("write_file", path="CONTRIBUTING.md", content="b"),
         "Done",
-    ])
-    models.append(fake)  # for the agent.copy(...) in approval_always.py
-    ns = run("approval", "approval_always")
+    ]))
     answers.append("always")
-    state = user("Write two files")
-    ns["agent"].run(state)
-    assert Path("b.md").exists() and Path("c.md").exists()
+    ns = run("approval_always")  # asked once: "always" covers the second call
+    assert Path("README.md").exists() and Path("CONTRIBUTING.md").exists()
     assert answers == []
-    assert state.root.extra_data["always"] == ["write_file"]
+
+    answers.append("always")
+    fake = FakeModel([tool_call("write_file", path="x.md", content="x"), "Done"])
+    state = user("Write x")
+    ns["agent"].copy(model=fake, reporter=None).run(state)
+    assert state.extra_data["always"] == ["write_file"]
 
 
 def test_approval_hints(models, answers, monkeypatch, tmp_path):
@@ -263,43 +264,34 @@ def test_approval_hints(models, answers, monkeypatch, tmp_path):
     assert bash.hints_for({"command": 5}).destructive
 
 
-def test_tool_hints():
-    bash = run("tool_hints")["bash"]
-    assert bash.hints_for({"command": "ls"}).read_only
-    assert not bash.hints_for({"command": "rm -rf build"}).read_only
-    assert not bash.read_only
-
 
 def test_approval_deny(models, answers, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     Path("notes.md").write_text("hello")
-    models.append(FakeModel(["Nothing to write"]))  # the run at the end of approval.py
     fake = FakeModel([
         tool_call("read_file", path="../secret.txt"),
         tool_call("read_file", path="notes.md"),
         tool_call("write_file", path="/tmp/out.md", content="x"),
         "It says hello",
     ])
-    models.append(fake)  # for the agent.copy(...) in approval_deny.py
-    ns = run("approval", "approval_deny")
-    state = user("Read the notes")
-    ns["agent"].run(state)  # no answers queued: asking would fail
-    denied = [h for h in state.history if h.kind == "tool_result" and h.outcome == "denied"]
-    assert [h.call.args["path"] for h in denied] == ["../secret.txt", "/tmp/out.md"]
-    assert "is outside" in denied[0].content and "Use a path inside it." in denied[0].content
-    assert "hello" in last_request_text(fake)
+    models.append(fake)
+    ns = run("approval_deny")  # no answers queued: asking would fail
+    text = last_request_text(fake)
+    assert "is outside" in text and "Use a path inside it." in text and "hello" in text
     assert repr(ns["agent"].permissions[0]) == f"DenyOutsideFolder({str(tmp_path.resolve())!r})"
 
 
-def test_verify():
-    ns = run("verify")
-    results = iter(["1 failed: test_add", None])
-    ns["failing_tests"] = lambda: next(results)
-    state = user("Fix the tests")
-    Agent(model=FakeModel(["Done", "Fixed"]), loop=ns["fix_until_green"], reporter=None).run(state)
-    assert state.answer == "Fixed"
-    assert state.turn == 2
-    assert any("The tests still fail" in m.text for m in state.messages)
+def test_verify(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    outputs = iter([types.SimpleNamespace(returncode=1, stdout="1 failed: test_add"),
+                    types.SimpleNamespace(returncode=0, stdout="")])
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: next(outputs))
+    fake = FakeModel([tool_call("write_file", path="calc.py", content="x = 1"), "Done", "Fixed"])
+    models.append(fake)
+    run("verify")
+    assert capsys.readouterr().out.splitlines()[-1] == "Fixed"
+    assert fake.remaining == 0
+    assert "The tests still fail" in last_request_text(fake) and "1 failed: test_add" in last_request_text(fake)
 
 
 def test_chat(models, answers, capsys):
@@ -330,10 +322,13 @@ def test_resume(models, answers, monkeypatch, tmp_path, capsys):
     assert "Welcome back." in capsys.readouterr().out
 
 
-def test_sigterm(monkeypatch):
+def test_sigterm(models, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    models.append(FakeModel(["Report"]))
     handlers = {}
     monkeypatch.setattr(signal, "signal", lambda signum, handler: handlers.__setitem__(signum, handler))
     run("sigterm")
+    assert Path(".agent-runs/nightly-report").is_dir()
     with pytest.raises(SystemExit) as info:
         handlers[signal.SIGTERM](signal.SIGTERM, None)
     assert info.value.code == 128 + signal.SIGTERM
@@ -347,78 +342,70 @@ def test_structured_output(models, monkeypatch, tmp_path, capsys):
     assert "True Small and tested" in capsys.readouterr().out
 
 
-def test_plan_first():
-    ns = run("plan_first", "tool_state")
+def test_plan_first(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
     seen = []
 
     def plan(request):
         seen.append(len(request.tools))
-        return "1. Save a note"
+        return "1. List the files"
 
-    fake = FakeModel([plan, tool_call("remember", key="a", value="1"), "Done"])
-    state = user("Save a note")
-    agent = Agent(model=fake, tools=[ns["remember"]], loop=ns["plan_then_act"], reporter=None)
-    agent.run(state)
+    fake = FakeModel([plan, tool_call("list_files"), "A docs folder"])
+    models.append(fake)
+    run("plan_first")
     assert seen == [0]
-    assert state.turn == 3
-    assert state.stopped == StoppedByUntil("waiting_for_user")
+    assert [len(r.tools) for r in fake.requests] == [0, 2, 2]
+    assert "[notice] Now carry out the plan." in last_request_text(fake)
+    assert capsys.readouterr().out.splitlines()[-1] == "A docs folder"
 
 
-def test_nested_plain_loop_goes_on_after_the_inner_loop_reaches_its_limit():
+def test_nested_plain_loop_goes_on_after_the_inner_loop_reaches_its_limit(models):
+    models.append(FakeModel(["Done"]))
     ns = run("nested_plain_loop")
-
-    @tool
-    def look() -> str:
-        """Look."""
-        return "seen"
-
-    replies = [tool_call("look")] * 6 + ["Done"]
+    replies = [tool_call("look", topic="cache")] * 6 + ["Done"]
     state = user("Research")
-    Agent(model=FakeModel(replies), tools=[look], loop=ns["three_rounds"], reporter=None).run(state)
+    Agent(model=FakeModel(replies), tools=[ns["look"]], loop=ns["three_rounds"], reporter=None).run(state)
     assert state.answer == "Done"
     assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
-def test_nested_plain_loop_stops_on_a_permission_stop(answers):
+def test_nested_plain_loop_stops_on_a_permission_stop(models, answers):
     from alpineagents.permissions import DecideByHuman
 
+    models.append(FakeModel(["Done"]))
     ns = run("nested_plain_loop")
-
-    @tool
-    def look() -> str:
-        """Look."""
-        return "seen"
-
     answers.append("no")
     state = user("Research")
-    fake = FakeModel([tool_call("look"), "Done"])
-    agent = Agent(model=fake, tools=[look], loop=ns["three_rounds"], permissions=[DecideByHuman()], reporter=None)
+    fake = FakeModel([tool_call("look", topic="cache"), "Done"])
+    agent = Agent(model=fake, tools=[ns["look"]], loop=ns["three_rounds"], permissions=[DecideByHuman()], reporter=None)
     agent.run(state)
     assert isinstance(state.stopped, StoppedByPermission)
     assert len(fake.requests) == 1
 
 
-def test_tool_state():
-    ns = run("tool_state")
+def test_tool_state(models, capsys):
     fake = FakeModel([tool_call("remember", key="a", value="1"), tool_call("recall", key="a"), "Done"])
+    models.append(fake)
+    ns = run("tool_state")
+    assert capsys.readouterr().out.splitlines()[-1] == "Done"
+    assert "Saved a" in last_request_text(fake)
     state = user("Remember a")
-    Agent(model=fake, tools=[ns["remember"], ns["recall"]], reporter=None).run(state)
+    fake = FakeModel([tool_call("remember", key="a", value="1"), tool_call("recall", key="a"), "Done"])
+    ns["agent"].copy(model=fake, reporter=None).run(state)
     results = [h.content for h in state.history if h.kind == "tool_result"]
     assert results == ["Saved a", "1"]
     assert state.extra_data["notes"] == {"a": "1"}
 
 
-def test_context_size():
+def test_context_size(models, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("big.log").write_text("line\n" * 2000)
+    replies = [tool_call("read_file", path="big.log"), "Summary of the work", "Done"]
+    models.append(FakeModel(replies, context_window=6000))
     ns = run("context_size")
-
-    @tool
-    def read_log() -> str:
-        """Read the log"""
-        return "line\n" * 2000
-
-    fake = FakeModel([tool_call("read_log"), "Summary of the work", "Done"], context_window=6000)
+    fake = FakeModel(replies, context_window=6000)
     state = user("Read the log")
-    Agent(model=fake, tools=[read_log], loop=ns["long_task"], reporter=None).run(state)
+    ns["agent"].copy(model=fake, reporter=None).run(state)
     assert state.answer == "Done"
     kinds = [h.content.kind for h in state.history if h.kind == "context_change"]
     assert kinds == ["import", "compact", "clear_tool_results"][:len(kinds)] and "compact" in kinds
@@ -430,24 +417,29 @@ def test_async_agent(models, capsys):
     assert "Python 3.13" in capsys.readouterr().out
 
 
-def test_reporter(caplog):
+def test_reporter(models, caplog):
+    models.append(FakeModel(["unused"]))
     ns = run("reporter")
     caplog.set_level(logging.INFO, logger="agent")
-    tools = run("tool_state")
-    fake = FakeModel([tool_call("recall", key="a"), "Done"])
-    Agent(model=fake, tools=[tools["recall"]], reporter=ns["LogReporter"]()).run("Recall a")
+
+    @tool
+    def recall(key: str) -> str:
+        """Read a note"""
+        return "1"
+
+    ns["agent"].copy(model=FakeModel([tool_call("recall", key="a"), "Done"]), tools=[recall]).run("Recall a")
     assert "turn 1: recall({'key': 'a'})" in caplog.text
     assert "stopped by is_answered after 2 turns" in caplog.text
 
 
 def test_human(models, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    models.append(FakeModel(["Nothing to write"]))
-    ns = run("approval", "human")
+    models.append(FakeModel([tool_call("write_file", path="x.md", content="x"), "unused"]))
+    ns = run("human")
+    assert not Path("x.md").exists()
     fake = FakeModel([tool_call("write_file", path="x.md", content="x"), "Skipped"])
-    agent = ns["agent"].copy(model=fake, human=ns["Unattended"](), reporter=None)
     state = user("Write x.md")
-    agent.run(state)
+    ns["agent"].copy(model=fake, reporter=None).run(state)
     assert not Path("x.md").exists()
     assert isinstance(state.stopped, StoppedByPermission)
     assert state.stopped.permission == "DecideByHuman()"
@@ -479,12 +471,12 @@ class _Drops(Model):
 
 
 def test_retry_stream():
-    ns = run("retry_stream", "retry_reporter")
+    ns = run("retry_stream")
     assert ns["agent"].model.name == "claude-sonnet-5"
     inner = _Drops(FakeModel(["The answer"]), [ProviderError("connection reset")])
     wrapped = ns["RetryDroppedStream"](inner)
     assert (wrapped.name, wrapped.provider, wrapped.context_window) == ("drops", "fake", 200_000)
-    reporter = ns["LiveText"]()
+    reporter = run("retry_reporter")["LiveText"]()
     state = user("Question")
     assert Agent(model=wrapped, reporter=reporter).run(state) == "The answer"
     assert inner.calls == 2
@@ -521,17 +513,13 @@ def test_retry_stream_raises(errors, after_text, calls):
     assert inner.calls == calls
 
 
-def test_nudge():
+def test_nudge(models):
+    models.append(FakeModel(["Still going", "Still going", "Done"]))
     ns = run("nudge")
-
-    @tool
-    def look() -> str:
-        """Look around"""
-        return "a file"
 
     fake = FakeModel(["I will look now", tool_call("look"), "Done", "Done", "Done"])
     state = user("Look")
-    Agent(model=fake, tools=[look], loop=ns["nudging"], reporter=None).run(state)
+    Agent(model=fake, tools=[ns["look"]], loop=ns["nudging"], reporter=None).run(state)
     assert state.answer == "Done"
     assert fake.remaining == 0
     notices = [h.content for h in state.history if h.kind == "notice"]
@@ -539,7 +527,8 @@ def test_nudge():
     assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
-def test_nudge_gives_up():
+def test_nudge_gives_up(models):
+    models.append(FakeModel(["Maybe"] * 3))
     ns = run("nudge")
     fake = FakeModel(["Maybe", "Maybe", "Maybe", "unused"])
     state = user("Look")
@@ -548,24 +537,20 @@ def test_nudge_gives_up():
     assert len([h for h in state.history if h.kind == "notice"]) == ns["NUDGES"]
 
 
-def test_repeating():
+def test_repeating(models):
+    models.append(FakeModel(["Done"]))
     ns = run("repeating")
-
-    @tool
-    def look(path: str) -> str:
-        """Look at a path"""
-        return "nothing"
-
     same = [tool_call("look", path="a") for _ in range(3)]
     fake = FakeModel([tool_call("look", path="b"), *same, "unused"])
     state = user("Look")
-    Agent(model=fake, tools=[look], loop=ns["watched"], reporter=None).run(state)
+    Agent(model=fake, tools=[ns["look"]], loop=ns["watched"], reporter=None).run(state)
     assert state.stopped == StoppedByUntil("repeating")
     assert fake.remaining == 1
 
 
-def test_custom_model():
+def test_custom_model(capsys):
     ns = run("custom_model")
+    assert capsys.readouterr().out.splitlines()[-1] == "hello"
     state = user("hello")
     assert Agent(model=ns["Echo"](), reporter=None).run(state) == "hello"
     assert [h.content.model for h in state.history if h.kind == "model_reply"] == ["echo"]
@@ -579,6 +564,14 @@ def test_testing_example(tmp_path, monkeypatch):
 def test_testing_tool_failure_example(tmp_path, monkeypatch):
     ns = run("test_tool_failure")
     ns["test_a_missing_file_is_an_error_result"](tmp_path, monkeypatch)
+
+
+def test_tool_failure_abort(models, capsys):
+    models.append(FakeModel([tool_call("get_json", path="/legacy")]))
+    ns = run("tool_failure_abort")
+    out = capsys.readouterr().out
+    assert "exception raised in tool get_json" in out
+    assert "tool_result get_json (error): (aborted: JSONDecodeError)" in out
 
 
 def test_tool_object(monkeypatch, tmp_path):
@@ -731,6 +724,114 @@ def test_tool_state_edits_are_atomic_across_threads():
         state.extra_data["n"] = 0  # type: ignore[index]
 
 
+def test_tool_subclass(models, monkeypatch, capsys):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"id": 7}
+
+    posted = []
+    fake_httpx = types.SimpleNamespace(post=lambda url, json: posted.append((url, json)) or Response())
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    fake = FakeModel([tool_call("create_ticket", title="Login down"), "Ticket 7 is open"])
+    models.append(fake)
+    ns = run("tool_subclass")
+    assert posted == [("https://example.com/hooks/tickets", {"title": "Login down"})]
+    assert "Ticket 7 is open" in capsys.readouterr().out
+    webhook = ns["agent"].tool_map["create_ticket"]
+    with pytest.raises(ToolInputError):
+        webhook.run({}, State())
+
+
+def test_tool_image(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("sales.png").write_bytes(PNG)
+    fake = FakeModel([tool_call("show_chart", path="sales.png"), "Sales go up"])
+    models.append(fake)
+    run("tool_image")
+    result = [m for m in fake.requests[1].messages if m.role == "user"][-1]
+    assert any(isinstance(block, Image) or any(isinstance(b, Image) for b in getattr(block, "content", ()))
+               for block in result.content)
+    assert "Sales go up" in capsys.readouterr().out
+
+
+def test_own_store(models, capsys):
+    models.append(FakeModel(["Hello"]))
+    ns = run("own_store")
+    store = ns["store"]
+    assert capsys.readouterr().out.splitlines()[-1] == "Hello"
+    assert [info.id for info in store.list()] == ["demo"]
+    saved = store.load("demo")
+    assert [m.text for m in saved.messages] == ["Say hello", "Hello"]
+    store.delete("demo")
+    assert store.list() == [] and store.read("demo") is None
+
+
+def test_own_store_refuses_a_second_create(models):
+    models.append(FakeModel(["Hello"]))
+    ns = run("own_store")
+    store = ns["store"]
+    with pytest.raises(ValueError, match="already exists"):
+        store.write("demo", [], store.records["demo"].info, create=True)
+    with pytest.raises(LookupError):
+        store.write("other", [], store.records["demo"].info)
+
+
+# ---------------------------------------------------------------- the Learn pages
+
+
+def test_learn_tools(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("README.md").write_text("# Title\nSecond line\n")
+    fake = FakeModel([tool_call("read_file", path="README.md", max_lines=1), "# Title"])
+    models.append(fake)
+    run("learn_tools")
+    out = capsys.readouterr().out
+    assert "ToolSpec(name='read_file', description='Read a text file'" in out
+    assert "'description': 'How many lines to return'" in out
+    assert out.splitlines()[-1] == "# Title"
+    assert "# Title" in last_request_text(fake) and "Second line" not in last_request_text(fake)
+
+
+def test_learn_loop(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("README.md").write_text("hello")
+    models.append(FakeModel([tool_call("read_file", path="README.md"), "It says hello"]))
+    ns = run("learn_loop")
+    assert "It says hello" in capsys.readouterr().out
+    assert ns["coding"].until == (ns["waiting_for_user"],)
+
+
+def test_learn_conversation(models, capsys):
+    models.append(FakeModel(["Flask, Django and FastAPI.", "Flask."]))
+    run("learn_conversation")
+    lines = capsys.readouterr().out.splitlines()
+    assert "stopped by is_answered" in lines
+    assert "[turn 1] model_reply: Flask, Django and FastAPI." in lines
+    assert lines[-1] == "Flask."
+
+
+def test_learn_conversation_notice_continues_the_run():
+    state = user("Hi")
+    fake = FakeModel(["Hello", "Fixing it"])
+    agent = Agent(model=fake, reporter=None)
+    agent.run(state)
+    state.add_message(Message.notice("The tests failed"))
+    assert agent.run(state) == "Fixing it"
+    assert fake.requests[1].messages[-1].text == "[notice] The tests failed"
+
+
+def test_testing_approval_flow_example(tmp_path, monkeypatch):
+    ns = run("test_approval_flow")
+    ns["test_no_stops_the_run_and_writes_nothing"](tmp_path, monkeypatch)
+
+
+def test_testing_resume_example(tmp_path):
+    ns = run("test_resume")
+    ns["test_a_saved_conversation_loads_as_it_was"](tmp_path)
+
+
 # ---------------------------------------------------------------- the pages themselves
 
 
@@ -740,8 +841,8 @@ def test_every_docs_src_file_is_used():
         assert f"docs_src/{path.name}" in pages or path.read_text().strip() in pages, path.name
 
 
-def test_default_loop_on_the_concepts_page_matches_the_source():
-    page = (ROOT / "docs" / "concepts" / "overview.md").read_text()
+def test_default_loop_on_the_learn_page_matches_the_source():
+    page = (ROOT / "docs" / "learn" / "loop.md").read_text()
     source = (ROOT / "src" / "alpineagents" / "loop.py").read_text()
     for line in ["@loop(until=is_answered, limit=50)", "def default_loop(agent: Agent, state: State):",
                  "    compact_if_full(agent, state)", "    agent.think(state)", "    if state.pending_calls:",
@@ -758,3 +859,18 @@ def test_internal_links_point_to_pages():
     for page in (ROOT / "docs").rglob("*.md"):
         for target in re.findall(r"\]\(([^)#:]+\.md)(?:#[^)]*)?\)", page.read_text()):
             assert (page.parent / target).resolve().exists(), f"{page.name} -> {target}"
+
+
+def test_every_page_in_the_nav_exists_and_every_page_is_in_the_nav():
+    nav = {(ROOT / "docs" / p).resolve() for p in re.findall(r":\s+([\w/-]+\.md)\s*$", (ROOT / "mkdocs.yml").read_text(), re.M)}
+    pages = {p.resolve() for p in (ROOT / "docs").rglob("*.md")}
+    assert nav == pages
+
+
+def test_inline_python_blocks_are_valid_python():
+    import ast
+
+    for page in DOC_FILES:
+        for block in re.findall(r"```python\n(.*?)```", page.read_text(), re.S):
+            if "--8<--" not in block:
+                ast.parse(block)

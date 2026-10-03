@@ -95,6 +95,11 @@ class Store(ABC):
     A State is saved in one store only. ``save`` compares stores with ``==``, so define ``__eq__`` if two
     objects can stand for the same storage.
 
+    A store that implements only the ``async`` methods works only with ``arun`` and the ``a*`` methods
+    (``asave``, ``aload``); a sync store also works with ``arun``, where its methods run on a worker thread.
+    Sync ``save`` called on the event loop thread of an async run raises ``TypeError``. The saved format has a
+    version: ``load`` refuses a State saved by another version (alpineagents 0.4 States do not load in 0.5).
+
     Raises:
         TypeError: When creating an instance of a subclass that implements neither ``write`` nor ``awrite``, or
             neither ``read`` nor ``aread``.
@@ -209,8 +214,8 @@ class Store(ABC):
         Raises:
             ValueError: The State is saved in another store, or it is new and this store already has a State
                 with its id.
-            TypeError: A value in the State cannot be saved as JSON, or the store only works asynchronously
-                (use ``asave``).
+            TypeError: A value in the State cannot be saved as JSON, the store only works asynchronously
+                (use ``asave``), or it was called on the event loop thread of an async run (use ``asave``).
 
         Example:
             ```python
@@ -295,8 +300,10 @@ class FileStore(Store):
     """Saves each State in a folder of its own: ``{path}/{id}/log.jsonl`` (history, one entry per line) and
     ``info.json`` (what ``list`` shows).
 
-    Files are readable only by their owner, and each write is flushed to disk (``fsync``) before it returns.
-    One process writes a State at a time: two processes running the same State id are not supported.
+    Files are readable only by their owner (history holds tool results and messages), and each write is flushed to
+    disk (``fsync``) before it returns. One process writes a State at a time: two processes running the same State
+    id are not supported. Two ``FileStore`` objects for the same folder are equal, so a State loaded with one can
+    be saved with the other. Images are saved as base64, so a run with many screenshots makes large files.
 
     Args:
         path: The folder to keep States in. Created on the first write.
@@ -338,6 +345,16 @@ class FileStore(Store):
         *,
         create: bool = False,
     ) -> None:
+        """Appends the new entries to ``{state_id}/log.jsonl`` and replaces ``info.json``, flushing both to disk.
+
+        With ``create=True`` the folder is built under a temporary name and renamed into place, so creating is
+        all or nothing and never overwrites another State.
+
+        Raises:
+            ValueError: ``state_id`` is not a valid id, ``create`` is true and the id exists, or the entries do not
+                continue the log.
+            LookupError: ``create`` is false and the State was deleted.
+        """
         check_id(state_id, "FileStore.write()")
         with self._lock:
             if create:
@@ -346,6 +363,11 @@ class FileStore(Store):
                 self._add(state_id, entries, info)
 
     def read(self, state_id: str) -> Record | None:
+        """The entries and info saved for ``state_id``, or ``None`` if there is no such folder.
+
+        Raises:
+            ValueError: ``state_id`` is not a valid id, or the saved State is damaged (no ``info.json``).
+        """
         state_id = check_id(state_id, "FileStore.read()")
         folder = self._root / state_id
         if not folder.is_dir():
@@ -375,6 +397,8 @@ class FileStore(Store):
         return found
 
     def delete(self, state_id: str) -> None:
+        """Deletes the folder of ``state_id``. The folder is renamed first, so a half-deleted State is never listed.
+        Does nothing if the id does not exist."""
         folder = self._root / check_id(state_id, "FileStore.delete()")
         with self._lock:
             self._next.pop(state_id, None)

@@ -100,6 +100,7 @@ class TextBlock:
     """A piece of text."""
 
     text: str
+    """The text."""
 
 
 #: The image types every provider accepts, as media types.
@@ -133,7 +134,19 @@ class Image:
     Send it to the model with ``Message.user("What is wrong in this chart?", Image.from_path("chart.png"))``.
 
     ``data`` is the file's bytes. The adapters encode it (base64) when they send it, and a Store saves it the
-    same way. PNG, JPEG, GIF and WebP are supported.
+    same way, so a run with many screenshots makes large files. PNG, JPEG, GIF and WebP are supported; the type is
+    read from the bytes (or pass ``media_type=``).
+
+    Both ``Anthropic`` and ``OpenAICompatible`` send images in user messages. In a tool result, Anthropic takes
+    images as they are, while Chat Completions APIs take only text there, so ``OpenAICompatible`` sends them in a
+    user message right after, marked as the call's result. Nothing checks that the model can read images: a server
+    that cannot answers with its own error. ``agent.context_tokens(state)`` counts each image as 1,600 tokens, and
+    ``state.clear_tool_results()`` clears images with the rest of old results. A compaction summary keeps only what
+    the model wrote about them, while history and the store keep them.
+
+    Raises:
+        TypeError: ``data`` is not bytes.
+        ValueError: The data is not a PNG, JPEG, GIF or WebP image, or ``media_type`` is not one of those.
     """
 
     data: bytes
@@ -238,9 +251,13 @@ class ToolResultBlock:
     """
 
     call_id: str
+    """The ``id`` of the ``ToolCall`` this answers."""
     content: ToolResultContent
+    """What is sent to the model: a string, or a tuple of ``TextBlock`` and ``Image``."""
     name: str = ""
+    """The tool name."""
     is_error: bool = False
+    """``True`` if the model is told this is an error result."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.content, str) and not isinstance(self.content, tuple):
@@ -256,7 +273,9 @@ class RawBlock:
     """
 
     provider: str
+    """The provider id (``Model.provider``) the block came from and is sent back to."""
     data: Mapping[str, Any]
+    """The block as the provider gave it. A read-only dict."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data", freeze(self.data))
@@ -539,14 +558,18 @@ HistoryKind: TypeAlias = Literal[
 
 @dataclass(frozen=True)
 class Exchange:
-    """The question and answer of ``ask``/``ask_human``. ``answer`` is ``None`` if no answer came (OutputError).
+    """The question and answer of ``ask``/``ask_human``: the ``content`` of an ``ExchangeEntry``. ``answer`` is
+    ``None`` if no answer came (OutputError).
 
     ``answer`` is JSON (a read-only ``FrozenDict``/``FrozenList`` when it is a dict or list), as the history
-    records it. ``agent.ask`` still returns the real object to its caller.
+    records it: a dataclass or Pydantic model comes back as a dict. ``agent.ask`` still returns the real object to
+    its caller.
     """
 
     question: str
+    """The question that was asked."""
     answer: Any
+    """The answer, in JSON form."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "answer", freeze(self.answer))
@@ -819,9 +842,11 @@ class MessageEntry:
 @dataclass(frozen=True, kw_only=True)
 class ModelRequestEntry:
     """``think`` is sending a request to the model. A request with no ``model_reply`` after it (an ``error``
-    entry follows instead) did not change the context."""
+    entry follows instead) did not change the context. Only ``think`` writes one: ``ask`` and ``compact`` requests
+    do not, so history shows which model wrote each reply, even when the model changed inside one run."""
 
     kind: Literal["model_request"] = "model_request"
+    """Always ``"model_request"``."""
     content: str
     """The model name that was asked, as the Agent's model gives it (``provider/name``)."""
     turn: int
@@ -835,7 +860,9 @@ class ModelReplyEntry:
     """A model reply from ``think``."""
 
     kind: Literal["model_reply"] = "model_reply"
+    """Always ``"model_reply"``."""
     content: Reply
+    """The ``Reply``, including ``reply.model``, the model that answered."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -847,7 +874,9 @@ class ModelEventEntry:
     """Something the Model went through, such as a fallback or a retry."""
 
     kind: Literal["model_event"] = "model_event"
+    """Always ``"model_event"``."""
     content: ModelEvent
+    """What the Model reported."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -861,8 +890,10 @@ class ToolResultEntry:
     a permission kept it from running."""
 
     kind: Literal["tool_result"] = "tool_result"
+    """Always ``"tool_result"``."""
     content: ToolResultContent
-    """The result sent to the model: a ``str``, or a tuple of ``TextBlock`` and ``Image``."""
+    """The result sent to the model: a ``str``, or a tuple of ``TextBlock`` and ``Image`` (``result_text``
+    turns either into one string)."""
     call: ToolCall
     """The call this is the result of."""
     outcome: ToolOutcomeKind
@@ -898,6 +929,7 @@ class ExchangeEntry:
     """``"ask"``: ``agent.ask`` asked the model. ``"human"``: the Human was asked (``ask_human``,
     ``DecideByHuman``)."""
     content: Exchange
+    """The ``Exchange``: the question and its answer."""
     usage: Usage | None = None
     """The usage of the model request behind an ``"ask"``. ``None`` for ``"human"``."""
     turn: int
@@ -912,7 +944,9 @@ class ContextChangeEntry:
     went back to an earlier point (``restore``)."""
 
     kind: Literal["context_change"] = "context_change"
+    """Always ``"context_change"``."""
     content: ContextChange
+    """What changed. ``content.kind`` says which."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -925,7 +959,9 @@ class RunStartEntry:
     State is compared with."""
 
     kind: Literal["run_start"] = "run_start"
+    """Always ``"run_start"``."""
     content: AgentInfo
+    """The ``AgentInfo`` of the Agent that started the run."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -942,7 +978,10 @@ class StopEntry:
     """
 
     kind: Literal["stop"] = "stop"
+    """Always ``"stop"``."""
     content: Stopped | None
+    """Why: ``StoppedByUntil``, ``StoppedByLimit``, ``StoppedByFinish`` or ``StoppedByPermission``, or ``None``
+    for a stop that was cleared."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -954,6 +993,7 @@ class ExtraDataEntry:
     """``state.extra_data`` changed (``State(extra_data=...)`` or ``edit_extra_data()``)."""
 
     kind: Literal["extra_data"] = "extra_data"
+    """Always ``"extra_data"``."""
     content: Mapping[str, Any]
     """The keys that were set, with their new values (JSON). A read-only dict (a ``FrozenDict``)."""
     removed: tuple[str, ...] = ()
@@ -976,6 +1016,7 @@ class ErrorEntry:
     not change: the turn is taken back."""
 
     kind: Literal["error"] = "error"
+    """Always ``"error"``."""
     content: str
     """Its type and message, e.g. ``"TimeoutError: timed out"`` (only the type if the message is empty)."""
     error: BaseException | None = field(default=None, compare=False)
@@ -1009,7 +1050,24 @@ HistoryEntry: TypeAlias = (
 
 
 def format_call(call: ToolCall) -> str:
-    """The ``read_file(path="main.py")`` form. Shared by Terminal and notice texts."""
+    """A tool call as one line of code, such as ``read_file(path="main.py")``: the name, then each argument as
+    ``key=value`` with the value as JSON (``repr`` for a value JSON cannot show).
+
+    Terminal uses it for its ``tool`` lines and ``DecideByHuman`` for its question
+    (``Run write_file(path="a.md", content="x")?``). Use it to show a call to the person, for example in a
+    permission or a Reporter.
+
+    Args:
+        call: The tool call.
+
+    Returns:
+        The one-line form.
+
+    Example:
+        ```python
+        format_call(ToolCall("read_file", {"path": "main.py"}, "call_1"))  # 'read_file(path="main.py")'
+        ```
+    """
     parts = []
     for key, value in call.args.items():
         try:

@@ -349,6 +349,8 @@ class MCPTool(Tool):
     It has the same ``name``, ``description``, ``input_schema`` and hints as any ``Tool``. The hints come from the
     server's tool annotations (``readOnlyHint`` and so on), with the same defaults as ``@tool`` for the ones it
     leaves out. They are what the server says about itself, not a guarantee: do not trust them more than the server.
+    ``hints_for(args)`` returns the same hints for every call, and ``AllowByReadOnly()`` ignores them unless it has
+    ``trust_mcp=True``.
     """
 
     server: MCP

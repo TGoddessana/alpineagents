@@ -1,6 +1,6 @@
 import logging
 
-from alpineagents import Reporter
+from alpineagents import Agent, Reporter
 
 log = logging.getLogger("agent")
 
@@ -11,3 +11,6 @@ class LogReporter(Reporter):
 
     def on_run_end(self, state, error):
         log.info("%s after %d turns", state.stopped, state.turn)
+
+
+agent = Agent(model="claude-sonnet-5", reporter=LogReporter())

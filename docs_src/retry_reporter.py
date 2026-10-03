@@ -1,4 +1,4 @@
-from alpineagents import Reporter
+from alpineagents import Agent, Reporter
 
 
 class LiveText(Reporter):
@@ -16,3 +16,6 @@ class LiveText(Reporter):
     def on_model_event(self, state, event):
         if event.kind == "retry":
             self.text = ""  # the reply starts over
+
+
+agent = Agent(model="claude-sonnet-5", reporter=LiveText())

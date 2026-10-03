@@ -1,6 +1,13 @@
 import subprocess
+from pathlib import Path
 
-from alpineagents import Agent, Message, State, loop
+from alpineagents import Agent, Message, State, loop, tool
+
+
+@tool
+def write_file(path: str, content: str) -> None:
+    """Create a file, or replace its content"""
+    Path(path).write_text(content)
 
 
 def failing_tests() -> str | None:
@@ -25,3 +32,7 @@ def fix_until_green(agent: Agent, state: State):
     failures = failing_tests()
     if failures:
         state.add_message(Message.notice(f"The tests still fail. Fix them, then answer.\n{failures}"))
+
+
+agent = Agent(model="claude-sonnet-5", tools=[write_file], loop=fix_until_green)
+print(agent.run("Fix the failing tests"))
