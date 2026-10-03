@@ -1013,6 +1013,10 @@ class State:
         """A new State with the same history and so the same content, a new id, and nothing shared with this one:
         no store, no running Agent. Use it to try something on a copy.
 
+        The copy is the same State at that point, so a fork of a finished State is finished too (start a new State
+        from ``state.messages`` to continue), and a fork taken while a model request is waiting (e.g. from a
+        Reporter's ``on_think_start``) is waiting too, with no ``think()`` behind it. Fork between turns.
+
         Example:
             ```python
             attempt = state.fork()
@@ -1145,8 +1149,8 @@ class State:
                     fix_message(
                         "this State is already being run by another run() or arun() call, and a State runs one "
                         "at a time",
-                        "wait for that run to end, or run a copy: state.fork()",
-                        "attempt = state.fork()\nagent.run(attempt)",
+                        "wait for that run to end, then run the State again",
+                        "agent.run(state)\nagent.run(state)  # one after the other",
                     )
                 )
             self._commit(RunStartEntry(content=info, turn=self._snap.turn))
@@ -1224,7 +1228,7 @@ class State:
                 raise ValueError(
                     fix_message(
                         "cannot call think() while another think() is waiting on the model",
-                        "wait for it to end, or think on a copy: state.fork()",
+                        "wait for that think() to end",
                         "agent.think(state)\nagent.think(state)  # one after the other",
                     )
                 )
@@ -1374,14 +1378,19 @@ class State:
         takes the request back: ``turn`` goes down by one, held messages go in, and the context is as before the
         ``think``. Recorded after a reply, it takes nothing back.
 
-        If the same exception object (``is``) is already an ``error`` entry, it is not added again (so an
-        exception recorded by think/use_tools is not recorded again by ``run``). An exception with an empty
-        message (``KeyboardInterrupt()``) records only its name.
+        If the same exception object (``is``) is already an ``error`` entry of the current request or run, it is not
+        added again (so an exception recorded by think/use_tools is not recorded again by ``run``). Only the entries
+        back to the last ``model_request`` or ``run_start`` are looked at, and a waiting request is always taken
+        back, so a Model that fails twice with the same exception object still rolls back both times. An exception
+        with an empty message (``KeyboardInterrupt()``) records only its name.
         """
         with self._lock:
-            for entry in self._snap.history:
-                if entry.kind == "error" and entry.error is error:
-                    return
+            if not (self._snap._waiting and call is None):
+                for entry in reversed(self._snap.history):
+                    if entry.kind in ("model_request", "run_start"):
+                        break
+                    if entry.kind == "error" and entry.error is error:
+                        return
             self._commit(ErrorEntry(content=_error_text(error), error=error, call=call, turn=self._snap.turn))
 
     # ------------------------------------------------------------ questions
@@ -1519,7 +1528,7 @@ class State:
                     fix_message(
                         f"State {self._id!r} is saved in another store ({self._saved_store!r}), and a State is "
                         f"saved in one store only (this one is {store!r})",
-                        "save it in the store it was saved in, or start a new State (state.fork() keeps the content)",
+                        "save it in the store it was saved in, or start a new State (State(messages=state.messages) keeps the messages)",
                         'state = store.load("task-1")\nstore.save(state)',
                     )
                 )

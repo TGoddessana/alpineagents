@@ -76,7 +76,7 @@ computed from `state.history`.
 - **The owner rule is gone.** A State no longer belongs to the first Agent that thought on it: any Agent can run,
   think, use tools on and compact any State, so `agent.copy(model=...)` can carry on a State another model started.
   The `ValueError` for "a different Agent" is removed. What remains is one run at a time: a State that another
-  `run` or `arun` is running right now raises `ValueError` (use `state.fork()` to run a copy).
+  `run` or `arun` is running right now raises `ValueError` (wait for that run to end).
 
 - **History entries were renamed and merged.** There are 11 classes now, all frozen:
 
@@ -88,8 +88,20 @@ computed from `state.history`.
   | `ContextChange` kinds `"start_from"` and `"rollback"` | `"compact"` (a `compact` call, or the model's), and no entry: a failed `think` is taken back by an `ErrorEntry` |
 
   Code that checks `entry.kind in ("tool_result", "denied", "cancelled")` checks `entry.kind == "tool_result"` and
-  reads `entry.outcome`. `ToolResultEntry.outcome` is a required keyword, and `StoppedByFinish` has a new field
-  `answer`.
+  reads `entry.outcome`. `ToolResultEntry.outcome` is a required keyword.
+
+  `StoppedByFinish` has a new field `answer` that takes part in `==`, so `state.stopped == StoppedByFinish()` is
+  `False` after `finish("x")`. Use `isinstance(state.stopped, StoppedByFinish)` or `state.finished` instead.
+
+- **`Block` includes `Image`** (`TextBlock | Image | ToolCall | ToolResultBlock | RawBlock`), for images in the
+  user's messages. A `Model` you wrote, or any code that walks `Message.content` with an exhaustive `match` or an
+  `isinstance` chain, must handle `Image` blocks in user messages (`Message.user("", image).text` is `""`).
+  See [Write a Model](https://tgoddessana.github.io/alpineagents/guides/models/#write-a-model).
+
+- **`state.finish(answer)` and `ask` answers are stored as JSON.** A dataclass or a Pydantic model passed to
+  `finish()` comes back from `state.answer` and `agent.run` as a read-only dict, not the object (rebuild it with
+  `Review(**answer)`). A value that is not JSON (a set, `Path`, `datetime`, `Enum`, `bytes`) raises `TypeError` from
+  `finish()`. `agent.ask(..., returns=Review)` still returns the object.
 
 - **`SavedState` is `StateInfo`**, what `store.list()` returns. It has `first_message` where `SavedState` had `task`,
   and `created_at` and `updated_at` can be `None` for a State saved with no history. Implementers of a Store build
@@ -218,6 +230,9 @@ computed from `state.history`.
 | `ContextChange` kind `"start_from"` | `"compact"` |
 | `ContextChange` kind `"rollback"` | none: a failed `think` records an `ErrorEntry` |
 | a second Agent thinking on a State raised `ValueError` | allowed: `agent.copy(model=...).run(state)` |
+| `state.stopped == StoppedByFinish()` | `isinstance(state.stopped, StoppedByFinish)`, or `state.finished` |
+| `state.finish(Review(...))`, then `state.answer` is a `Review` | `state.answer` is a read-only dict: `Review(**state.answer)`. Non-JSON answers raise `TypeError` |
+| a custom `Model` read `message.text` and never saw an image | user messages can hold `Image` blocks: convert them or raise |
 | States saved by 0.4 | not loadable by 0.5 (format 3, no converter) |
 
 ## [0.4.0] - 2026-09-30

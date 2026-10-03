@@ -110,7 +110,7 @@ cheaper = agent.copy(model="claude-haiku-4-5")
 cheaper.run(state)
 ```
 
-The State records which Agent started each run (`RunStartEntry`, with an `AgentInfo`), and which model every request
+The State records which Agent started each run (`RunStartEntry`, with an `AgentInfo`), and which model every `think` request
 went to (`ModelRequestEntry`). One run at a time: a State that another `run` is running raises `ValueError`.
 
 A State loaded with `store.load(id)` warns with `ResumeWarning` the first time an Agent that differs from its last

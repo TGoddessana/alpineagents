@@ -242,6 +242,10 @@ class ToolResultBlock:
     name: str = ""
     is_error: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, str) and not isinstance(self.content, tuple):
+            object.__setattr__(self, "content", tuple(self.content))
+
 
 @dataclass(frozen=True)
 class RawBlock:
@@ -277,6 +281,18 @@ class Message:
     tokens: int | None = None
     """The token count of the whole context up to and including this message, from API usage. Set on assistant
     replies only; ``None`` if unknown."""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.content, str):
+            raise TypeError(
+                fix_message(
+                    f"Message content is a tuple of blocks, not a string (got: {self.content!r})",
+                    "Use Message.user(text) or Message.assistant(text) for plain text, or pass a tuple of blocks",
+                    'Message.user("hi")',
+                )
+            )
+        if not isinstance(self.content, tuple):
+            object.__setattr__(self, "content", tuple(self.content))
 
     @classmethod
     def user(cls, text: str, *images: Image) -> Message:

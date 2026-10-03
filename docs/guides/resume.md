@@ -72,14 +72,13 @@ instead with `loop.add_signal_handler(signal.SIGTERM, task.cancel)`.
 
 ## What changes after loading
 
-A store keeps JSON, so a loaded State differs from the one that was saved in a few ways:
+A loaded State equals the one that was saved: `store.load(id).snapshot() == state.snapshot()` after a save. Values
+are already in their JSON form when they are recorded (see [State: history](../concepts/state.md#history)), so a
+store has nothing to convert. One thing is not saved:
 
 | Value | After loading |
 | --- | --- |
-| `state.extra_data` | Holds only JSON values: dicts with string keys, lists, strings, numbers, booleans, `None`. `edit_extra_data()` checks this when the block ends, so a set raises `TypeError` there and not at the save. Tuples become lists |
-| `finish(answer)` and `ask` answers | Pydantic models and dataclasses come back as dicts. Other values must be JSON values |
-| `error` of history entries | `None`. The entry's text still holds the exception type and message |
-| Everything else | Equal: `store.load(id).snapshot() == state.snapshot()` after a save |
+| `error` of history entries | `None`. The entry's text still holds the exception type and message. `==` does not compare it |
 | The Agent | Not saved. The Agent in your code runs the State, and the first `run` warns with `ResumeWarning` if it differs from the one that saved it. See [State](../concepts/state.md#a-state-saved-by-another-agent). Switching models in your own code never warns: see [Models](models.md#switch-models-in-one-conversation) |
 
 ## If saving fails

@@ -73,7 +73,7 @@ All of these are read-only properties. They read the current snapshot.
 | --- | --- |
 | `messages` | What the model sees at the next `think` |
 | `history` | Everything that happened. See [History](#history) |
-| `answer` | The value given to `finish(answer)`. Otherwise the text of the latest reply without tool calls. Otherwise `None` |
+| `answer` | The value given to `finish(answer)`, in JSON form (a dataclass or Pydantic model becomes a read-only dict). Otherwise the text of the latest reply without tool calls. Otherwise `None` |
 | `finished` | Whether `finish()` was called |
 | `stopped` | Why this run is set to stop: `StoppedByFinish(answer)`, `StoppedByLimit(turns)`, `StoppedByUntil(name)` or `StoppedByPermission(call, permission)`. `None` until something decides, and after a run that ended with an exception. See [Loops](loops.md#when-a-loop-stops) |
 | `pending_calls` | Tool calls the model asked for that have no result yet |
@@ -142,6 +142,11 @@ for entry in state.history:
 The values in history are read-only. A tool call's `args` and a recorded `ask` answer are frozen dicts and lists: they
 work with `json.dumps`, indexing and `==`, but `args["x"] = 1` raises `TypeError`. Copy with `dict(args)` to change
 one.
+
+Values are frozen to their JSON form when they are recorded, on a live State as well as a loaded one. A tuple becomes
+a list. The `answer` of `finish(answer)` and of an `ask` entry, if it is a Pydantic model or a dataclass, is stored as
+a dict, so `state.answer` is a dict even before any save (`agent.ask(..., returns=Type)` still returns the object to
+its caller). A value that is not JSON raises `TypeError`.
 
 ## extra_data: your notepad
 
@@ -216,6 +221,10 @@ attempt = state.fork()
 agent.run(attempt)
 ```
 
+A fork is the same State at that point: a fork of a finished State is finished too, so to continue from its
+messages start a new State: `State(messages=state.messages)`. Fork between turns: a fork taken while the model is being
+waited on is waiting too.
+
 ## Pending calls
 
 When a reply asks for tools, each call becomes a pending call in `state.pending_calls`. A call stops being pending
@@ -262,7 +271,8 @@ Each run records a `RunStartEntry`, so history tells which Agent did what. Switc
 
 `RunStartEntry.content` is an `AgentInfo`: the Agent's `name`, `model` (`provider/name`), `system_sha256` (a hash of
 the system prompt, not the text), `tools` (names) and `mcp_servers` (names). `ModelRequestEntry.content` holds the model
-name of every request, so history also shows when the model changed inside one run.
+name of every request the run loop sends (`think`), so history also shows when the model changed inside one run.
+`ask` and `compact` do not record one.
 
 ### A State saved by another Agent
 

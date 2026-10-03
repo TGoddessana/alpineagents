@@ -491,7 +491,15 @@ def _exists(state_id: str, store: FileStore) -> ValueError:
 
 
 def _dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    """``value`` as one line of JSON, in readable UTF-8. A lone surrogate (e.g. from a file name read with
+    ``surrogateescape``) cannot be encoded as UTF-8, so for that text the escaped ASCII form is written instead;
+    ``json.loads`` reads it back as the same string."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    return text
 
 
 def _lines(entries: Sequence[dict[str, Any]]) -> bytes:
@@ -525,4 +533,5 @@ def _log_lines(path: Path, *, repair: bool) -> builtins.list[str]:
             file.truncate(end)
             file.flush()
             os.fsync(file.fileno())
-    return data[:end].decode("utf-8").splitlines()
+    # Split on "\n" only: str.splitlines() also splits on U+2028, U+2029 and U+0085, which JSON may hold raw.
+    return data[:end].decode("utf-8").split("\n")[:-1]

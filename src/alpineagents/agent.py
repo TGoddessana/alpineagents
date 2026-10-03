@@ -912,6 +912,7 @@ class Agent:
                 agent.compact(state)
             ```
         """
+        _check_state(state, "context_used")
         window = self._model.context_window
         if not window or window <= 0:
             return 0.0
@@ -1010,8 +1011,9 @@ class Agent:
             raise ValueError(
                 fix_message(
                     f"Cannot {method}() a State that was finish()ed",
-                    "Create a new State and pass that, or state.fork() to start again from this one's content",
-                    'agent.run("Next task")',
+                    "Start a new State from this one's messages (a fork() of a finished State is finished too), "
+                    "or go back to a snapshot taken before finish() with state.restore(snapshot)",
+                    "agent.run(State(messages=state.messages))",
                 )
             )
 

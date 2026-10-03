@@ -109,8 +109,9 @@ with every other setting the same:
 ```
 
 - Both runs add to `state`. The second model sees the whole conversation, including the replies of the first.
-- `state.history` records the model of every request in a `model_request` entry, so you can see which model wrote each
-  reply. `state.usage` adds up the tokens of all of them. Its `cost` is `None` when any of them has no price.
+- `state.history` records the model of every `think` request in a `model_request` entry, so you can see which model
+  wrote each reply. `ask` and `compact` requests are not recorded as `model_request` entries (so the model that wrote
+  a compaction summary is not in history), but their tokens count in `state.usage`. Its `cost` is `None` when any of them has no price.
 - Thinking blocks and other provider-specific blocks are sent back only to the provider that wrote them. A model of
   another provider does not see them.
 - Providers cache a long context per model, so the first request after a switch pays for the whole context again.
@@ -130,6 +131,8 @@ Subclass `Model` to add a provider. Implement `respond` and `context_window`:
 Rules for a Model:
 
 - Return a `Reply`. Do not change the State. The Agent records the reply.
+- User messages can hold `Image` blocks. Convert them to the provider's image format, as `Anthropic` and
+  `OpenAICompatible` do, or raise a clear error if the provider cannot read images.
 - Put the model that actually answered in `Reply.model`: the name the provider reported, or the requested name
   if it did not say. A Model that falls back to another model puts the fallback's name there.
 - Use no network and no credentials in `__init__`. Create the SDK client at the first request.

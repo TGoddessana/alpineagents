@@ -5,7 +5,7 @@ Get a typed result instead of text. There are two ways.
 | Way | When to use |
 | --- | --- |
 | `agent.ask(state, prompt, returns=Type)` | During or after a run, to extract a result without changing the run |
-| A tool that calls `state.finish(value)` | When the model should decide when it is done, and hand over the result itself |
+| A tool that calls `state.finish(value)` | When the model should decide when it is done, and hand over the result as JSON data (a dataclass or Pydantic model comes back as a read-only dict) |
 
 ## ask
 
@@ -29,7 +29,8 @@ About `ask`:
 ## A submit tool
 
 The model fills the tool's typed parameters, and the tool ends the run with them. See
-[Stop conditions: stop from a tool](stop-conditions.md#stop-from-a-tool).
+[Stop conditions: stop from a tool](stop-conditions.md#stop-from-a-tool). The answer is stored as JSON, so a
+dataclass or Pydantic model passed to `finish()` comes back as a dict. For a typed object, use `ask` with `returns=`.
 
 ## Related
 

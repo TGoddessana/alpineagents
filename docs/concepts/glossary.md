@@ -16,7 +16,7 @@ Terms in the order you meet them.
 | `AgentInfo` | What an Agent was when a run started: name, model, system prompt hash, tool and MCP server names. It is the content of a `RunStartEntry` |
 | `StateInfo` | One saved State as `store.list()` shows it: id, first message, times, turn, `stopped`, `finished` |
 | Reply | What the model returns for one request: text, tool calls or both. A `Reply` object |
-| Answer | `state.answer`: the value given to `finish`, or the text of the latest reply without tool calls |
+| Answer | `state.answer`: the value given to `finish` (stored as JSON), or the text of the latest reply without tool calls |
 | Stop condition | A function from State to `bool` in `until=`. The loop stops when one returns `True` |
 | Stop value | Why a run is set to stop: `state.stopped`, one of `StoppedByUntil(name)`, `StoppedByLimit(turns)`, `StoppedByFinish(answer)` and `StoppedByPermission(call, permission)`. `None` until something decides. See [Stop conditions](../guides/stop-conditions.md) |
 | Tool | Something the model can call. A `Tool` object: `@tool` makes a `FunctionTool`, an MCP server's tool is an `MCPTool`, and you can subclass `Tool` |

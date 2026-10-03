@@ -5,7 +5,7 @@ A loop stops in one of four ways. Pick the one that matches who decides.
 | Who decides | How | `state.stopped` |
 | --- | --- | --- |
 | A check on the State, before every turn | An `until` function | `StoppedByUntil(name)`, the function's name |
-| Your code or a tool, at a specific moment | `state.finish(answer)` | `StoppedByFinish()` |
+| Your code or a tool, at a specific moment | `state.finish(answer)` | `StoppedByFinish(answer)` |
 | A fixed maximum number of turns | `limit` | `StoppedByLimit(turns)`, the limit |
 | A permission, when it refuses a call with `stop=True` | `Denied(reason, stop=True)`, for example `DecideByHuman`'s `no` ([Ask before a tool runs](approval.md)) | `StoppedByPermission(call, permission)` |
 
@@ -37,7 +37,10 @@ Let the model decide when the work is done, and return a structured answer:
 3. `agent.run` returns the dict.
 4. The State is now finished. Running it again or calling `ask` on it raises `ValueError`.
 
-The answer can be any value. The model fills the tool's typed parameters, so the answer has a known shape.
+The answer can be a JSON value (a dict, list, string, number, boolean or `None`), a dataclass or a Pydantic model.
+`state.answer` and `agent.run` return it in JSON form: a dataclass or a model comes back as a read-only dict
+(`Review(**state.answer)` rebuilds it). Anything else, such as a set, `Path`, `datetime`, `Enum` or `bytes`, raises
+`TypeError` from `finish()`. The model fills the tool's typed parameters, so the answer has a known shape.
 
 ## Stop when the person says no
 
