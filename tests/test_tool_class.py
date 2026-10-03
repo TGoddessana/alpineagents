@@ -172,7 +172,7 @@ def test_tool_input_error_and_tool_error(args, content, kind):
     state = State(messages=[Message.user("Task")])
     make_agent([tool_call("create_ticket", **args), "done"], [Ticket()], reporter=Outcomes()).run(state)
     assert (block(state).content, block(state).is_error) == (content, True)
-    assert kinds == [kind] and state.stopped == StoppedByUntil("is_answered")
+    assert kinds == [kind] and state.stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_other_exceptions_stop_the_run():

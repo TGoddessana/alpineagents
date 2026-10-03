@@ -31,7 +31,7 @@ Run write_file(path="README.txt", content="Hi")? (yes/no)
   done 6B
 [turn 3] thinking
 Wrote README.txt
-done: stopped by is_answered (3 turns)
+done: stopped by waiting_for_user (3 turns)
 ```
 
 | The person says | What happens |

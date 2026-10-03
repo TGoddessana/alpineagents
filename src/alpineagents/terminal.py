@@ -76,7 +76,7 @@ class Terminal(Reporter, Human):
           done 1.2KB
         [turn 2] thinking
           context compacted: 121k → 18k tokens (cache rebuilds)
-        done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)
+        done: stopped by waiting_for_user (5 turns, ~$0.42, cache hit 84%)
     """
 
     def __init__(
@@ -230,7 +230,7 @@ class Terminal(Reporter, Human):
         self._write_line(state, f"  model: {event.message}")
 
     def on_run_end(self, state: State, error: BaseException | None) -> None:
-        """Writes one last line, such as ``done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)``,
+        """Writes one last line, such as ``done: stopped by waiting_for_user (5 turns, ~$0.42, cache hit 84%)``,
         ``done: reached limit(50), the task may be unfinished (50 turns)`` or ``done: interrupted by user (3 turns)``."""
         # - Normal: "done: {str(state.stopped)} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])" (cost is left
         #   out when None; the cache hit rate is left out when None or 0. A loop without @loop that ended on its

@@ -24,8 +24,8 @@ happened: a request to the model, a reply, a stop. `context_change import` recor
 [turn 0] run_start: anthropic/claude-sonnet-5
 [turn 1] model_request: anthropic/claude-sonnet-5
 [turn 1] model_reply: Flask, Django and FastAPI.
-[turn 1] stop: stopped by is_answered
-done: stopped by is_answered (1 turn)
+[turn 1] stop: stopped by waiting_for_user
+done: stopped by waiting_for_user (1 turn)
 ```
 
 History is all a State is. `messages`, `turn` and `answer` are computed from it, and every change is a new entry.

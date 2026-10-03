@@ -10,6 +10,8 @@ Learn: [Write your own loop](../learn/loop.md). Concepts: [Loops and stop rules]
 
 ::: alpineagents.adefault_loop
 
+::: alpineagents.waiting_for_user
+
 ::: alpineagents.CompactIfFull
 
 ::: alpineagents.compact_if_full

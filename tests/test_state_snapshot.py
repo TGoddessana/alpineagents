@@ -419,7 +419,7 @@ def test_snapshot_is_the_current_value_of_every_property():
         "updated_at",
     ):
         assert getattr(state, name) == getattr(snap, name), name
-    assert snap.turn == 2 and snap.answer == "done" and snap.stopped == StoppedByUntil("is_answered")
+    assert snap.turn == 2 and snap.answer == "done" and snap.stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_snapshot_is_the_same_object_until_something_is_recorded():

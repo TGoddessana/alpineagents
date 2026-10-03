@@ -100,7 +100,7 @@ The Agent above uses `default_loop`. To change what happens in a turn, write the
 ```python
 from pathlib import Path
 
-from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool
+from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool, waiting_for_user
 
 
 @tool
@@ -124,13 +124,6 @@ def write_file(path: str, content: str) -> None:
     Path(path).write_text(content)
 
 
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
-
-
 @loop(until=waiting_for_user, limit=30)
 def coding(agent: Agent, state: State):
     compact_if_full(agent, state)
@@ -149,8 +142,8 @@ print(agent.run("Add a test for the add() function in calc.py"))
 ```
 
 - `coding` is one turn: summarize the context if it is more than 60% full, ask the model, run the tools it asked for.
-- `@loop` repeats the turn. It stops when `waiting_for_user` is true, a function you write that says the model has
-  answered, or after 30 turns.
+- `@loop` repeats the turn. It stops when `waiting_for_user` is true (the model answered and waits for the user), or
+  after 30 turns. Any function from State to `bool` works as `until`.
 - To change the agent, add, remove or reorder lines in `coding`.
 
 [Write your own loop](https://tgoddessana.github.io/alpineagents/learn/loop/) explains each part.

@@ -1,6 +1,6 @@
 import asyncio
 
-from alpineagents import Agent, State, acompact_if_full, loop, tool
+from alpineagents import Agent, State, acompact_if_full, loop, tool, waiting_for_user
 
 
 @tool
@@ -11,13 +11,6 @@ async def run_command(command: str) -> str:
     )
     output, _ = await process.communicate()
     return output.decode()[-5000:]
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=30)

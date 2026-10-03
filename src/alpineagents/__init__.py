@@ -17,7 +17,7 @@ from .errors import (
     ToolInputError,
 )
 from .human import Human
-from .loop import Loop, adefault_loop, default_loop, loop
+from .loop import Loop, adefault_loop, default_loop, loop, waiting_for_user
 from .mcp_tools import MCP, MCPTool
 from .models import Anthropic, Model, OpenAICompatible
 from .reporter import Reporter
@@ -68,6 +68,7 @@ __all__ = [
     "Loop",
     "default_loop",
     "adefault_loop",
+    "waiting_for_user",
     "tool",
     "Tool",
     "FunctionTool",

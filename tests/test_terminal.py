@@ -199,9 +199,9 @@ def test_run_end_normal_with_cost_and_cache_rate():
     out = io.StringIO()
     terminal = Terminal(output=out)
     usage = Usage(input_tokens=100, cache_read_tokens=525, cost=0.42)
-    state = StubState(turn=5, usage=usage, stopped=StoppedByUntil("is_answered"))
+    state = StubState(turn=5, usage=usage, stopped=StoppedByUntil("waiting_for_user"))
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "done: stopped by is_answered (5 turns, ~$0.42, cache hit 84%)\n"
+    assert out.getvalue() == "done: stopped by waiting_for_user (5 turns, ~$0.42, cache hit 84%)\n"
 
 
 def test_run_end_normal_without_cost_or_cache():
@@ -247,10 +247,10 @@ def test_run_end_other_exception():
 def test_run_end_breaks_mid_line_first():
     out = io.StringIO()
     terminal = Terminal(output=out)
-    state = StubState(turn=1, stopped=StoppedByUntil("is_answered"))
+    state = StubState(turn=1, stopped=StoppedByUntil("waiting_for_user"))
     terminal.on_text(state, "stopped mid-line")
     terminal.on_run_end(state, None)
-    assert out.getvalue() == "stopped mid-line\ndone: stopped by is_answered (1 turn)\n"
+    assert out.getvalue() == "stopped mid-line\ndone: stopped by waiting_for_user (1 turn)\n"
 
 
 def test_run_end_without_stopped_does_not_show_none():

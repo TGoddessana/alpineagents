@@ -9,11 +9,7 @@ A wrong use of the library raises `TypeError` or `ValueError` as early as possib
 TypeError: @loop needs both until and limit
 Fix: set both
 Example:
-    def waiting_for_user(state: State) -> bool:
-        if state.pending_calls or not state.messages:
-            return False
-        last = state.messages[-1]
-        return last.role == "assistant" and not last.tool_calls
+    from alpineagents import waiting_for_user
 
     @loop(until=waiting_for_user, limit=50)
 ```

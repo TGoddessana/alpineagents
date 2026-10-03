@@ -1,4 +1,4 @@
-from alpineagents import Agent, State, loop, tool
+from alpineagents import Agent, State, loop, tool, waiting_for_user
 
 REPEATS = 3
 
@@ -7,13 +7,6 @@ REPEATS = 3
 def look(path: str) -> str:
     """Look at a path"""
     return "nothing here"
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 def repeating(state: State) -> bool:

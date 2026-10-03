@@ -715,10 +715,10 @@ class ToolOutcome:
 @dataclass(frozen=True)
 class StoppedByUntil:
     """``state.stopped`` when an ``until`` function of ``@loop`` returned true. ``str()`` gives
-    ``stopped by is_answered``."""
+    ``stopped by waiting_for_user``."""
 
     name: str
-    """The function's ``__name__``, e.g. ``"is_answered"`` (``"<lambda>"`` for a lambda)."""
+    """The function's ``__name__``, e.g. ``"waiting_for_user"`` (``"<lambda>"`` for a lambda)."""
 
     def __str__(self) -> str:
         return f"stopped by {self.name}"

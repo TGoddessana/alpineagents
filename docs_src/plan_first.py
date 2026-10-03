@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, Message, State, loop, tool
+from alpineagents import Agent, Message, State, loop, tool, waiting_for_user
 
 
 @tool
@@ -13,13 +13,6 @@ def read_file(path: str) -> str:
 def list_files() -> list[str]:
     """List the files in this folder"""
     return sorted(p.name for p in Path(".").iterdir())
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=30)

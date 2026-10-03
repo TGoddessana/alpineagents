@@ -23,7 +23,7 @@ from .types import Stopped, StoppedByFinish, StoppedByLimit, StoppedByPermission
 if TYPE_CHECKING:
     from .agent import Agent
 
-__all__ = ["loop", "Loop", "default_loop", "adefault_loop"]
+__all__ = ["loop", "Loop", "default_loop", "adefault_loop", "waiting_for_user"]
 
 Condition = Callable[[State], bool]
 
@@ -31,15 +31,8 @@ Condition = Callable[[State], bool]
 #: them, an outer loop too. An until/limit stop in state.stopped is a nested loop's, and ends only that loop.
 _DECIDED_BY_THE_RUN = (StoppedByFinish, StoppedByPermission)
 
-# An until function is the user's own: it takes the State and says whether to stop.
-_UNTIL_EXAMPLE = (
-    "def waiting_for_user(state: State) -> bool:\n"
-    "    if state.pending_calls or not state.messages:\n"
-    "        return False\n"
-    "    last = state.messages[-1]\n"
-    '    return last.role == "assistant" and not last.tool_calls\n'
-    "\n"
-)
+# waiting_for_user is the usual until; any State -> bool function of the user's works the same way.
+_UNTIL_EXAMPLE = "from alpineagents import waiting_for_user\n\n"
 
 _LOOP_EXAMPLE = _UNTIL_EXAMPLE + "@loop(until=waiting_for_user, limit=50)"
 
@@ -53,11 +46,28 @@ _ASYNC_LOOP_EXAMPLE = (
 )
 
 
-def is_answered(state: State) -> bool:
-    """The default loops' ``until``: the last message is the model's reply without tool calls, and nothing waits for
-    a tool result. Not exported. Its name is what ``StoppedByUntil("is_answered")`` and ``str(state.stopped)`` show.
+def waiting_for_user(state: State) -> bool:
+    """True when the model has handed the turn back: nothing waits for a tool result, and the last message is the
+    model's reply without tool calls.
 
-    Reads one snapshot, so the three checks see the same State even while another thread adds a message."""
+    The default loops stop on it, and so can yours: ``@loop(until=waiting_for_user, limit=30)``. It says the model
+    is waiting for the user, not that the task is done; to end a task for good, call ``state.finish(answer)``. A
+    message added after the reply (``state.add_message``) makes it false again, so the loop goes on. For another
+    rule, write your own ``State -> bool`` function.
+
+    Reads one snapshot, so the checks see the same State even while another thread adds a message.
+
+    Example:
+        ```python
+        from alpineagents import Agent, State, loop, waiting_for_user
+
+        @loop(until=waiting_for_user, limit=30)
+        def coding(agent: Agent, state: State):
+            agent.think(state)
+            if state.pending_calls:
+                agent.use_tools(state)
+        ```
+    """
     snap = state.snapshot()
     if snap.pending_calls or not snap.messages:
         return False
@@ -304,11 +314,7 @@ def loop(fn: Any = None, /, *, until: Any = None, limit: Any = None) -> Any:
 
     Example:
         ```python
-        def waiting_for_user(state: State) -> bool:
-            if state.pending_calls or not state.messages:
-                return False
-            last = state.messages[-1]
-            return last.role == "assistant" and not last.tool_calls
+        from alpineagents import waiting_for_user
 
         @loop(until=waiting_for_user, limit=50)
         def coding(agent: Agent, state: State):
@@ -350,18 +356,13 @@ def _condition_name(condition: Any) -> str:
     return getattr(condition, "__name__", None) or type(condition).__name__
 
 
-@loop(until=is_answered, limit=50)
+@loop(until=waiting_for_user, limit=50)
 def default_loop(agent: Agent, state: State):
     """The loop ``agent.run`` uses when the Agent has no loop of its own.
 
     Each turn compacts the messages if the context is over 60% full, asks the model, and runs the tools it asked
-    for. Stops when the model answers without tool calls (``stopped by is_answered``) or after 50 turns. Copy it as
-    a starting point for your own loop.
-
-    Its stop check is a private function named ``is_answered``, which is not part of the API: it is the same check
-    as the ``waiting_for_user`` function in the examples, true when nothing waits for a tool result and the last
-    message is the model's reply without tool calls. That name is what ``StoppedByUntil("is_answered")``,
-    ``str(state.stopped)`` and the terminal's last line (``done: stopped by is_answered``) show.
+    for. Stops when ``waiting_for_user`` is true (``stopped by waiting_for_user``) or after 50 turns. Copy it as a
+    starting point for your own loop.
     """
     compact_if_full(agent, state)
     agent.think(state)
@@ -369,7 +370,7 @@ def default_loop(agent: Agent, state: State):
         agent.use_tools(state)
 
 
-@loop(until=is_answered, limit=50)
+@loop(until=waiting_for_user, limit=50)
 async def adefault_loop(agent: Agent, state: State):
     """The async version of ``default_loop``, used by ``agent.arun`` when the Agent has no loop of its own."""
     await acompact_if_full(agent, state)

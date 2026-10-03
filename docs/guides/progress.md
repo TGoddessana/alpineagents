@@ -18,13 +18,13 @@ Let me look at main.py first.
   done 1.2KB
 [turn 2] thinking
 The bug is on line 3.
-done: stopped by is_answered (2 turns)
+done: stopped by waiting_for_user (2 turns)
 ```
 
 - `[turn N] thinking` starts each model request. The model's text follows as it streams in.
 - Indented lines are tool calls and their results.
 - The last line says why the run stopped and how many turns it took. When the Model has prices, it also shows the
-  cost, for example `done: stopped by is_answered (5 turns, ~$0.42)`.
+  cost, for example `done: stopped by waiting_for_user (5 turns, ~$0.42)`.
 
 Other last lines:
 

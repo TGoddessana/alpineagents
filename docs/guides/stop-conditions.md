@@ -16,8 +16,7 @@ A loop stops in one of four ways. Pick the one that matches who decides.
 ```
 
 1. `waiting_for_user` is true when the model has answered: no call is pending, and the last message is the model's
-   and asks for no tool. You write it, so you decide what "done" means. The default loop has the same check as
-   `is_answered` ([Write your own loop](../learn/loop.md#the-name-is_answered)).
+   and asks for no tool. The default loop stops on it too ([Write your own loop](../learn/loop.md#waiting_for_user)).
 2. `spent_too_much` takes the State and returns `True` to stop.
 3. `until` takes a list. The loop stops when any function in it returns `True`.
 4. After the run, `state.stopped` is `StoppedByUntil("waiting_for_user")`, `StoppedByUntil("spent_too_much")` or

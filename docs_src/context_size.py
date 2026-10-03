@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, CompactIfFull, State, loop, tool
+from alpineagents import Agent, CompactIfFull, State, loop, tool, waiting_for_user
 
 compact = CompactIfFull(at=0.5, instructions="Keep file paths and failing test names")
 
@@ -9,13 +9,6 @@ compact = CompactIfFull(at=0.5, instructions="Keep file paths and failing test n
 def read_file(path: str) -> str:
     """Read a text file"""
     return Path(path).read_text()
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=100)

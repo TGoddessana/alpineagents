@@ -17,7 +17,7 @@ Terms in the order you meet them.
 | `StateInfo` | One saved State as `store.list()` shows it |
 | Reply | What the model returns for one request: text, tool calls or both |
 | Answer | `state.answer`: the value given to `finish`, or the text of the latest reply without tool calls |
-| Stop condition | A function from State to `bool` in `until=`. The loop stops when one returns `True`. The default loop's is named `is_answered` |
+| Stop condition | A function from State to `bool` in `until=`. The loop stops when one returns `True`. The default loop's is `waiting_for_user` |
 | Stop value | Why a run is set to stop: `state.stopped`. See [Loops and stop rules](loops.md#when-a-loop-stops) |
 | Block | A function that takes `(agent, state)` and does one step of a turn, such as `compact_if_full`. See [Write your own loop](../learn/loop.md#your-loop) |
 | Content block | A part of a message: text (`TextBlock`), an `Image`, a tool call (`ToolCall`) or a tool result. Not the same as a block |

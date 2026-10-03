@@ -11,8 +11,8 @@ A test needs no API key and no network. `FakeModel` replaces the model and retur
 1. `FakeModel` gets two replies: a call to `read_file`, then the answer.
 2. `agent.copy(model=fake, reporter=None)` is a new Agent with the same settings, a fake model and no terminal
    output. The Agent in your code stays as it is.
-3. The assertions check the answer, why the run stopped (`is_answered`, see
-   [Write your own loop](loop.md#the-name-is_answered)), and that every reply was used.
+3. The assertions check the answer, why the run stopped (see
+   [waiting_for_user](loop.md#waiting_for_user)), and that every reply was used.
 
 ## Replies FakeModel accepts
 
@@ -39,7 +39,7 @@ assert [t.name for t in fake.requests[0].tools] == ["read_file"]
 | To check | Assert on |
 | --- | --- |
 | The result | `state.answer` |
-| Why the run stopped | `state.stopped`, for example `StoppedByUntil("is_answered")` |
+| Why the run stopped | `state.stopped`, for example `StoppedByUntil("waiting_for_user")` |
 | How many turns | `state.turn` |
 | What happened, in order | `state.history`, for example `[h.kind for h in state.history]` |
 | What the model saw | `fake.requests` |

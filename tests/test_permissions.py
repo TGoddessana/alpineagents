@@ -371,7 +371,7 @@ def test_nobody_decides_denies_with_a_warning():
     assert [e for e in spy.events if e[0] == "end"] == [
         ("end", "read_file", NO_PERMISSION, ToolOutcome(ToolOutcomeKind.DENIED))
     ]
-    assert state.stopped == StoppedByUntil("is_answered")  # the run went on
+    assert state.stopped == StoppedByUntil("waiting_for_user")  # the run went on
 
 
 def test_permission_warning_is_a_top_level_user_warning():
@@ -874,7 +874,7 @@ async def test_arun_with_a_decide_by_human_subclass_that_changed_only_acheck_use
         state
     )
     assert ran == ["write_file a"] and human.questions == []
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_a_decide_by_human_subclass_that_changed_both_methods_still_asks_through_check():
@@ -977,7 +977,7 @@ def test_denied_with_stop_cancels_the_turn_and_stops_the_run():
 
     state.add_message(Message.user("Only read the file"))
     assert agent.run(state) == "Done"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
     last = fake.requests[-1].messages
     assert last[-1].text == "Only read the file"
     assert [b.content for b in last[-2].content] == [STOPPED_TURN, "Stop right there", STOPPED_TURN, STOPPED_TURN]
@@ -1101,7 +1101,7 @@ def test_a_permission_stop_is_cleared_by_the_next_run():
     agent.run(state)
     assert isinstance(state.stopped, StoppedByPermission)
     assert agent.run(state) == "Done"  # no new user message needed: the model answers the results
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_a_permission_stop_records_denied_cancelled_and_the_stop_as_one_block():
@@ -1273,7 +1273,7 @@ async def test_tool_error_from_a_permission_denies_the_call_and_the_run_continue
     assert len(denied) == 1 and denied[0].error is error and denied[0].is_error
     end = next(e for e in spy.events if e[0] == "end" and e[1] == "bash")
     assert end[3] == ToolOutcome(ToolOutcomeKind.DENIED, error, "Raising()")
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 @pytest.mark.parametrize("use_async", [False, True])

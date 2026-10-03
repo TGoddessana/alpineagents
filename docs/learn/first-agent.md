@@ -32,13 +32,13 @@ Progress is printed to the terminal while the agent works:
   done 6.7KB
 [turn 2] thinking
 README.md describes a Python agent framework.
-done: stopped by is_answered (2 turns)
+done: stopped by waiting_for_user (2 turns)
 ```
 
 1. In turn 1 the model asked for `read_file`. The Agent ran it, and the file was 6.7KB.
 2. In turn 2 the model had the file and answered, and the answer was printed.
 3. A turn is one model reply and the tool calls it asked for. The last line says why the run ended.
-   `is_answered` means the model answered without asking for a tool. [Write your own loop](loop.md#the-name-is_answered) explains the name.
+   `waiting_for_user` means the model answered without asking for a tool. [Write your own loop](loop.md#waiting_for_user) explains it.
 
 `agent.run` returns the answer, and `print` shows it a second time here. To hide the progress lines, pass
 `reporter=None` to `Agent`.

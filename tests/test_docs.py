@@ -429,7 +429,7 @@ def test_reporter(models, caplog):
 
     ns["agent"].copy(model=FakeModel([tool_call("recall", key="a"), "Done"]), tools=[recall]).run("Recall a")
     assert "turn 1: recall({'key': 'a'})" in caplog.text
-    assert "stopped by is_answered after 2 turns" in caplog.text
+    assert "stopped by waiting_for_user after 2 turns" in caplog.text
 
 
 def test_human(models, monkeypatch, tmp_path):
@@ -568,7 +568,7 @@ def test_testing_tool_failure_example(tmp_path, monkeypatch):
 
 def test_tool_failure_abort(models, capsys):
     models.append(FakeModel([tool_call("get_json", path="/legacy")]))
-    ns = run("tool_failure_abort")
+    run("tool_failure_abort")
     out = capsys.readouterr().out
     assert "exception raised in tool get_json" in out
     assert "tool_result get_json (error): (aborted: JSONDecodeError)" in out
@@ -807,7 +807,7 @@ def test_learn_conversation(models, capsys):
     models.append(FakeModel(["Flask, Django and FastAPI.", "Flask."]))
     run("learn_conversation")
     lines = capsys.readouterr().out.splitlines()
-    assert "stopped by is_answered" in lines
+    assert "stopped by waiting_for_user" in lines
     assert "[turn 1] model_reply: Flask, Django and FastAPI." in lines
     assert lines[-1] == "Flask."
 
@@ -844,7 +844,7 @@ def test_every_docs_src_file_is_used():
 def test_default_loop_on_the_learn_page_matches_the_source():
     page = (ROOT / "docs" / "learn" / "loop.md").read_text()
     source = (ROOT / "src" / "alpineagents" / "loop.py").read_text()
-    for line in ["@loop(until=is_answered, limit=50)", "def default_loop(agent: Agent, state: State):",
+    for line in ["@loop(until=waiting_for_user, limit=50)", "def default_loop(agent: Agent, state: State):",
                  "    compact_if_full(agent, state)", "    agent.think(state)", "    if state.pending_calls:",
                  "        agent.use_tools(state)"]:
         assert line in page and line in source, line

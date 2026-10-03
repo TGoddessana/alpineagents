@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, Message, State, ToolError, compact_if_full, loop, tool
+from alpineagents import Agent, Message, State, ToolError, compact_if_full, loop, tool, waiting_for_user
 
 
 @tool
@@ -10,13 +10,6 @@ def read_file(path: str) -> str:
     if not file.exists():
         raise ToolError(f"No such file: {path}")
     return file.read_text()
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 def warn_when_long(agent: Agent, state: State):

@@ -723,7 +723,7 @@ def test_denied_outcome_for_a_permission_that_denies():
     assert by_name["failing"].outcome == ToolOutcomeKind.DENIED
     assert (by_name["failing"].content, by_name["failing"].is_error) == ("not allowed", True)
     assert by_name["fine"].outcome == ToolOutcomeKind.DONE and not by_name["fine"].is_error  # the other call ran
-    assert str(ran.state.stopped) == "stopped by is_answered"  # a plain denial does not stop the run
+    assert str(ran.state.stopped) == "stopped by waiting_for_user"  # a plain denial does not stop the run
 
 
 def test_cancelled_outcome_for_the_calls_of_a_stopped_turn():

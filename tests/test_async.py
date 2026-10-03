@@ -105,7 +105,7 @@ async def test_arun_default_loop_with_sync_tool():
     agent = make_agent([tool_call("add", a=1, b=2), "It is 3"], tools=[add])
     state = State(messages=[Message.user("What is 1 + 2?")])
     assert await agent.arun(state) == "It is 3"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
     assert [e.content for e in state.history if e.kind == "tool_result"] == ["3"]
 
 
@@ -861,10 +861,10 @@ async def test_context_used_and_tokens_work_inside_async_code():
 # ================================================================ async loops record stops as StopEntry
 
 
-async def test_async_default_loop_records_the_is_answered_stop():
+async def test_async_default_loop_records_the_waiting_for_user_stop():
     state = State(messages=[Message.user("Task")])
     await make_agent(["answer"]).arun(state)
-    assert [e.content for e in state.history if isinstance(e, StopEntry)] == [StoppedByUntil("is_answered")]
+    assert [e.content for e in state.history if isinstance(e, StopEntry)] == [StoppedByUntil("waiting_for_user")]
 
 
 async def test_async_finish_is_recorded_as_a_stop_entry_with_the_answer():

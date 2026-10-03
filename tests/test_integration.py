@@ -229,7 +229,7 @@ def test_stopped_is_cleared_when_a_later_run_raises():
     agent = Agent(fake, reporter=None)
     state = State(messages=[Message.user("Question")])
     agent.run(state)
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
     state.add_message(Message.user("One more"))
     with pytest.raises(RuntimeError):

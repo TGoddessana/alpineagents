@@ -19,7 +19,7 @@ import time
 import pytest
 
 from alpineagents import Agent, Message, Reporter, State, StoppedByLimit, StoppedByUntil, tool
-from alpineagents.loop import is_answered
+from alpineagents import waiting_for_user
 from alpineagents.permissions import DenyByName
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents import types
@@ -113,12 +113,12 @@ def test_an_empty_state_has_no_history_and_no_times():
 
 
 def test_default_until_is_true_when_last_message_is_toolcall_free_reply():
-    # The default loops' until (loop.is_answered): the last message is a model reply without tool calls.
+    # The default loops' until (waiting_for_user): the last message is a model reply without tool calls.
     agent = make_agent(["The bug is on line 3"])
     state = task("Find the bug")
-    assert is_answered(state) is False
+    assert waiting_for_user(state) is False
     agent.think(state)
-    assert is_answered(state) is True
+    assert waiting_for_user(state) is True
 
 
 def test_default_until_is_false_after_adding_anything_after_the_answer():
@@ -126,9 +126,9 @@ def test_default_until_is_false_after_adding_anything_after_the_answer():
     agent = make_agent(["The bug is on line 3"])
     state = task("Find the bug")
     agent.think(state)
-    assert is_answered(state) is True
+    assert waiting_for_user(state) is True
     state.add_message(Message.notice("Extra instruction"))
-    assert is_answered(state) is False
+    assert waiting_for_user(state) is False
 
 
 def test_default_until_is_false_while_pending_calls_exist():
@@ -136,7 +136,7 @@ def test_default_until_is_false_while_pending_calls_exist():
     agent = make_agent([call])
     state = task("Find the bug")
     agent.think(state)
-    assert is_answered(state) is False
+    assert waiting_for_user(state) is False
 
 
 def test_pending_calls_are_non_empty_iff_the_model_asked_for_tools():
@@ -262,7 +262,7 @@ def test_stopped_is_until_function_name_when_condition_true():
     state = task()
     answer = agent.run(state)
     assert answer == "final answer"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_stopped_is_limit_when_turn_limit_reached():
@@ -274,7 +274,7 @@ def test_stopped_is_limit_when_turn_limit_reached():
         """Do nothing."""
         return "ok"
 
-    @loop_decorator(until=is_answered, limit=2)
+    @loop_decorator(until=waiting_for_user, limit=2)
     def never_answers(agent, state):
         agent.think(state)
         if state.pending_calls:
@@ -1009,7 +1009,7 @@ def test_str_summarizes_history_one_line_per_entry():
     assert "Find the bug" in lines[0]
     assert "read_file" in text
     assert "The bug is on line 3" in text
-    assert lines[-1] == "done: stopped by is_answered (2 turns)"
+    assert lines[-1] == "done: stopped by waiting_for_user (2 turns)"
 
 
 def test_repr_shows_the_snapshot_values():

@@ -1,17 +1,10 @@
-from alpineagents import Agent, State, StoppedByFinish, StoppedByPermission, loop, tool
+from alpineagents import Agent, State, StoppedByFinish, StoppedByPermission, loop, tool, waiting_for_user
 
 
 @tool
 def look(topic: str) -> str:
     """Look something up"""
     return f"Notes on {topic}"
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=5)

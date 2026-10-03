@@ -4,6 +4,21 @@ All notable changes to alpineagents are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/)
 (while the version is 0.x, a minor release may change the API).
 
+## [Unreleased]
+
+### Added
+
+- **`waiting_for_user`**, exported from `alpineagents`: the `until` function that is true when the model has handed
+  the turn back (nothing pending, and the last message is its reply without tool calls). Import it instead of
+  writing the five-line check: `@loop(until=waiting_for_user, limit=30)`.
+
+### Changed
+
+- The default loops stop on `waiting_for_user`, so a finished run shows `stopped by waiting_for_user` and
+  `state.stopped == StoppedByUntil("waiting_for_user")` (was `"is_answered"`). States saved by 0.5.0 load as before;
+  their recorded stops keep the old name.
+- The docs are reorganized into Learn, Guides, Concepts and API reference tabs, and build an `llms.txt`.
+
 ## [0.5.0] - 2026-10-03
 
 This release rebuilds the State on its history, and it is a breaking one: nothing removed keeps an alias. Read

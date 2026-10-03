@@ -206,7 +206,7 @@ def test_run_saves_and_load_rebuilds_the_state(tmp_path):
     assert loaded.turn == state.turn == 2
     assert loaded.usage == state.usage
     assert loaded.answer == "It is 3"
-    assert loaded.stopped == StoppedByUntil("is_answered")
+    assert loaded.stopped == StoppedByUntil("waiting_for_user")
     assert loaded.extra_data == {"seen": ["x", {"n": 1}]}
     assert loaded.created_at == state.created_at and loaded.updated_at == state.updated_at
     assert not loaded.finished and loaded.pending_calls == ()
@@ -408,7 +408,7 @@ def test_saves_after_each_step_and_skips_unchanged_states():
     record = store.states["s"]
     assert len(record.entries) == len(state.history)
     assert record.info["turn"] == 2
-    assert record.info["stopped"] == {"kind": "until", "name": "is_answered"}
+    assert record.info["stopped"] == {"kind": "until", "name": "waiting_for_user"}
     writes = store.writes
     store.save(state)
     assert store.writes == writes  # nothing new
@@ -464,7 +464,7 @@ def test_state_info_fields_from_list(tmp_path):
     one, two = infos["one"], infos["two"]
     assert isinstance(one, StateInfo)
     assert one.first_message == "First\nwith a second line"  # the full text, not cut
-    assert (one.turn, one.stopped, one.finished) == (1, StoppedByUntil("is_answered"), False)
+    assert (one.turn, one.stopped, one.finished) == (1, StoppedByUntil("waiting_for_user"), False)
     assert (two.first_message, two.turn, two.finished) == ("Second", 1, True)
     assert two.stopped == StoppedByFinish(answer={"x": 1})
     saved = store.load("two")
@@ -501,7 +501,7 @@ def test_state_info_from_info_for_store_implementers():
     make_agent(["Hello"], store=store).run(state)
     [info] = store.list()
     assert info == StateInfo.from_info("m", store.states["m"].info)
-    assert (info.id, info.first_message, info.turn, info.stopped) == ("m", "Hi", 1, StoppedByUntil("is_answered"))
+    assert (info.id, info.first_message, info.turn, info.stopped) == ("m", "Hi", 1, StoppedByUntil("waiting_for_user"))
     assert info.created_at == state.created_at and info.updated_at == state.updated_at
 
 
@@ -1194,7 +1194,7 @@ def test_file_store_layout_on_disk(tmp_path):
     assert info["v"] == 4
     assert set(info) == {"v", "first_message", "created_at", "updated_at", "turn", "stopped", "finished"}
     assert info["first_message"] == "Sum" and info["turn"] == 2 and info["finished"] is False
-    assert info["stopped"] == {"kind": "until", "name": "is_answered"}
+    assert info["stopped"] == {"kind": "until", "name": "waiting_for_user"}
     assert store.read("lay") == Record(entries, info)
 
 
@@ -1223,7 +1223,7 @@ def test_list_and_delete(tmp_path):
     assert (saved[0].first_message, saved[0].turn, saved[0].stopped, saved[0].finished) == (
         "Second",
         1,
-        StoppedByUntil("is_answered"),
+        StoppedByUntil("waiting_for_user"),
         False,
     )
 

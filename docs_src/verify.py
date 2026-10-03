@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from alpineagents import Agent, Message, State, loop, tool
+from alpineagents import Agent, Message, State, loop, tool, waiting_for_user
 
 
 @tool
@@ -14,13 +14,6 @@ def failing_tests() -> str | None:
     """The pytest output if any test fails, otherwise None."""
     result = subprocess.run(["pytest", "-q"], capture_output=True, text=True)
     return None if result.returncode == 0 else result.stdout[-3000:]
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=40)

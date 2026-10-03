@@ -1,19 +1,12 @@
 from pathlib import Path
 
-from alpineagents import Agent, Message, State, StoppedByLimit, loop, tool
+from alpineagents import Agent, Message, State, StoppedByLimit, loop, tool, waiting_for_user
 
 
 @tool
 def read_file(path: str) -> str:
     """Read a text file"""
     return Path(path).read_text()
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 def spent_too_much(state: State) -> bool:

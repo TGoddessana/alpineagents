@@ -14,7 +14,7 @@ page has the rules.
 | An `until` function returns `True` | When the loop checks it, before a turn | `StoppedByUntil(name)`, for example `StoppedByUntil("waiting_for_user")` |
 | `limit` turns have run in this call | When the loop checks it, before a turn | `StoppedByLimit(turns)`, where `turns` is the limit |
 
-The default loop's check has its own name: [`is_answered`](../learn/loop.md#the-name-is_answered).
+The default loop stops on [`waiting_for_user`](../learn/loop.md#waiting_for_user).
 
 Before every turn, the loop stops if `state.stopped` is already set. Otherwise it checks the `until` functions, then
 `limit`. Each stop is a `StopEntry` in `state.history`.
@@ -31,14 +31,7 @@ Before every turn, the loop stops if `state.stopped` is already set. Otherwise i
 `until` takes a function from State to `bool`, or a list of them. The loop stops when any of them returns `True`.
 
 ```python
-from alpineagents import Agent, State, loop
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
+from alpineagents import Agent, State, loop, waiting_for_user
 
 
 def spent_too_much(state: State) -> bool:
@@ -69,14 +62,7 @@ A loop is any function that takes `(agent, state)`. One written without `@loop` 
 check `state.stopped` yourself:
 
 ```python
-from alpineagents import Agent, State
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
+from alpineagents import Agent, State, waiting_for_user
 
 
 def my_loop(agent: Agent, state: State):

@@ -1163,7 +1163,7 @@ class State:
 
         E.g. ``[turn 0] user: Find the bug`` / ``[turn 1] model_reply: read_file(path="main.py")`` /
         ``[turn 1] tool_result read_file: 1.2KB`` / ``[turn 1] tool_result fetch_url (error): HTTP 404: …`` /
-        ``done: stopped by is_answered (2 turns)``
+        ``done: stopped by waiting_for_user (2 turns)``
         """
         snap = self._snap
         lines = [_describe_entry(entry) for entry in snap.history]
@@ -1728,14 +1728,9 @@ _REMOVED_NAMES: dict[str, tuple[str, str, str]] = {
         'with state.edit_extra_data() as d:\n    d["calls"] = d.get("calls", 0) + 1',
     ),
     "is_answered": (
-        "State.is_answered is gone in 0.5: an until function is one you write",
-        "write the check for your task: the last message is an assistant message without tool calls, and nothing "
-        "is pending",
-        "def waiting_for_user(state: State) -> bool:\n"
-        "    if state.pending_calls or not state.messages:\n"
-        "        return False\n"
-        "    last = state.messages[-1]\n"
-        '    return last.role == "assistant" and not last.tool_calls',
+        "State.is_answered is gone in 0.5: the same check is the function waiting_for_user",
+        "import it, and pass the function itself to until=",
+        "from alpineagents import waiting_for_user\n\n@loop(until=waiting_for_user, limit=50)",
     ),
     "wants_tools": (
         "state.wants_tools() is gone in 0.5",

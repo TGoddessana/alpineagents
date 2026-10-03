@@ -28,4 +28,4 @@ def test_a_missing_file_is_an_error_result(tmp_path, monkeypatch):
 
     result = next(h for h in state.history if h.kind == "tool_result")
     assert (result.content, result.is_error) == ("No such file: missing.py", True)
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")

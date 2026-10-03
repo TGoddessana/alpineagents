@@ -61,8 +61,8 @@ the same shape.
 [turn 1] tool_result read_file: 8B
 [turn 2] model_request: anthropic/claude-sonnet-5
 [turn 2] model_reply: Line 1 is fine.
-[turn 2] stop: stopped by is_answered
-done: stopped by is_answered (2 turns)
+[turn 2] stop: stopped by waiting_for_user
+done: stopped by waiting_for_user (2 turns)
 ```
 
 That list is `state.history`, and it is all a State is: `state.messages`, `state.turn`, `state.answer` and the rest are

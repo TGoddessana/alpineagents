@@ -9,7 +9,7 @@ import threading
 import pytest
 
 from alpineagents.agent import Agent
-from alpineagents.loop import is_answered
+from alpineagents import waiting_for_user
 from alpineagents.models.base import Model
 from alpineagents.state import State
 from alpineagents.testing import FakeModel
@@ -175,20 +175,20 @@ def test_user_message_added_during_think_goes_after_the_reply():
         ("assistant", "first answer"),
         ("user", "NEW QUESTION"),
     ]
-    assert not is_answered(state)
+    assert not waiting_for_user(state)
 
 
 def test_default_until_is_false_when_a_message_was_deferred_during_think():
     state = task()
     state._begin_think(MODEL)
     state._record_reply(_text_reply("a"))
-    assert is_answered(state)
+    assert waiting_for_user(state)
     state._begin_think(MODEL)
     state.add_message(Message.user("more"))
     state._record_reply(_text_reply("b"))
     # "more" arrived while the model answered "b", so it comes after it and the loop must go on.
     assert [m.text for m in state.messages][-2:] == ["b", "more"]
-    assert not is_answered(state)
+    assert not waiting_for_user(state)
 
 
 def test_message_added_during_think_with_tool_calls_goes_after_the_results():

@@ -187,7 +187,7 @@ def test_a_state_with_a_history_pickles_the_state_free_way():
         ("context", "state.messages"),
         ("task", "state.messages[0]"),
         ("lock", "edit_extra_data()"),
-        ("is_answered", "until function"),
+        ("is_answered", "waiting_for_user"),
         ("wants_tools", "pending_calls"),
         ("is_finished", "state.finished"),
         ("add_user_message", "Message.user"),

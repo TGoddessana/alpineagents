@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool
+from alpineagents import Agent, State, ToolError, compact_if_full, loop, tool, waiting_for_user
 
 
 @tool
@@ -22,13 +22,6 @@ def read_file(path: str) -> str:
 def write_file(path: str, content: str) -> None:
     """Create a file, or replace its content"""
     Path(path).write_text(content)
-
-
-def waiting_for_user(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
 
 
 @loop(until=waiting_for_user, limit=30)

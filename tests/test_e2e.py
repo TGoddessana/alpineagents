@@ -448,7 +448,7 @@ def test_reporter_none_is_silent_and_does_not_change_behavior():
 
     assert state_silent.answer == state_with_reporter.answer == "Answer"
     assert state_silent.turn == state_with_reporter.turn
-    assert state_silent.stopped == state_with_reporter.stopped == StoppedByUntil("is_answered")
+    assert state_silent.stopped == state_with_reporter.stopped == StoppedByUntil("waiting_for_user")
     assert len(reporter.events) > 0  # control: with a reporter, notifications really pile up
 
 
@@ -509,7 +509,7 @@ def test_terminal_end_to_end_output_shape_for_tool_then_answer():
         f"  done {_byte_size('hello')}\n"
         "[turn 2] thinking\n"
         "The bug is on line 3\n"
-        "done: stopped by is_answered (2 turns)\n"
+        "done: stopped by waiting_for_user (2 turns)\n"
     )
     assert out.getvalue() == expected
 
@@ -531,7 +531,7 @@ def test_terminal_shows_limit_warning_line_end_to_end():
 
     out = io.StringIO()
     terminal = Terminal(output=out)
-    fake = FakeModel([tool_call("noop")])  # only calls a tool, never answers -> is_answered stays false
+    fake = FakeModel([tool_call("noop")])  # only calls a tool, never answers -> waiting_for_user stays false
     agent = Agent(model=fake, tools=[noop], loop=one_turn_loop, reporter=terminal, human=None)
     state = State(messages=[Message.user("A task that never ends")])
     agent.run(state)
@@ -739,7 +739,7 @@ def test_reads_file_then_answers():
 
     assert state.answer == "The bug is on line 3"
     assert state.turn == 2
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 # ======================================================================
@@ -848,7 +848,7 @@ def test_one_state_carried_through_two_models_with_a_user_message_between_runs()
         "stop",
     ]
     assert [e.content for e in state.history if e.kind == "model_request"] == ["fake/cheap", "fake/strong"]
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
     # the invariant of 0.5: the history alone gives back the same State
     assert State(history=state.history).snapshot() == state.snapshot()
 

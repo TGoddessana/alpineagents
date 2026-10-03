@@ -9,17 +9,10 @@ A loop does one turn, and a decorator repeats the turn until a stop condition is
 default loop:
 
 ```python
-from alpineagents import Agent, State, compact_if_full, loop
+from alpineagents import Agent, State, compact_if_full, loop, waiting_for_user
 
 
-def is_answered(state: State) -> bool:
-    if state.pending_calls or not state.messages:
-        return False
-    last = state.messages[-1]
-    return last.role == "assistant" and not last.tool_calls
-
-
-@loop(until=is_answered, limit=50)
+@loop(until=waiting_for_user, limit=50)
 def default_loop(agent: Agent, state: State):
     compact_if_full(agent, state)
     agent.think(state)
@@ -34,15 +27,16 @@ def default_loop(agent: Agent, state: State):
    them to the model.
 4. `@loop` repeats the body. It stops when `until` is true, or after `limit` turns.
 
-## The name `is_answered`
+## waiting_for_user
 
-The `until` function says when the loop is done: the model answered, with no tool call waiting. The examples on
-these pages define the same check as `waiting_for_user`. The default loop has it as `is_answered`. The check is the
-same, only the name differs. A State has no such method, because what counts as done is your decision.
+`waiting_for_user` is the stop condition of the default loop, and you can import it for yours. It is true when the
+model has handed the turn back: nothing waits for a tool result, and the last message is the model's reply without
+tool calls. It means "your turn", not "the task is done": a message added after the reply makes it false again, and
+the loop goes on.
 
-The name shows up wherever a stop is shown. A run stopped by `is_answered` prints `done: stopped by is_answered`,
-and `state.stopped` is `StoppedByUntil("is_answered")`. With your own function it is `StoppedByUntil("waiting_for_user")`.
-Tests assert on that name.
+Its name is what a stop shows: `done: stopped by waiting_for_user` in the terminal, and
+`StoppedByUntil("waiting_for_user")` in `state.stopped`. Any function from State to `bool` works as `until`; its
+name is shown the same way.
 
 ## Your loop
 
@@ -52,7 +46,7 @@ Add a step of your own to the turn. This loop warns the model when it has used 2
 --8<-- "docs_src/learn_loop.py"
 ```
 
-1. `waiting_for_user` is the stop condition. It takes the State and returns `True` to stop.
+1. `waiting_for_user` is the stop condition, imported from the library.
 2. `warn_when_long` is a block: a function that takes `(agent, state)` and does one step of a turn. It adds a notice
    to the messages. `compact_if_full` is a block that comes with the library.
 3. `coding` is the loop. `@loop` needs both `until` and `limit`, and `limit=30` means 30 turns at most. Reaching

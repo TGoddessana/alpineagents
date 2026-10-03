@@ -27,7 +27,7 @@ from alpineagents import (
     tool,
 )
 from alpineagents import _serial, types
-from alpineagents.loop import is_answered
+from alpineagents import waiting_for_user
 from alpineagents.testing import FakeModel, tool_call
 
 CALL = tool_call("delete_file", path="main.py")
@@ -71,7 +71,7 @@ def test_stop_values_are_exported_and_the_union_lives_in_types():
 
 
 def test_stop_values_compare_by_value_and_are_frozen():
-    assert StoppedByUntil("is_answered") == StoppedByUntil("is_answered") != StoppedByUntil("other")
+    assert StoppedByUntil("waiting_for_user") == StoppedByUntil("waiting_for_user") != StoppedByUntil("other")
     assert StoppedByLimit(30) == StoppedByLimit(30) != StoppedByLimit(31)
     assert StoppedByFinish() == StoppedByFinish()
     assert StoppedByPermission(CALL, "X()") == StoppedByPermission(CALL, "X()") != StoppedByPermission(CALL, "Y()")
@@ -82,7 +82,7 @@ def test_stop_values_compare_by_value_and_are_frozen():
 @pytest.mark.parametrize(
     "stopped, text",
     [
-        (StoppedByUntil("is_answered"), "stopped by is_answered"),
+        (StoppedByUntil("waiting_for_user"), "stopped by waiting_for_user"),
         (StoppedByLimit(30), "stopped at limit 30"),
         (StoppedByFinish(), "stopped by finish"),
         (BY_PERMISSION, "stopped by permission DecideByHuman()"),
@@ -184,7 +184,7 @@ def test_run_clears_the_previous_stop():
     make_agent(["Done"]).run(state)
     # The stale request did not stop the loop before its first turn.
     assert state.turn == 1
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 async def test_arun_clears_the_previous_stop():
@@ -192,7 +192,7 @@ async def test_arun_clears_the_previous_stop():
     stop_by_permission(state)
     await make_agent(["Done"]).arun(state)
     assert state.turn == 1
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
 
 
 @pytest.mark.parametrize("use_async", [False, True])
@@ -278,7 +278,7 @@ def test_finish_in_a_tool_is_visible_in_the_same_turn_and_to_the_reporter():
         def on_tool_end(self, state, call, result, outcome):
             reported.append(state.stopped)
 
-    @loop(until=is_answered, limit=5)
+    @loop(until=waiting_for_user, limit=5)
     def body(agent, state):
         assert state.stopped is None
         agent.think(state)
@@ -297,7 +297,7 @@ async def test_a_loop_without_at_loop_stops_on_finish(use_async):
     turns = []
 
     def plain(agent, state):
-        while state.stopped is None and not is_answered(state):
+        while state.stopped is None and not waiting_for_user(state):
             turns.append(state.turn)
             agent.think(state)
             if state.pending_calls:
@@ -305,7 +305,7 @@ async def test_a_loop_without_at_loop_stops_on_finish(use_async):
         return state.answer
 
     async def aplain(agent, state):
-        while state.stopped is None and not is_answered(state):
+        while state.stopped is None and not waiting_for_user(state):
             turns.append(state.turn)
             await agent.athink(state)
             if state.pending_calls:
@@ -349,7 +349,7 @@ def test_nothing_public_is_named_stop_requested():
     "stopped, saved",
     [
         (None, None),
-        (StoppedByUntil("is_answered"), {"kind": "until", "name": "is_answered"}),
+        (StoppedByUntil("waiting_for_user"), {"kind": "until", "name": "waiting_for_user"}),
         (StoppedByLimit(30), {"kind": "limit", "turns": 30}),
         (StoppedByFinish(), {"kind": "finish", "answer": None}),
         (StoppedByFinish({"summary": "done"}), {"kind": "finish", "answer": {"summary": "done"}}),
@@ -382,7 +382,7 @@ def test_format_version_is_4():
     "stopped",
     [
         None,
-        StoppedByUntil("is_answered"),
+        StoppedByUntil("waiting_for_user"),
         StoppedByLimit(30),
         StoppedByFinish("answer"),
         BY_PERMISSION,
@@ -422,14 +422,14 @@ def test_permission_stop_survives_a_store_and_does_not_block_the_next_run(tmp_pa
     loaded.add_message(Message.user("Go on"))
     assert make_agent(["Done"], store=store).run(loaded) == "Done"
     assert loaded.turn == 2
-    assert loaded.stopped == StoppedByUntil("is_answered")
-    assert store.load("perm").stopped == StoppedByUntil("is_answered")
+    assert loaded.stopped == StoppedByUntil("waiting_for_user")
+    assert store.load("perm").stopped == StoppedByUntil("waiting_for_user")
 
 
 def test_finish_in_a_tool_is_in_the_info_saved_after_that_tool(tmp_path):
     saved = []
 
-    @loop(until=is_answered, limit=5)
+    @loop(until=waiting_for_user, limit=5)
     def body(agent, state):
         agent.think(state)
         if state.pending_calls:

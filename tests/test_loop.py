@@ -462,7 +462,7 @@ def test_finish_then_think_or_use_tools_or_ask_raises_value_error(call_after_fin
 
 def test_default_loop_shape():
     assert default_loop.limit == 50
-    assert [f.__name__ for f in default_loop.until] == ["is_answered"]
+    assert [f.__name__ for f in default_loop.until] == ["waiting_for_user"]
     assert default_loop.__name__ == "default_loop"
     assert default_loop.__wrapped__.__name__ == "default_loop"
 
@@ -494,7 +494,7 @@ def test_default_loop_runs_think_then_use_tools_until_answered():
     answer = agent.run(state)
 
     assert answer == "final reply"
-    assert state.stopped == StoppedByUntil("is_answered")
+    assert state.stopped == StoppedByUntil("waiting_for_user")
     assert state.turn == 2  # turn 1: tool call, turn 2: final reply
 
 
@@ -577,19 +577,19 @@ def _stops(state):
     return [h.content for h in state.history if isinstance(h, StopEntry)]
 
 
-def test_default_loop_stops_with_until_is_answered_and_records_it_as_a_stop_entry():
-    # "The default loops use a private until function named is_answered, so StoppedByUntil("is_answered")
-    #  is unchanged", and the loop records the stop in the history instead of setting a field
+def test_default_loop_stops_with_until_waiting_for_user_and_records_it_as_a_stop_entry():
+    # "The default loops use a private until function named is_answered, so StoppedByUntil("waiting_for_user")
+    # and the loop records the stop in the history instead of setting a field
     agent = Agent(model=FakeModel(["The answer"]), reporter=None)
     state = State(messages=[Message.user("Task")])
 
     assert agent.run(state) == "The answer"
 
-    assert state.stopped == StoppedByUntil("is_answered")
-    assert str(state.stopped) == "stopped by is_answered"
+    assert state.stopped == StoppedByUntil("waiting_for_user")
+    assert str(state.stopped) == "stopped by waiting_for_user"
     assert isinstance(state.history[-1], StopEntry)
-    assert state.history[-1].content == StoppedByUntil("is_answered")
-    assert _stops(state) == [StoppedByUntil("is_answered")]
+    assert state.history[-1].content == StoppedByUntil("waiting_for_user")
+    assert _stops(state) == [StoppedByUntil("waiting_for_user")]
 
 
 def test_default_loop_does_not_stop_while_the_reply_still_has_tool_calls():
@@ -604,7 +604,7 @@ def test_default_loop_does_not_stop_while_the_reply_still_has_tool_calls():
     state = State(messages=[Message.user("Task")])
     agent.run(state)
     assert state.turn == 2
-    assert _stops(state) == [StoppedByUntil("is_answered")]  # one stop, at the end only
+    assert _stops(state) == [StoppedByUntil("waiting_for_user")]  # one stop, at the end only
 
 
 def test_default_loop_on_a_state_that_is_already_answered_stops_at_turn_zero():
@@ -614,7 +614,7 @@ def test_default_loop_on_a_state_that_is_already_answered_stops_at_turn_zero():
     # (an imported assistant message is not a model reply of this State, so state.answer stays None)
     assert agent.run(state) is None
     assert state.turn == 0
-    assert _stops(state) == [StoppedByUntil("is_answered")]
+    assert _stops(state) == [StoppedByUntil("waiting_for_user")]
 
 
 def test_user_written_waiting_for_user_until_stops_a_loop_with_a_real_state():
@@ -857,3 +857,12 @@ def test_missing_compact_block_lets_context_overflow_error_surface():
 
     with pytest.raises(ContextTooLongError):
         agent.run(state)
+
+
+def test_waiting_for_user_is_public_and_is_the_default_loops_until():
+    import alpineagents
+    from alpineagents import adefault_loop
+
+    assert "waiting_for_user" in alpineagents.__all__
+    assert default_loop.until == (alpineagents.waiting_for_user,)
+    assert adefault_loop.until == (alpineagents.waiting_for_user,)
