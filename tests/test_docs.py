@@ -132,9 +132,25 @@ def test_coding_agent(models, monkeypatch, tmp_path, capsys):
     assert "Added test_calc.py" in capsys.readouterr().out
 
 
+def test_readme_state(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("calc.py").write_text("def add(a, b):\n    return a + b\n")
+    fake = FakeModel(["Added a test", "Added test_calc.py", "The tests pass"])
+    models.append(fake)
+    ns = run("coding_agent", "readme_state")
+    state = ns["state"]
+    assert state.answer == "The tests pass"
+    assert state.stopped == StoppedByUntil("waiting_for_user")
+    assert [m.text for m in state.messages if m.role == "user"] == [
+        "Add a test for the add() function in calc.py",
+        "Now run the tests",
+    ]
+    assert "Added test_calc.py stopped by waiting_for_user" in capsys.readouterr().out
+
+
 def test_readme_code_matches_docs_src():
     readme = (ROOT / "README.md").read_text()
-    for name in ["quickstart", "no_api_key", "coding_agent"]:
+    for name in ["quickstart", "no_api_key", "coding_agent", "readme_state"]:
         assert (DOCS_SRC / f"{name}.py").read_text().strip() in readme, name
 
 

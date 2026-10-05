@@ -159,13 +159,15 @@ state = State(messages=[Message.user("Add a test for the add() function in calc.
 agent.run(state)
 
 print(state.answer, state.stopped, state.usage.cost)
-state.add_message(Message.user("Now run the tests"))   # the one way to talk to it
-agent.run(state)                                       # continues the same conversation
+state.add_message(Message.user("Now run the tests"))  # the person's next message
+agent.run(state)  # continues the same conversation
 ```
 
-Every change to a State adds one entry to `state.history`, and everything else is computed from it. A snapshot goes
-back, a fork tries another path, and `FileStore` with `Agent(store=...)` saves the history to continue it in another
-process.
+`add_message` also takes `Message.notice(...)`, a message from your code such as a test result.
+
+Every change to a State adds an entry to `state.history`, and everything else is computed from it.
+`state.restore(snapshot)` goes back to a `state.snapshot()` taken earlier, `state.fork()` tries another path from here,
+and `FileStore` with `Agent(store=...)` saves the history to continue it in another process.
 
 ## Documentation
 
