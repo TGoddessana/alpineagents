@@ -25,7 +25,7 @@ from .human import check_returns as check_human_returns
 from .mcp_tools import MCP, MCPTool, MCPToolRef, check_tool_names, wait_sync
 from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
-from .permissions import Permission, _asks_only_async, _needs_agent_human, _only_async
+from .permissions import Permission, _asks_only_async, _effective, _needs_agent_human, _only_async, _owned
 from .reporter import Reporter
 from .state import State, _RunContext
 from .store import Store
@@ -164,7 +164,13 @@ class Agent:
                 ``alpineagents.permissions``). ``None`` (the default) runs every call without checks; to turn
                 checks off on a copy, ``agent.copy(permissions=None)``. A list, even an empty one, is asked about
                 every call, and a call no permission allows is denied with a ``PermissionWarning`` (so ``[]``
-                denies every call).
+                denies every call). They apply to every tool call of the run, the calls inside its subagents
+                included. A subagent without ``permissions=`` is checked by the same list, and a subagent with its
+                own list is checked by that list, after the ``DenyPermission`` of the runs above it: those
+                cannot be widened, but the allow and decide permissions of the parent are not asked about the
+                subagent's calls (so the parent's "deny the rest" does not bind it). A permission asks the
+                ``human`` of the Agent that wrote it. Put limits that must always hold in ``DenyByName`` and the
+                like.
             name: The Agent's name.
             description: What the Agent does.
 
@@ -753,6 +759,7 @@ class Agent:
         check_sync_call("use_tools")
         self._mcp_ensure()
         calls = self._begin_use_tools(state, "use_tools")
+        context = self._context_for(state)
         try:
             if calls:
                 run_calls(
@@ -761,8 +768,8 @@ class Agent:
                     self._tool_map(),
                     self._reporter_for(state),
                     self._tool_saver(state),
-                    self._permissions,
-                    self._context_for(state),
+                    context.permissions,
+                    context,
                 )
         except BaseException as e:
             self._save_after(state, e)
@@ -778,6 +785,7 @@ class Agent:
         # _runner.arun_calls.
         await self._amcp_ensure()
         calls = self._begin_use_tools(state, "ause_tools")
+        context = self._context_for(state)
         try:
             if calls:
                 await arun_calls(
@@ -786,8 +794,8 @@ class Agent:
                     self._tool_map(),
                     self._reporter_for(state),
                     self._atool_saver(state),
-                    self._permissions,
-                    self._context_for(state),
+                    context.permissions,
+                    context,
                 )
         except BaseException as e:
             await self._asave_after(state, e)
@@ -1143,7 +1151,7 @@ class Agent:
         for a permission that only checks asynchronously in a sync ``run``, or a ``DecideByHuman`` whose Human only
         answers asynchronously; ``NoHumanError`` for a ``DecideByHuman()`` when the run has no human to ask (the
         Agent's, or the parent run's for a subagent that was not given one)."""
-        for permission in self._permissions or ():
+        for permission, human in context.permissions or ():
             if method == "run" and _only_async(permission):
                 raise TypeError(
                     fix_message(
@@ -1153,7 +1161,7 @@ class Agent:
                         'answer = await agent.arun("...")',
                     )
                 )
-            if _needs_agent_human(permission) and context.human is None:
+            if _needs_agent_human(permission) and human is None:
                 raise NoHumanError(
                     fix_message(
                         f"{permission!r} in permissions= asks the Agent's human, and "
@@ -1171,11 +1179,11 @@ class Agent:
                         'agent.copy(human=FakeHuman(["yes"]))',
                     )
                 )
-            human = _asks_only_async(permission, context.human) if method == "run" else None
-            if human is not None:
+            asked = _asks_only_async(permission, human) if method == "run" else None
+            if asked is not None:
                 raise TypeError(
                     fix_message(
-                        f"{permission!r} in permissions= asks {type(human).__name__}, which answers only asynchronously (it "
+                        f"{permission!r} in permissions= asks {type(asked).__name__}, which answers only asynchronously (it "
                         "implements aask, not ask), so this Agent cannot run with run()",
                         "Await it with arun() inside async code, or give the Human an ask method as well",
                         'answer = await agent.arun("...")',
@@ -1186,22 +1194,27 @@ class Agent:
 
     def _own_context(self) -> _RunContext:
         """This Agent's own reporter, human and store."""
-        return _RunContext(self, self.reporter, self.human, self._store)
+        return _RunContext(
+            self, self.reporter, self.human, self._store, permissions=_owned(self._permissions, self.human)
+        )
 
     def _new_run_context(self) -> _RunContext:
         """What applies to a run this Agent is about to start. A run started inside a tool call is a subagent, and
         takes the parent run's reporter and human unless this Agent was given its own (``None`` counts as given), and
-        its store unless it has one. Any other run uses this Agent's own."""
+        its store unless it has one. Its permissions are the denials of the runs above plus its own list, or the
+        parent run's whole list when it has none. Any other run uses this Agent's own."""
         scope = _CURRENT_CALL.get()
         parent = scope.context if scope is not None else None
         if parent is None:
             return self._own_context()
+        human = parent.human if self._human is DEFAULT else self.human
         return _RunContext(
             self,
             parent.reporter if self._reporter is DEFAULT else self.reporter,
-            parent.human if self._human is DEFAULT else self.human,
+            human,
             parent.store if self._store is None else self._store,
             human_inherited=self._human is DEFAULT,
+            permissions=_effective(parent.permissions, self._permissions, human),
         )
 
     def _active_context(self, state: State) -> _RunContext | None:

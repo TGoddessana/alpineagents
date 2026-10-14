@@ -24,7 +24,7 @@ from .tool import format_result, invalid_args_message
 from .types import ToolOutcome, ToolOutcomeKind, ToolResultContent, format_call
 
 if TYPE_CHECKING:
-    from .permissions import Permission
+    from .permissions import _Owned
     from .reporter import Reporter
     from .state import State, _RunContext
     from .tool import Tool
@@ -408,7 +408,7 @@ def run_calls(
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
     on_record: Callable[[], None] | None = None,
-    permissions: tuple[Permission, ...] | None = None,
+    permissions: tuple[_Owned, ...] | None = None,
     context: _RunContext | None = None,
 ) -> None:
     """Runs ``calls`` (a snapshot of ``state.pending_calls``) and records the results in State.
@@ -422,7 +422,9 @@ def run_calls(
        ``state._tool_result(call, result, INPUT_ERROR)`` → ``on_tool_end``. The tool is not called.
     1b. Permissions (unless ``permissions`` is ``None``; an empty tuple denies every call), for every remaining call in request order, before any tool runs
        (``permissions._check_call``: deny permissions first, then the rest in list order; the first verdict
-       decides). Allowed → the call goes on to step 2. Otherwise the call is closed with
+       decides). ``permissions`` is the effective list of the run (``context.permissions``): inside a subagent it holds
+       the denials of the runs above, and each permission comes with the Human of the Agent that wrote it.
+       Allowed → the call goes on to step 2. Otherwise the call is closed with
        ``state._tool_result(call, reason, DENIED)`` and gets ``on_tool_end(reason, ToolOutcome(DENIED, decided_by=repr(p)))``
        (no ``on_tool_start``):
        - ``Denied(reason)``: that reason.
@@ -712,7 +714,7 @@ async def arun_calls(
     tools: Mapping[str, Tool],
     reporter: Reporter | None,
     on_record: Callable[[], Awaitable[None]] | None = None,
-    permissions: tuple[Permission, ...] | None = None,
+    permissions: tuple[_Owned, ...] | None = None,
     context: _RunContext | None = None,
 ) -> None:
     """The async version of ``run_calls``, run on the event loop thread. Same steps, records and notifications.

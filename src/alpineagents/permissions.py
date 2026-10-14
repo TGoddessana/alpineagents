@@ -12,13 +12,19 @@ A denied call does not run and the model gets the reason as its error result. ``
 cancels the other calls of the turn and sets ``state.stopped`` to ``StoppedByPermission`` right away, so the loop
 stops before its next turn. The runner (``_runner.run_calls``) applies the verdicts; this module only asks.
 
+``permissions=`` applies to every tool call of the run, the calls inside its subagents included. The list asked about a
+subagent's call is the ``DenyPermission`` of every run above it (top run first), then the subagent's own list, or, when
+the subagent was given no ``permissions=``, the whole list of the run that started it (``_effective``). Each permission
+asks the ``human`` of the run that wrote it, wherever the call it checks was made (``_Owned``).
+
 Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._agent``).
 """
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self
 
@@ -396,9 +402,10 @@ class DecideByHuman(DecidePermission):
     """Asks the person whether each call may run. ``yes`` allows it; ``no`` denies it and stops the turn
     (``Denied(..., stop=True)``), so the person can say what to do instead.
 
-    The question goes to the running Agent's ``human`` (the terminal by default) and is recorded in
-    ``state.history`` like ``agent.ask_human``. Put it after the permissions that decide without asking, so the
-    person is asked only about the calls they left open.
+    The question goes to the ``human`` of the Agent that wrote the permission (the terminal by default), also when
+    the call it checks is made inside a subagent. It is recorded in the ``state.history`` of the State that made the
+    call, like ``agent.ask_human``. Put it after the permissions that decide without asking, so the person is asked
+    only about the calls they left open.
 
     Example:
         ```python
@@ -409,7 +416,8 @@ class DecideByHuman(DecidePermission):
     def __init__(self, human: Human | None = None) -> None:
         """
         Args:
-            human: Who to ask instead of the Agent's ``human``, for example a chat app for approvals.
+            human: Who to ask instead of the ``human`` of the Agent that wrote the permission, for example a chat
+                app for approvals.
 
         Raises:
             TypeError: ``human`` is not a Human object.
@@ -426,7 +434,7 @@ class DecideByHuman(DecidePermission):
                 )
             )
         self.human = human
-        """The Human asked instead of the Agent's ``human``, or ``None`` for the Agent's."""
+        """The Human asked instead of the ``human`` of the Agent that wrote the permission, or ``None`` for that."""
 
     def question(self, call: ToolCall, tool: Tool) -> str:
         """The question to ask about ``call``. Override it to ask differently.
@@ -443,7 +451,7 @@ class DecideByHuman(DecidePermission):
             # A subclass that changed acheck (and not check) is async-only: check must not ask the human instead.
             return super().check(state, call, tool)
         agent = _running_agent(state, self)
-        answer = agent._ask_human(state, self.question(call, tool), _CHOICES, "ask_human", self.human)
+        answer = agent._ask_human(state, self.question(call, tool), _CHOICES, "ask_human", self._asked())
         return self._verdict(answer)
 
     async def acheck(self, state: State, call: ToolCall, tool: Tool) -> Allowed | Denied | None:
@@ -452,8 +460,13 @@ class DecideByHuman(DecidePermission):
             # A subclass that changed check (and not acheck) decides the same way in arun.
             return await super().acheck(state, call, tool)
         agent = _running_agent(state, self)
-        answer = await agent._aask_human(state, self.question(call, tool), _CHOICES, "aask_human", self.human)
+        answer = await agent._aask_human(state, self.question(call, tool), _CHOICES, "aask_human", self._asked())
         return self._verdict(answer)
+
+    def _asked(self) -> Any:
+        """Who to ask: this permission's own Human, else the Human of the run that wrote it (set while the list is
+        asked, see ``_OWNER_HUMAN``), else ``None``: the Human of the Agent running the State."""
+        return self.human if self.human is not None else _OWNER_HUMAN.get()
 
     @staticmethod
     def _verdict(answer: Any) -> Allowed | Denied:
@@ -472,7 +485,7 @@ class DecideByHuman(DecidePermission):
 
 def _running_agent(state: State, permission: Permission) -> Any:
     """The Agent running ``state`` (the one linked to it when its run, ``think``, ``use_tools`` or ``compact``
-    started)."""
+    started). It records the question; who answers is ``DecideByHuman._asked``."""
     agent = state._agent
     if agent is None:
         raise ValueError(
@@ -483,6 +496,48 @@ def _running_agent(state: State, permission: Permission) -> Any:
             )
         )
     return agent
+
+
+# ---------------------------------------------------------------- the list of a run (used by Agent and _runner)
+
+
+class _Owned(NamedTuple):
+    """A permission in the list of a run, with the Human of the Agent that wrote it. A ``DecideByHuman`` without a
+    Human of its own asks that one, also when it checks a call of a subagent."""
+
+    permission: Permission
+    #: The effective ``human`` of the run the permission was written for (``None``: that run has no human).
+    human: Human | None
+
+
+#: The Human of the permission being asked (set by ``_check_call``/``_acheck_call``). ``check(state, call, tool)`` is
+#: public and has no place for it. The async default of ``acheck`` runs ``check`` in a copy of the context.
+_OWNER_HUMAN: contextvars.ContextVar[Human | None] = contextvars.ContextVar("alpineagents_owner_human", default=None)
+
+
+def _owned(permissions: Iterable[Permission] | None, human: Human | None) -> tuple[_Owned, ...] | None:
+    """``permissions`` of an Agent as the list of a run whose effective human is ``human`` (``None`` stays ``None``:
+    no checks)."""
+    return None if permissions is None else tuple(_Owned(p, human) for p in permissions)
+
+
+def _effective(
+    parent: tuple[_Owned, ...] | None, own: Iterable[Permission] | None, human: Human | None
+) -> tuple[_Owned, ...] | None:
+    """The list of a subagent's run: ``parent`` is the effective list of the run that started it, ``own`` the
+    subagent's ``permissions=``, ``human`` its effective human.
+
+    - ``own`` is ``None``: the parent's whole list (which already holds the ``DenyPermission`` of the runs above).
+    - Otherwise: the ``DenyPermission`` of the parent's list (the denials of every run above, top run first), then
+      ``own``. A parent's allow or decide permission does not reach a subagent with a list of its own, so its
+      implicit "deny the rest" does not bind that subagent either.
+
+    ``None`` means no checks: both are ``None``, or only the parent has none and ``own`` is ``None``.
+    """
+    if own is None:
+        return parent
+    denials = tuple(o for o in parent or () if isinstance(o.permission, DenyPermission))
+    return denials + (_owned(own, human) or ())
 
 
 # ---------------------------------------------------------------- asking the list (used by _runner)
@@ -499,18 +554,21 @@ class _Decision(NamedTuple):
     error: ToolError | None = None
 
 
-def _steps(permissions: tuple[Permission, ...]) -> Generator[Permission, Any, _Decision]:
-    """The order of asking, without the asking: yields each permission, receives its verdict, returns the decision.
-    Deny permissions first, then the rest in list order. ``TypeError`` for a verdict the permission may not give."""
-    for permission in permissions:
+def _steps(permissions: Sequence[_Owned]) -> Generator[_Owned, Any, _Decision]:
+    """The order of asking, without the asking: yields each permission (with its owner's Human), receives its
+    verdict, returns the decision. Deny permissions first, then the rest in list order. ``TypeError`` for a verdict
+    the permission may not give."""
+    for owned in permissions:
+        permission = owned.permission
         if isinstance(permission, DenyPermission):
-            verdict = yield permission
+            verdict = yield owned
             _check_verdict(permission, verdict)
             if verdict is not None:
                 return _Decision(verdict, permission)
-    for permission in permissions:
+    for owned in permissions:
+        permission = owned.permission
         if not isinstance(permission, DenyPermission):
-            verdict = yield permission
+            verdict = yield owned
             _check_verdict(permission, verdict)
             if verdict is not None:
                 return _Decision(verdict, permission)
@@ -543,15 +601,17 @@ def _note(error: BaseException, permission: Permission, call: ToolCall) -> None:
     error.add_note(f"exception raised in permission {permission!r} checking {format_call(call)}")
 
 
-def _check_call(permissions: tuple[Permission, ...], state: State, call: ToolCall, tool: Tool) -> _Decision:
+def _check_call(permissions: Sequence[_Owned], state: State, call: ToolCall, tool: Tool) -> _Decision:
     """Asks ``permissions`` about ``call`` with ``check``. A ``ToolError`` decides as a denial; any other exception
     propagates (with a note naming the permission)."""
     steps = _steps(permissions)
     try:
-        permission = next(steps)
+        owned = next(steps)
     except StopIteration as done:  # an empty list: nobody decides
         return done.value
     while True:
+        permission = owned.permission
+        token = _OWNER_HUMAN.set(owned.human)
         try:
             verdict = permission.check(state, call, tool)
         except ToolError as e:
@@ -559,20 +619,24 @@ def _check_call(permissions: tuple[Permission, ...], state: State, call: ToolCal
         except Exception as e:
             _note(e, permission, call)
             raise
+        finally:
+            _OWNER_HUMAN.reset(token)
         try:
-            permission = steps.send(verdict)
+            owned = steps.send(verdict)
         except StopIteration as done:
             return done.value
 
 
-async def _acheck_call(permissions: tuple[Permission, ...], state: State, call: ToolCall, tool: Tool) -> _Decision:
+async def _acheck_call(permissions: Sequence[_Owned], state: State, call: ToolCall, tool: Tool) -> _Decision:
     """The async version of ``_check_call``, with ``acheck``."""
     steps = _steps(permissions)
     try:
-        permission = next(steps)
+        owned = next(steps)
     except StopIteration as done:  # an empty list: nobody decides
         return done.value
     while True:
+        permission = owned.permission
+        token = _OWNER_HUMAN.set(owned.human)
         try:
             verdict = await permission.acheck(state, call, tool)
         except ToolError as e:
@@ -580,8 +644,10 @@ async def _acheck_call(permissions: tuple[Permission, ...], state: State, call: 
         except Exception as e:
             _note(e, permission, call)
             raise
+        finally:
+            _OWNER_HUMAN.reset(token)
         try:
-            permission = steps.send(verdict)
+            owned = steps.send(verdict)
         except StopIteration as done:
             return done.value
 
