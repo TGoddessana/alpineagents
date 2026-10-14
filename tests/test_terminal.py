@@ -1,10 +1,11 @@
-"""Terminal tests. Most of them use a small stub object with only the attributes the Terminal reads (turn, depth,
-usage, stopped), so a test does not need a whole State.
+"""Terminal tests. Most of them use a small stub object with only the attributes the Terminal reads (turn, runtime
+depth, Agent name, usage, stopped), so a test does not need a whole State.
 """
 
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,9 +24,10 @@ from alpineagents.types import (
 
 
 class StubState:
-    def __init__(self, *, turn=1, depth=0, usage=None, stopped=None):
+    def __init__(self, *, turn=1, depth=0, usage=None, stopped=None, agent_name=None):
         self.turn = turn
-        self.depth = depth
+        self._depth = depth
+        self._agent = None if agent_name is None else SimpleNamespace(name=agent_name)
         self.usage = usage if usage is not None else Usage()
         self.stopped = stopped
 
@@ -39,6 +41,50 @@ def test_think_start_shows_turn_and_indent():
     terminal.on_think_start(StubState(turn=1))
     terminal.on_think_start(StubState(turn=2, depth=1))
     assert out.getvalue() == "[turn 1] thinking\n  [turn 2] thinking\n"
+
+
+def test_subagent_lines_carry_the_agent_name_and_are_indented_by_depth():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    kid = StubState(turn=2, depth=1, agent_name="researcher", usage=Usage(requests=2), stopped=StoppedByFinish("x"))
+    terminal.on_run_start(kid)
+    terminal.on_think_start(kid)
+    terminal.on_tool_start(kid, tool_call("web_search", query="q"))
+    terminal.on_run_end(kid, None)
+    assert out.getvalue() == (
+        "  researcher started\n"
+        "  [researcher turn 2] thinking\n"
+        '    tool web_search(query="q")\n'
+        "  researcher done: stopped by finish (2 turns)\n"
+    )
+
+
+def test_a_subagent_without_a_name_is_shown_without_one():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    kid = StubState(turn=1, depth=2)
+    terminal.on_run_start(kid)
+    terminal.on_think_start(kid)
+    terminal.on_run_end(kid, None)
+    assert out.getvalue() == "    started\n    [turn 1] thinking\n    done: (1 turn)\n"
+
+
+def test_the_top_level_run_is_not_labelled_even_if_its_agent_has_a_name():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    state = StubState(turn=1, agent_name="main")
+    terminal.on_run_start(state)
+    terminal.on_think_start(state)
+    terminal.on_run_end(state, None)
+    assert out.getvalue() == "[turn 1] thinking\ndone: (1 turn)\n"
+
+
+def test_a_subagents_streamed_text_is_never_shown():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    terminal.on_text(StubState(depth=1, agent_name="researcher"), "hidden\n")
+    terminal.on_text(StubState(), "shown\n")
+    assert out.getvalue() == "shown\n"
 
 
 def test_text_streams_and_think_end_closes_line():
@@ -157,8 +203,39 @@ def test_context_change_compact_shows_cache_tail():
     state = StubState(turn=2)
     terminal.on_context_change(state, ContextChange("compact", 121_000, 18_000))
     assert out.getvalue() == ""
-    terminal.on_think_start(StubState(turn=3))
+    state.turn = 3
+    terminal.on_think_start(state)
     assert out.getvalue() == "[turn 3] thinking\n  context compacted: 121k → 18k tokens (cache rebuilds)\n"
+
+
+def test_context_lines_wait_for_their_own_states_next_header():
+    # Two subagents run beside each other: a line queued for one is not flushed under the other's header or done line.
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    alpha = StubState(turn=2, depth=1, agent_name="alpha")
+    beta = StubState(turn=1, depth=1, agent_name="beta")
+    terminal.on_context_change(alpha, ContextChange("compact", 121_000, 18_000))
+    terminal.on_think_start(beta)
+    terminal.on_run_end(beta, None)
+    assert out.getvalue() == "  [beta turn 1] thinking\n  beta done: (1 turn)\n"
+    alpha.turn = 3
+    terminal.on_think_start(alpha)
+    assert out.getvalue().endswith(
+        "  [alpha turn 3] thinking\n    alpha context compacted: 121k → 18k tokens (cache rebuilds)\n"
+    )
+
+
+def test_context_lines_not_shown_by_a_think_are_flushed_by_the_same_states_run_end():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    parent = StubState(turn=1)
+    kid = StubState(turn=1, depth=1, agent_name="alpha")
+    terminal.on_context_change(kid, ContextChange("clear_tool_results", 900, 300))
+    terminal.on_run_end(parent, None)
+    terminal.on_run_end(kid, None)
+    assert out.getvalue() == (
+        "done: (1 turn)\n    alpha tool results cleared: 900 → 300 tokens\n  alpha done: (1 turn)\n"
+    )
 
 
 def test_context_change_clear_tool_results_no_tail():
