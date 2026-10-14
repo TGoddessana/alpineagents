@@ -79,6 +79,8 @@ from .types import (
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .human import Human
+    from .reporter import Reporter
     from .store import Store
 
 __all__ = ["State", "StateSnapshot"]
@@ -520,6 +522,23 @@ def _error_text(error: BaseException) -> str:
     return f"{name}: {message}" if message else name
 
 
+@dataclass(frozen=True, eq=False)
+class _RunContext:
+    """What applies to one run of ``agent`` on this State (runtime only, never saved): the reporter, human and store
+    the run uses. A setting the Agent did not give (``reporter``/``human`` left at their default, no ``store``) is the
+    value of the run that started this one as a subagent, so the person and the store are the ones the parent run
+    uses. Set by ``Agent.run``/``arun`` when the run starts, passed on to the runs the tools start."""
+
+    agent: Agent
+    """The Agent running. Only that Agent uses the values below: another Agent that is called on the State (a
+    custom loop calling ``other.think(state)``) uses its own settings."""
+    reporter: Reporter | None
+    human: Human | None
+    store: Store | None
+    human_inherited: bool = False
+    """``human`` is the parent run's (the Agent was not given one), for the wording of ``NoHumanError``."""
+
+
 @dataclass
 class _ClosedCall:
     """A tool call that closed (runtime only): the call object, the ids of the subagents it started in start order
@@ -636,6 +655,8 @@ class State:
         # Runtime values. They are not history, so they are not in the snapshot and are never saved.
         self._agent: Agent | None = None
         self._running = False
+        # The reporter, human and store of the run that is going on (set when it starts, cleared when it ends).
+        self._run_context: _RunContext | None = None
         self._compacting: int | None = None
         self._saved_store: object | None = None
         # The store ``child``/``achild`` open subagents from: the first one this State was bound to (``store.load``,
@@ -1372,13 +1393,19 @@ class State:
         self._agent = agent
 
     def _start_run(
-        self, agent: Agent, info: AgentInfo, parent: tuple[str, str] | None = None, parent_depth: int = -1
+        self,
+        agent: Agent,
+        info: AgentInfo,
+        parent: tuple[str, str] | None = None,
+        parent_depth: int = -1,
+        context: _RunContext | None = None,
     ) -> None:
         """Start of ``Agent.run``/``arun``, after the checks that need no lock: the one-run-at-a-time guard, the
         link to ``agent`` (``_attach``) and ``RunStartEntry(info)``, which clears ``stopped``, as one change.
         ``parent`` is the ``(State id, ToolCall.id)`` of the tool call this run started in, for a subagent run: it
         goes into the entry (the caller also registers the State with the parent, ``_add_child``). The depth of this
         run is ``parent_depth + 1``, so a State that was a subagent and runs on its own again is back at depth 0.
+        ``context`` is what applies to the run (``_RunContext``), kept until ``_end_run``.
 
         Every call that returned is paired with ``_end_run``.
 
@@ -1400,6 +1427,7 @@ class State:
                 RunStartEntry(content=info, parent_id=parent_id, parent_call_id=parent_call_id, turn=self._snap.turn)
             )
             self._running = True
+            self._run_context = context
             self._agent = agent
             self._depth = parent_depth + 1
 
@@ -1464,6 +1492,7 @@ class State:
         again. The link to the Agent stays, so later notifications still reach its Reporter."""
         with self._lock:
             self._running = False
+            self._run_context = None
 
     def _take_saved_agent(self) -> AgentInfo | None:
         """Called by ``Agent.run`` at start: the Agent that last ran this State before it was saved, only for a State
@@ -1960,8 +1989,8 @@ class State:
     def _notify_context_change(self, change: ContextChange) -> None:
         """Called outside the lock: tells the Reporter of the Agent linked to this State (if any)."""
         agent = self._agent
-        # agent.reporter may create the default Terminal, so it is read here, outside the lock.
-        reporter = agent.reporter if agent is not None else None
+        # The reporter may create the default Terminal, so it is read here, outside the lock.
+        reporter = agent._reporter_for(self) if agent is not None else None
         if reporter is not None:
             reporter.on_context_change(self, change)
 

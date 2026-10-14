@@ -26,7 +26,7 @@ from .types import ToolOutcome, ToolOutcomeKind, ToolResultContent, format_call
 if TYPE_CHECKING:
     from .permissions import Permission
     from .reporter import Reporter
-    from .state import State
+    from .state import State, _RunContext
     from .tool import Tool
     from .types import ToolCall
 
@@ -57,10 +57,10 @@ class _CallScope:
     """The State whose tool call this is (the parent of a run that starts inside it)."""
     call: ToolCall
     """The call, as it is in ``state.pending_calls``."""
-    context: Any = None
-    """What the parent run passes on to the runs started inside the call (the human, reporter, store and
-    permissions that apply, and the depth). Filled in by the code that starts the tools, once there is something
-    to pass on."""
+    context: _RunContext | None = None
+    """What the parent run passes on to the runs started inside the call: the reporter, human and store that apply
+    to it (a subagent that was not given its own takes these). ``None`` when the tools were started without a run's
+    context."""
 
 
 #: The tool call running in this thread or task, or ``None`` outside one. It is set while ``tool.run`` runs, so a
@@ -105,11 +105,14 @@ class _Job:
         "is_error",
         "input_error",
         "tool_error",
+        "context",
     )
 
-    def __init__(self, call: ToolCall, tool: Tool) -> None:
+    def __init__(self, call: ToolCall, tool: Tool, context: _RunContext | None = None) -> None:
         self.call = call
         self.tool = tool
+        #: What the runs this call starts inherit (``_CallScope.context``).
+        self.context = context
         #: What ``tool.run`` gets: an editable deep copy of the model's arguments (``call.args`` is read-only, and a
         #: tool may change what it is given).
         self.args: dict[str, Any] = thaw(call.args)
@@ -179,7 +182,7 @@ def _work(job: _Job, state: State) -> ToolResultContent:
     """Worker thread: calls the tool and builds the result. Does no State recording or Reporter notification.
     A ``ToolError`` or ``ToolInputError`` becomes an error result."""
     # This thread has its own copy of the context (``_Executor.submit``), so setting the call here is private to it.
-    token = _CURRENT_CALL.set(_CallScope(state, job.call))
+    token = _CURRENT_CALL.set(_CallScope(state, job.call, job.context))
     try:
         try:
             try:
@@ -406,11 +409,13 @@ def run_calls(
     reporter: Reporter | None,
     on_record: Callable[[], None] | None = None,
     permissions: tuple[Permission, ...] | None = None,
+    context: _RunContext | None = None,
 ) -> None:
     """Runs ``calls`` (a snapshot of ``state.pending_calls``) and records the results in State.
 
     All Reporter notifications and State records happen on **the thread that called this function (main)**.
-    Worker threads only run tools.
+    Worker threads only run tools. ``context`` is what the runs started inside a tool call inherit (the reporter,
+    human and store of the run), see ``_CallScope``.
 
     1. Prepare (in request order): if the tool does not exist the result is ``UNKNOWN_TOOL``; if the arguments
        were not valid JSON (``invalid_args_message``) it is ``INPUT_ERROR``: ``on_tool_start`` →
@@ -467,7 +472,7 @@ def run_calls(
     - Results of calls that already finished stay recorded, and the interrupt exception is re-raised as is
       (``Agent.run`` does the closing).
     """
-    jobs = _prepare(state, calls, tools, reporter)
+    jobs = _prepare(state, calls, tools, reporter, context)
     if jobs and permissions is not None:
         recorded = len(state.history)
         allowed: list[_Job] = []
@@ -512,7 +517,11 @@ def run_calls(
 
 
 def _prepare(
-    state: State, calls: Sequence[ToolCall], tools: Mapping[str, Tool], reporter: Reporter | None
+    state: State,
+    calls: Sequence[ToolCall],
+    tools: Mapping[str, Tool],
+    reporter: Reporter | None,
+    context: _RunContext | None,
 ) -> list[_Job]:
     """Step 1 of ``run_calls``: records unknown tools and arguments that are not valid JSON right away, and returns
     a job for each of the rest (request order)."""
@@ -527,7 +536,7 @@ def _prepare(
         if invalid is not None:
             _record_now(state, reporter, call, INPUT_ERROR.format(invalid))
             continue
-        jobs.append(_Job(call, tool))
+        jobs.append(_Job(call, tool, context))
     return jobs
 
 
@@ -605,7 +614,7 @@ async def _awork(job: _Job, state: State) -> ToolResultContent:
     """An ``async def`` tool as a Task on the running event loop: calls it and builds the result. A
     ``ToolError`` or ``ToolInputError`` becomes an error result."""
     # A Task has its own copy of the context, so setting the call here is private to it.
-    token = _CURRENT_CALL.set(_CallScope(state, job.call))
+    token = _CURRENT_CALL.set(_CallScope(state, job.call, job.context))
     try:
         try:
             try:
@@ -704,6 +713,7 @@ async def arun_calls(
     reporter: Reporter | None,
     on_record: Callable[[], Awaitable[None]] | None = None,
     permissions: tuple[Permission, ...] | None = None,
+    context: _RunContext | None = None,
 ) -> None:
     """The async version of ``run_calls``, run on the event loop thread. Same steps, records and notifications.
 
@@ -713,7 +723,7 @@ async def arun_calls(
     - Cancellation (``CancelledError`` of the awaiting task) is the interrupt: finished results stay recorded,
       Tasks are cancelled, sync threads are not waited for (late results), and the exception is re-raised as is.
     """
-    jobs = _prepare(state, calls, tools, reporter)
+    jobs = _prepare(state, calls, tools, reporter, context)
     if jobs and permissions is not None:
         recorded = len(state.history)
         allowed: list[_Job] = []

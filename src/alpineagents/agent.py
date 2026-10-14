@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import threading
 import warnings
+from contextvars import ContextVar
 from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
@@ -26,7 +27,7 @@ from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
 from .permissions import Permission, _asks_only_async, _needs_agent_human, _only_async
 from .reporter import Reporter
-from .state import State
+from .state import State, _RunContext
 from .store import Store
 from .tool import FunctionTool, Tool, ToolMap, collect_tools
 from .types import AgentInfo, Message, ModelEvent, Request, TextBlock, Usage
@@ -54,6 +55,11 @@ class _Default:
 
 
 DEFAULT: Any = _Default()
+
+#: The context of the run going on in this thread or task, or ``None`` outside one. ``Agent.run``/``arun`` sets it,
+#: so a State the run's Agent uses besides the run's own (``state.fork()``, ``State(history=...)``) is notified,
+#: asked and saved with what the run uses, not with the Agent's own settings (which differ for a subagent).
+_RUN_CONTEXT: ContextVar[_RunContext | None] = ContextVar("alpineagents_run_context", default=None)
 
 #: Setting names ``copy`` accepts (same as the constructor arguments).
 SETTINGS = (
@@ -146,10 +152,14 @@ class Agent:
                 subclasses, ``MCP`` servers and single MCP tools (``github.create_issue``).
             skills: Not implemented yet. A non-empty value raises ``NotImplementedError``.
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
-            reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent.
-            human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human.
+            reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent. An
+                Agent run as a subagent (inside a tool call of another run) that was not given one uses the
+                reporter of the run that started it; ``None`` given on purpose stays silent.
+            human: Answers ``ask_human``. Defaults to the shared ``Terminal``. ``None`` means no human. A subagent
+                that was not given one asks the human of the run that started it.
             store: Saves the States this Agent runs as they go, so they can be continued with
-                ``store.load(id)``. ``None`` (the default) saves nothing.
+                ``store.load(id)``. ``None`` (the default) saves nothing, except for a subagent, which is saved in
+                the store of the run that started it. A subagent's State is saved under its own id.
             permissions: Permissions that decide, before a tool call runs, whether it may run (see
                 ``alpineagents.permissions``). ``None`` (the default) runs every call without checks; to turn
                 checks off on a copy, ``agent.copy(permissions=None)``. A list, even an empty one, is asked about
@@ -397,7 +407,9 @@ class Agent:
 
     @property
     def reporter(self) -> Reporter | None:
-        """The Reporter that receives progress notifications, or ``None``. Defaults to the shared ``Terminal``."""
+        """The Reporter that receives progress notifications, or ``None``. Defaults to the shared ``Terminal``. This
+        is the Agent's own setting: a subagent that was not given one reports to the Reporter of the run that
+        started it (see ``Agent(reporter=)``), and this property does not show that."""
         # DEFAULT resolves to terminal.default_terminal() on each access.
         if self._reporter is DEFAULT:
             from .terminal import default_terminal
@@ -407,7 +419,9 @@ class Agent:
 
     @property
     def human(self) -> Human | None:
-        """The Human that answers ``ask_human``, or ``None``. Defaults to the shared ``Terminal``."""
+        """The Human that answers ``ask_human``, or ``None``. Defaults to the shared ``Terminal``. This is the
+        Agent's own setting: a subagent that was not given one asks the Human of the run that started it (see
+        ``Agent(human=)``), and this property does not show that."""
         if self._human is DEFAULT:
             from .terminal import default_terminal
 
@@ -416,7 +430,9 @@ class Agent:
 
     @property
     def store(self) -> Store | None:
-        """The Store that saves this Agent's States as they run, or ``None``."""
+        """The Store that saves this Agent's States as they run, or ``None``. This is the Agent's own setting: a
+        subagent without one is saved in the Store of the run that started it, and this property does not show
+        that."""
         return self._store
 
     @property
@@ -526,16 +542,18 @@ class Agent:
                     'answer = await agent.arun("...")',
                 )
             )
-        if self._store is not None and type(self._store).write is Store.write:
-            raise self._store._async_only("write", "awrite")
-        self._check_permissions("run")
-        state = self._start_run(prompt_or_state, "run")
+        context = self._new_run_context()
+        if context.store is not None and type(context.store).write is Store.write:
+            raise context.store._async_only("write", "awrite")
+        self._check_permissions("run", context)
+        state = self._start_run(prompt_or_state, "run", context)
         # What runs inside this run (its loop, Reporter, permissions) is not inside a tool call of the parent: only
         # the tools of this run set the call again.
         outside_call = _CURRENT_CALL.set(None)
+        in_run = _RUN_CONTEXT.set(context)
         try:
             self._save(state)
-            reporter = self.reporter
+            reporter = context.reporter
             error: BaseException | None = None
             connected = False
             try:
@@ -562,6 +580,7 @@ class Agent:
                         reporter.on_run_end(state, error)
         finally:
             state._end_run()
+            _RUN_CONTEXT.reset(in_run)
             _CURRENT_CALL.reset(outside_call)
 
     async def arun(self, prompt_or_state: str | State, /) -> Any:
@@ -590,14 +609,16 @@ class Agent:
         """
         # Same steps as run. Sets ASYNC_RUN so sync methods called on this event loop thread raise TypeError.
         loop = self._async_loop()
-        self._check_permissions("arun")
-        state = self._start_run(prompt_or_state, "arun")
+        context = self._new_run_context()
+        self._check_permissions("arun", context)
+        state = self._start_run(prompt_or_state, "arun", context)
         # What runs inside this run (its loop, Reporter, permissions) is not inside a tool call of the parent: only
         # the tools of this run set the call again.
         outside_call = _CURRENT_CALL.set(None)
+        in_run = _RUN_CONTEXT.set(context)
         try:
             await self._asave(state)
-            reporter = self.reporter
+            reporter = context.reporter
             error: BaseException | None = None
             token = ASYNC_RUN.set(asyncio.get_running_loop())
             connected = False
@@ -626,6 +647,7 @@ class Agent:
                         reporter.on_run_end(state, error)
         finally:
             state._end_run()
+            _RUN_CONTEXT.reset(in_run)
             _CURRENT_CALL.reset(outside_call)
 
     def think(self, state: State, tools: Iterable[Any] | None = None) -> None:
@@ -664,7 +686,7 @@ class Agent:
         self._mcp_ensure()
         specs = self._prepare_think(state, tools, "think")
         state._begin_think(self._model_name())
-        reporter = self.reporter
+        reporter = self._reporter_for(state)
         try:
             self._save(state)
             request = self._think_request(state, specs, reporter)
@@ -682,7 +704,7 @@ class Agent:
         await self._amcp_ensure()
         specs = self._prepare_think(state, tools, "athink")
         state._begin_think(self._model_name())
-        reporter = self.reporter
+        reporter = self._reporter_for(state)
         try:
             await self._asave(state)
             request = self._think_request(state, specs, reporter)
@@ -733,7 +755,15 @@ class Agent:
         calls = self._begin_use_tools(state, "use_tools")
         try:
             if calls:
-                run_calls(state, calls, self._tool_map(), self.reporter, self._tool_saver(state), self._permissions)
+                run_calls(
+                    state,
+                    calls,
+                    self._tool_map(),
+                    self._reporter_for(state),
+                    self._tool_saver(state),
+                    self._permissions,
+                    self._context_for(state),
+                )
         except BaseException as e:
             self._save_after(state, e)
             raise
@@ -751,7 +781,13 @@ class Agent:
         try:
             if calls:
                 await arun_calls(
-                    state, calls, self._tool_map(), self.reporter, self._atool_saver(state), self._permissions
+                    state,
+                    calls,
+                    self._tool_map(),
+                    self._reporter_for(state),
+                    self._atool_saver(state),
+                    self._permissions,
+                    self._context_for(state),
                 )
         except BaseException as e:
             await self._asave_after(state, e)
@@ -808,7 +844,7 @@ class Agent:
         # The steps live in _ask_steps, shared with aask.
         check_sync_call("ask")
         self._mcp_ensure()
-        reporter = self.reporter
+        reporter = self._reporter_for(state)
         on_text, on_event = self._on_text(state, reporter), self._on_event(state, reporter)
         steps = self._ask_steps(state, prompt, returns, retries, reporter, "ask")
         request = next(steps)
@@ -827,7 +863,7 @@ class Agent:
         """The async version of ``ask``."""
         # Same steps as ask (_ask_steps), with model.arespond.
         await self._amcp_ensure()
-        reporter = self.reporter
+        reporter = self._reporter_for(state)
         on_text, on_event = self._on_text(state, reporter), self._on_event(state, reporter)
         steps = self._ask_steps(state, prompt, returns, retries, reporter, "aask")
         request = next(steps)
@@ -916,7 +952,7 @@ class Agent:
         try:
             try:
                 request = self._compact_request(state)
-                reply = self._model.compact(request, instructions, self._on_event(state, self.reporter))
+                reply = self._model.compact(request, instructions, self._on_event(state, self._reporter_for(state)))
                 self._apply_summary(state, reply)
             finally:
                 state._end_compact()
@@ -933,7 +969,9 @@ class Agent:
         try:
             try:
                 request = self._compact_request(state)
-                reply = await self._model.acompact(request, instructions, self._on_event(state, self.reporter))
+                reply = await self._model.acompact(
+                    request, instructions, self._on_event(state, self._reporter_for(state))
+                )
                 self._apply_summary(state, reply)
             finally:
                 state._end_compact()
@@ -1034,10 +1072,10 @@ class Agent:
 
     # ------------------------------------------------------------ steps shared by the sync and async versions
 
-    def _start_run(self, prompt_or_state: str | State, method: str) -> State:
+    def _start_run(self, prompt_or_state: str | State, method: str, context: _RunContext | None = None) -> State:
         """Step 1 of ``run``: the State to run, checked, compared with the Agent that last ran it (``ResumeWarning``)
-        and started (``state._start_run``: ``RunStartEntry``, and the one-run-at-a-time flag, which the caller clears
-        with ``state._end_run()`` in a ``finally``)."""
+        and started (``state._start_run``: ``RunStartEntry``, ``context``, and the one-run-at-a-time flag, which the
+        caller clears with ``state._end_run()`` in a ``finally``)."""
         example = (
             'agent.run("Find the bug in this repo")  # or\n'
             'state = State(messages=[Message.user("Find the bug in this repo")])\n'
@@ -1073,6 +1111,8 @@ class Agent:
                 )
             )
 
+        if context is None:
+            context = self._new_run_context()
         info = self._agent_info_now()
         saved = state._take_saved_agent()
         # A run started inside a tool call is a subagent of the State that call belongs to. A thread the tool made
@@ -1085,9 +1125,9 @@ class Agent:
                     # stacklevel 3: the user's run()/arun() call (warn <- _start_run <- run <- caller).
                     warnings.warn(ResumeWarning(_describe_changes(changes), changes), stacklevel=3)
             if scope is None:
-                state._start_run(self, info)
+                state._start_run(self, info, context=context)
             else:
-                state._start_run(self, info, (scope.state.id, scope.call.id), scope.state.depth)
+                state._start_run(self, info, (scope.state.id, scope.call.id), scope.state.depth, context)
         except BaseException:
             # A warnings filter turned the warning into an exception, or the State is being run already: the run did
             # not start, so the next run compares again.
@@ -1098,10 +1138,11 @@ class Agent:
             scope.state._add_child(scope.call.id, state, scope.call)
         return state
 
-    def _check_permissions(self, method: str) -> None:
+    def _check_permissions(self, method: str, context: _RunContext) -> None:
         """Before a run starts: a permission that would fail at the first tool call fails the run now. ``TypeError``
         for a permission that only checks asynchronously in a sync ``run``, or a ``DecideByHuman`` whose Human only
-        answers asynchronously; ``NoHumanError`` for a ``DecideByHuman()`` when the Agent has no human."""
+        answers asynchronously; ``NoHumanError`` for a ``DecideByHuman()`` when the run has no human to ask (the
+        Agent's, or the parent run's for a subagent that was not given one)."""
         for permission in self._permissions or ():
             if method == "run" and _only_async(permission):
                 raise TypeError(
@@ -1112,18 +1153,25 @@ class Agent:
                         'answer = await agent.arun("...")',
                     )
                 )
-            if _needs_agent_human(permission) and self.human is None:
+            if _needs_agent_human(permission) and context.human is None:
                 raise NoHumanError(
                     fix_message(
-                        f"{permission!r} in permissions= asks the Agent's human, and this Agent has human=None",
-                        "Give the Agent a human, give the permission its own with DecideByHuman(human=...), or "
-                        "decide in code with other permissions",
+                        f"{permission!r} in permissions= asks the Agent's human, and "
+                        + _no_human_reason(context, "this Agent has human=None"),
+                        (
+                            "Give the subagent a human with Agent(human=...), give one to the Agent that runs it, "
+                            "give the permission its own with DecideByHuman(human=...), or decide in code with "
+                            "other permissions"
+                            if context.human_inherited
+                            else "Give the Agent a human, give the permission its own with DecideByHuman(human=...), "
+                            "or decide in code with other permissions"
+                        ),
                         "agent = Agent(model=..., human=Terminal(), permissions=[DecideByHuman()])\n"
                         "# in tests\n"
                         'agent.copy(human=FakeHuman(["yes"]))',
                     )
                 )
-            human = _asks_only_async(permission, self.human) if method == "run" else None
+            human = _asks_only_async(permission, context.human) if method == "run" else None
             if human is not None:
                 raise TypeError(
                     fix_message(
@@ -1134,19 +1182,74 @@ class Agent:
                     )
                 )
 
+    # ------------------------------------------------------------ what applies to this run
+
+    def _own_context(self) -> _RunContext:
+        """This Agent's own reporter, human and store."""
+        return _RunContext(self, self.reporter, self.human, self._store)
+
+    def _new_run_context(self) -> _RunContext:
+        """What applies to a run this Agent is about to start. A run started inside a tool call is a subagent, and
+        takes the parent run's reporter and human unless this Agent was given its own (``None`` counts as given), and
+        its store unless it has one. Any other run uses this Agent's own."""
+        scope = _CURRENT_CALL.get()
+        parent = scope.context if scope is not None else None
+        if parent is None:
+            return self._own_context()
+        return _RunContext(
+            self,
+            parent.reporter if self._reporter is DEFAULT else self.reporter,
+            parent.human if self._human is DEFAULT else self.human,
+            parent.store if self._store is None else self._store,
+            human_inherited=self._human is DEFAULT,
+        )
+
+    def _active_context(self, state: State) -> _RunContext | None:
+        """The context of the run of this Agent that ``state`` belongs to: the one stored on the State while it is
+        run, or else the one of the run going on in this thread or task (for a State made inside a run, like
+        ``state.fork()``). ``None`` when this Agent is not running anything that applies."""
+        context = state._run_context
+        if context is not None and context.agent is self:
+            return context
+        context = _RUN_CONTEXT.get()
+        if context is not None and context.agent is self:
+            return context
+        return None
+
+    def _context_for(self, state: State) -> _RunContext:
+        """What applies to ``state`` for this Agent: the context of the run it is running, so that ``think``,
+        ``use_tools`` and the like in a custom loop see what ``run`` sees, and this Agent's own settings when it is
+        not that run's Agent (or no run is going on)."""
+        return self._active_context(state) or self._own_context()
+
+    def _reporter_for(self, state: State) -> Reporter | None:
+        """The Reporter this Agent notifies about ``state`` (see ``_context_for``)."""
+        context = self._active_context(state)
+        return context.reporter if context is not None else self.reporter
+
+    def _human_for(self, state: State) -> Human | None:
+        """The Human this Agent asks about ``state`` (see ``_context_for``)."""
+        context = self._active_context(state)
+        return context.human if context is not None else self.human
+
+    def _store_for(self, state: State) -> Store | None:
+        """The Store this Agent saves ``state`` in (see ``_context_for``)."""
+        context = self._active_context(state)
+        return context.store if context is not None else self._store
+
     # ------------------------------------------------------------ saving to the store
 
     def _save(self, state: State) -> None:
         """A save point: writes what the store does not have yet (``store.save``). Nothing without a store, or when
         the store has everything. The State is marked saved only after the write returns."""
-        store = self._store
+        store = self._store_for(state)
         if store is None:
             return
         store.save(state)
 
     async def _asave(self, state: State) -> None:
         """The async version of ``_save``."""
-        store = self._store
+        store = self._store_for(state)
         if store is None:
             return
         await store.asave(state)
@@ -1173,7 +1276,7 @@ class Agent:
     def _tool_saver(self, state: State) -> Callable[[], None] | None:
         """The per-result save for ``run_calls``: an ``Exception`` is dropped (the tools keep running, and the save
         at the end of ``use_tools`` writes what is missing or raises)."""
-        if self._store is None:
+        if self._store_for(state) is None:
             return None
 
         def save() -> None:
@@ -1186,7 +1289,7 @@ class Agent:
 
     def _atool_saver(self, state: State) -> Callable[[], Awaitable[None]] | None:
         """The async version of ``_tool_saver``."""
-        if self._store is None:
+        if self._store_for(state) is None:
             return None
 
         async def save() -> None:
@@ -1340,13 +1443,26 @@ class Agent:
     def _human_to_ask(self, state: State, prompt: str, returns: Any, method: str, human: Any = None) -> Any:
         """The checks of ``ask_human``; returns the Human (``human`` if given, else the Agent's)."""
         _check_state(state, method)
+        context = self._active_context(state)
         if human is None:
-            human = self.human
+            human = context.human if context is not None else self.human
         if human is None:
+            if context is not None and context.human_inherited:
+                problem = (
+                    f"{method}() was called by a subagent with no human to ask (question: {prompt!r}); "
+                    + _INHERITED_NO_HUMAN
+                )
+                fix = (
+                    "Give the subagent a human with Agent(human=...), give one to the Agent that runs it, or write "
+                    "the rule in code so no human is needed"
+                )
+            else:
+                problem = f"{method}() was called on an Agent with human=None (question: {prompt!r})"
+                fix = "Give it a human to ask with Agent(human=...), or write the rule in code so no human is needed"
             raise NoHumanError(
                 fix_message(
-                    f"{method}() was called on an Agent with human=None (question: {prompt!r})",
-                    "Give it a human to ask with Agent(human=...), or write the rule in code so no human is needed",
+                    problem,
+                    fix,
                     'agent = Agent(model=..., human=Terminal())\n# in tests\nagent.copy(human=FakeHuman(["yes"]))',
                 )
             )
@@ -1695,6 +1811,15 @@ def _note_failed_save(error: BaseException, failure: Exception) -> None:
 
 def _or_none(value: Any) -> str:
     return "(none)" if value is None else str(value)
+
+
+_INHERITED_NO_HUMAN = "it was not given a human and the run that started it has human=None"
+
+
+def _no_human_reason(context: _RunContext, own: str) -> str:
+    """Why the run has no human to ask: ``own`` when the Agent has human=None itself, else that a subagent inherited
+    none."""
+    return f"this subagent has no human to ask ({_INHERITED_NO_HUMAN})" if context.human_inherited else own
 
 
 def _loop_name(loop: Any) -> str:
