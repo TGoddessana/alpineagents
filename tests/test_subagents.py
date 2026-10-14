@@ -10,9 +10,13 @@ Every test keeps the two invariants: ``State(history=s.history).snapshot() == s.
 
 from __future__ import annotations
 
+import _thread
 import asyncio
 import json
+import threading
+import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -24,17 +28,22 @@ from alpineagents import (
     Message,
     ModelReplyEntry,
     ModelRequestEntry,
+    Price,
     Reply,
+    Reporter,
     RunStartEntry,
     State,
     StateInfo,
     ToolCall,
+    ToolError,
     ToolOutcomeKind,
     ToolResultEntry,
     Usage,
     _serial,
+    tool,
 )
-from alpineagents.testing import FakeModel
+from alpineagents.permissions import AllowPermission, Allowed, DenyByName
+from alpineagents.testing import FakeModel, tool_call
 from alpineagents.store import Record
 from alpineagents.types import AgentInfo, HistoryEntry
 
@@ -730,3 +739,764 @@ def test_a_run_with_an_agent_keeps_the_invariants_with_the_new_fields(tmp_path: 
     with pytest.raises(KeyError):
         loaded.child("anything")
     assert [i.parent_id for i in store.list()] == [None]
+
+
+# ================================================================ linking runs started inside a tool call
+#
+# A run started inside a tool call of another run is its child: the tools below call another Agent's run/arun.
+
+
+def agent_of(replies, **settings) -> Agent:
+    settings.setdefault("reporter", None)
+    settings.setdefault("human", None)
+    return Agent(model=FakeModel(replies), **settings)
+
+
+def user_state(text: str = "Task", **kwargs) -> State:
+    return State(messages=[Message.user(text)], **kwargs)
+
+
+def results_of(state: State) -> list[ToolResultEntry]:
+    return [e for e in state.history if isinstance(e, ToolResultEntry)]
+
+
+def starts_of(state: State) -> list[RunStartEntry]:
+    return [e for e in state.history if isinstance(e, RunStartEntry)]
+
+
+def own_usage(state: State) -> Usage:
+    """What the State's own model requests used (not its subagents')."""
+    total = Usage()
+    for entry in state.history:
+        if isinstance(entry, ModelReplyEntry):
+            total = total + entry.content.usage
+    return total
+
+
+def assert_counts_children(state: State) -> None:
+    """``state.usage`` is its own requests plus what its tool results say the subagents used."""
+    total = own_usage(state)
+    for entry in results_of(state):
+        if entry.usage is not None:
+            total = total + entry.usage
+    assert state.usage == total
+    assert_replays(state)
+
+
+def link_of(child: State) -> tuple[str | None, str | None]:
+    return child.parent_id, child.parent_call_id
+
+
+def test_a_sync_run_inside_a_tool_is_a_linked_child():
+    helper = agent_of(["inner answer"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    first = tool_call("delegate")
+    agent = agent_of([first, "outer answer"], tools=[delegate])
+    parent = user_state(id="parent")
+    assert agent.run(parent) == "outer answer"
+
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.DONE and entry.content == "inner answer"
+    assert len(entry.child_ids) == 1
+    kid = parent.child(entry.child_ids[0])
+    assert parent.child(kid.id) is kid
+    assert link_of(kid) == ("parent", first.id)
+    assert [(s.parent_id, s.parent_call_id) for s in starts_of(kid)] == [("parent", first.id)]
+    assert entry.usage == kid.usage and kid.usage.requests == 1
+    assert parent.usage == own_usage(parent) + kid.usage
+    assert kid._depth == 1 and parent._depth == 0
+    assert_counts_children(parent)
+    assert_counts_children(kid)
+    assert (parent.parent_id, parent.parent_call_id) == (None, None)
+
+
+async def test_an_async_run_inside_an_async_tool_is_a_linked_child():
+    helper = agent_of(["inner answer"])
+
+    @tool
+    async def delegate() -> str:
+        """Ask the helper"""
+        return await helper.arun("Inner task")
+
+    first = tool_call("delegate")
+    agent = agent_of([first, "outer answer"], tools=[delegate])
+    parent = user_state(id="parent")
+    assert await agent.arun(parent) == "outer answer"
+
+    (entry,) = results_of(parent)
+    (kid_id,) = entry.child_ids
+    kid = parent.child(kid_id)
+    assert link_of(kid) == ("parent", first.id)
+    assert entry.usage == kid.usage
+    assert_counts_children(parent)
+
+
+async def test_a_sync_run_inside_a_sync_tool_of_an_async_run_is_linked():
+    helper = agent_of(["inner answer"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    first = tool_call("delegate")
+    agent = agent_of([first, "outer answer"], tools=[delegate])
+    parent = user_state(id="parent")
+    assert await agent.arun(parent) == "outer answer"
+    (kid_id,) = results_of(parent)[0].child_ids
+    assert link_of(parent.child(kid_id)) == ("parent", first.id)
+    assert_counts_children(parent)
+
+
+async def test_an_async_run_inside_a_sync_tool_started_with_asyncio_run_is_linked():
+    # The tool makes its own event loop on its worker thread (the context is copied into it).
+    helper = agent_of(["inner answer"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return asyncio.run(helper.arun("Inner task"))
+
+    first = tool_call("delegate")
+    agent = agent_of([first, "outer answer"], tools=[delegate])
+    parent = user_state(id="parent")
+    await agent.arun(parent)
+    (kid_id,) = results_of(parent)[0].child_ids
+    assert link_of(parent.child(kid_id)) == ("parent", first.id)
+
+
+async def test_asyncio_gather_in_a_tool_starts_several_children_in_order():
+    reviewers = [agent_of([f"review {i}"]) for i in range(3)]
+    kids: list[State] = []
+
+    @tool
+    async def review_all() -> list[str]:
+        """Review everything"""
+
+        async def one(i: int) -> str:
+            state = user_state(f"file {i}")
+            kids.append(state)
+            return await reviewers[i].arun(state)
+
+        return list(await asyncio.gather(*(one(i) for i in range(3))))
+
+    first = tool_call("review_all")
+    agent = agent_of([first, "done"], tools=[review_all])
+    parent = user_state(id="parent")
+    await agent.arun(parent)
+
+    (entry,) = results_of(parent)
+    assert entry.child_ids == tuple(kid.id for kid in kids)  # start order
+    for kid in kids:
+        assert link_of(kid) == ("parent", first.id)
+        assert parent.child(kid.id) is kid
+    expected = Usage()
+    for kid in kids:
+        expected = expected + kid.usage
+    assert entry.usage == expected and expected.requests == 3
+    assert_counts_children(parent)
+
+
+def test_several_sequential_children_in_one_tool_keep_their_start_order():
+    helpers = [agent_of([f"answer {i}"]) for i in range(3)]
+    kids = [user_state(f"q{i}") for i in range(3)]
+
+    @tool
+    def ask_all() -> str:
+        """Ask them one after the other"""
+        return ", ".join(helper.run(kid) for helper, kid in zip(helpers, kids, strict=True))
+
+    first = tool_call("ask_all")
+    agent = agent_of([first, "done"], tools=[ask_all])
+    parent = user_state()
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.child_ids == tuple(kid.id for kid in kids)
+    assert entry.usage is not None and entry.usage.requests == 3
+    assert_counts_children(parent)
+
+
+def test_a_grandchild_chain_links_each_level_and_usage_reaches_the_top():
+    grand_agent = agent_of(["deep answer"])
+    grand = user_state("deepest")
+
+    @tool
+    def dig() -> str:
+        """Go one level deeper"""
+        return grand_agent.run(grand)
+
+    mid_call = tool_call("dig")
+    mid_agent = agent_of([mid_call, "mid answer"], tools=[dig])
+    mid = user_state("middle")
+
+    @tool
+    def delegate() -> str:
+        """Ask the middle agent"""
+        return mid_agent.run(mid)
+
+    top_call = tool_call("delegate")
+    agent = agent_of([top_call, "top answer"], tools=[delegate])
+    top = user_state(id="top")
+    assert agent.run(top) == "top answer"
+
+    assert link_of(mid) == ("top", top_call.id)
+    assert link_of(grand) == (mid.id, mid_call.id)
+    assert top.child(mid.id) is mid and mid.child(grand.id) is grand
+    with pytest.raises(KeyError):
+        top.child(grand.id)  # a grandchild is reached through its parent
+    assert (grand._depth, mid._depth, top._depth) == (2, 1, 0)
+
+    assert mid.usage == own_usage(mid) + grand.usage
+    assert top.usage == own_usage(top) + mid.usage
+    assert top.usage.requests == 5 and grand.usage.requests == 1
+    for state in (top, mid, grand):
+        assert_counts_children(state)
+
+
+def test_parallel_calls_of_one_turn_each_get_their_own_children():
+    barrier = threading.Barrier(2, timeout=5)
+    helper_a, helper_b = agent_of(["a done"]), agent_of(["b done"])
+    kids: dict[str, State] = {}
+
+    @tool
+    def tool_a() -> str:
+        """A"""
+        barrier.wait()  # both tools run at once
+        kids["a"] = user_state("a")
+        return helper_a.run(kids["a"])
+
+    @tool
+    def tool_b() -> str:
+        """B"""
+        barrier.wait()
+        kids["b"] = user_state("b")
+        return helper_b.run(kids["b"])
+
+    call_a, call_b = tool_call("tool_a"), tool_call("tool_b")
+    agent = agent_of([[call_a, call_b], "done"], tools=[tool_a, tool_b])
+    parent = user_state()
+    agent.run(parent)
+
+    by_call = {entry.call.id: entry for entry in results_of(parent)}
+    assert by_call[call_a.id].child_ids == (kids["a"].id,)
+    assert by_call[call_b.id].child_ids == (kids["b"].id,)
+    assert link_of(kids["a"]) == (parent.id, call_a.id)
+    assert link_of(kids["b"]) == (parent.id, call_b.id)
+    assert_counts_children(parent)
+
+
+def test_a_run_in_a_thread_the_developer_made_is_not_linked():
+    helper = agent_of(["x"] * 2)
+    made: list[State] = []
+
+    @tool
+    def in_threads() -> str:
+        """Runs agents on threads of its own"""
+        first, second = user_state("t1"), user_state("t2")
+        made.extend([first, second])
+        thread = threading.Thread(target=helper.run, args=(first,))
+        thread.start()
+        thread.join()
+        with ThreadPoolExecutor(1) as pool:
+            pool.submit(helper.run, second).result()
+        return "ok"
+
+    agent = agent_of([tool_call("in_threads"), "done"], tools=[in_threads])
+    parent = user_state()
+    agent.run(parent)
+
+    (entry,) = results_of(parent)
+    assert entry.child_ids == () and entry.usage is None
+    assert parent.usage == own_usage(parent)
+    for state in made:
+        assert link_of(state) == (None, None)
+        assert state.usage.requests == 1
+        with pytest.raises(KeyError):
+            parent.child(state.id)
+    assert_counts_children(parent)
+
+
+def test_a_run_started_by_a_custom_loop_a_reporter_or_a_permission_is_not_linked():
+    helper = agent_of(["x"] * 4)
+    made: list[State] = []
+
+    def start(label: str) -> None:
+        state = user_state(label)
+        made.append(state)
+        helper.run(state)
+
+    def custom_loop(agent: Agent, state: State) -> str:
+        start("from the loop")
+        agent.think(state)
+        if state.pending_calls:
+            agent.use_tools(state)
+            agent.think(state)
+        return state.answer
+
+    class StartingReporter(Reporter):
+        def on_run_start(self, state: State) -> None:
+            start("from the reporter")
+
+    class StartingPermission(AllowPermission):
+        def check(self, state, call, tool):
+            start("from the permission")
+            return Allowed()
+
+    @tool
+    def noop() -> str:
+        """Nothing"""
+        return "ok"
+
+    agent = agent_of(
+        [tool_call("noop"), "done"],
+        tools=[noop],
+        loop=custom_loop,
+        reporter=StartingReporter(),
+        permissions=[StartingPermission()],
+    )
+    parent = user_state()
+    agent.run(parent)
+
+    assert len(made) == 3
+    assert all(link_of(state) == (None, None) for state in made)
+    assert results_of(parent)[0].child_ids == ()
+    assert_counts_children(parent)
+
+
+def test_a_run_started_by_the_loop_of_a_subagent_is_not_linked_to_the_tool_around_it():
+    inner = agent_of(["x"])
+    inner_state = user_state("inner")
+
+    def kid_loop(agent: Agent, state: State) -> str:
+        inner.run(inner_state)  # inside the subagent's loop, not inside a tool call
+        agent.think(state)
+        return state.answer
+
+    kid_agent = agent_of(["kid answer"], loop=kid_loop)
+    kid = user_state("kid")
+
+    @tool
+    def delegate() -> str:
+        """Ask the subagent"""
+        return kid_agent.run(kid)
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+
+    assert results_of(parent)[0].child_ids == (kid.id,)
+    assert link_of(inner_state) == (None, None)
+    assert results_of(kid) == []
+    assert_counts_children(parent)
+
+
+def test_a_state_run_again_keeps_its_first_parent_and_records_each_origin():
+    helper = agent_of(["one", "two", "three"])
+    kid = user_state("kid")
+
+    def delegating(name: str):
+        @tool(name=name)
+        def delegate() -> str:
+            """Ask the helper"""
+            return helper.run(kid)
+
+        return delegate
+
+    def run_under(parent_id: str, name: str) -> State:
+        parent = user_state(id=parent_id)
+        agent_of([tool_call(name), "done"], tools=[delegating(name)]).run(parent)
+        return parent
+
+    first = run_under("first", "ask_a")
+    kid.add_message(Message.user("again"))
+    second = run_under("second", "ask_b")
+    kid.add_message(Message.user("and again"))
+    helper.run(kid)  # outside any tool call
+
+    assert kid.parent_id == "first"  # the first link stays
+    origins = [(s.parent_id, s.parent_call_id) for s in starts_of(kid)]
+    assert [parent for parent, _ in origins] == ["first", "second", None]
+    assert results_of(first)[0].child_ids == results_of(second)[0].child_ids == (kid.id,)
+    assert_replays(kid)
+    # Each parent counts only what the child used inside its own call
+    assert results_of(first)[0].usage is not None and results_of(second)[0].usage is not None
+    assert results_of(first)[0].usage.requests == 1 and results_of(second)[0].usage.requests == 1
+    assert_counts_children(first)
+    assert_counts_children(second)
+
+
+def test_a_state_that_ran_before_counts_only_what_it_used_inside_the_call():
+    helper = agent_of(["one", "two"])
+    kid = user_state("kid")
+    helper.run(kid)  # used a request before any parent
+    before = kid.usage
+    kid.add_message(Message.user("more"))
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run(kid)
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.usage is not None and entry.usage.requests == 1
+    assert kid.usage.requests == before.requests + 1
+    assert parent.usage == own_usage(parent) + entry.usage
+    assert_counts_children(parent)
+
+
+def test_a_call_id_used_again_in_a_later_turn_does_not_take_over_the_earlier_children():
+    helper = agent_of(["one", "two"])
+    kids: list[State] = []
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        kid = user_state()
+        kids.append(kid)
+        return helper.run(kid)
+
+    same_id = [ToolCall("delegate", {}, "reused") for _ in range(2)]
+    agent = agent_of([same_id[0], same_id[1], "done"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+
+    first, second = results_of(parent)
+    assert first.child_ids == (kids[0].id,) and second.child_ids == (kids[1].id,)
+    assert parent._children_of("reused") == ()
+    assert_counts_children(parent)
+
+
+# ---------------------------------------------------------------- how a call closes
+
+
+def test_a_tool_error_result_still_lists_its_children():
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper, then give up"""
+        helper.run("Inner task")
+        raise ToolError("could not use it")
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ERROR
+    assert len(entry.child_ids) == 1 and entry.usage == parent.child(entry.child_ids[0]).usage
+    assert_counts_children(parent)
+
+
+def test_a_tool_that_raises_still_lists_its_children_on_the_aborted_result():
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper, then crash"""
+        helper.run("Inner task")
+        raise RuntimeError("boom")
+
+    agent = agent_of([tool_call("delegate"), "never"], tools=[delegate])
+    parent = user_state()
+    with pytest.raises(RuntimeError):
+        agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ABORTED
+    assert len(entry.child_ids) == 1 and entry.usage is not None and entry.usage.requests == 1
+    assert parent.usage == own_usage(parent) + entry.usage
+    assert_counts_children(parent)
+
+
+def test_a_keyboard_interrupt_in_a_tool_lists_its_children_on_the_interrupted_result():
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper, then get interrupted"""
+        helper.run("Inner task")
+        raise KeyboardInterrupt
+
+    agent = agent_of([tool_call("delegate"), "never"], tools=[delegate])
+    parent = user_state()
+    with pytest.raises(KeyboardInterrupt):
+        agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.INTERRUPTED
+    assert len(entry.child_ids) == 1 and entry.usage is not None
+    assert_counts_children(parent)
+
+
+class AllowEverything(AllowPermission):
+    def check(self, state, call, tool):
+        return Allowed()
+
+
+def test_a_denied_call_has_no_children():
+    helper = agent_of(["x"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of(
+        [tool_call("delegate"), "done"], tools=[delegate], permissions=[DenyByName(["delegate"]), AllowEverything()]
+    )
+    parent = user_state()
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.DENIED
+    assert entry.child_ids == () and entry.usage is None
+    assert helper.model.remaining == 1  # type: ignore[attr-defined]
+    assert_counts_children(parent)
+
+
+def test_a_late_result_repeats_the_child_ids_and_counts_only_what_came_after_the_call_closed():
+    def slow_reply(request):
+        time.sleep(0.05)  # let the interrupt land while the subagent waits for its model
+        _thread.interrupt_main()
+        time.sleep(0.3)
+        return "inner answer"
+
+    helper = agent_of([slow_reply])
+    kid = user_state("kid")
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run(kid)
+
+    agent = agent_of([tool_call("delegate"), "never"], tools=[delegate])
+    parent = user_state()
+    with pytest.raises(KeyboardInterrupt):
+        agent.run(parent)
+
+    (closing,) = [e for e in results_of(parent) if not e.late]
+    assert closing.outcome is ToolOutcomeKind.INTERRUPTED
+    assert closing.child_ids == (kid.id,)
+    assert closing.usage == Usage()  # the subagent had used nothing yet when the call closed
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not any(e.late for e in results_of(parent)):
+        time.sleep(0.02)
+    (late,) = [e for e in results_of(parent) if e.late]
+    assert late.child_ids == (kid.id,)
+    assert late.usage == kid.usage and kid.usage.requests == 1
+    assert parent.usage == own_usage(parent) + kid.usage  # counted once
+    assert_counts_children(parent)
+
+
+def test_a_late_result_for_a_call_with_no_children_has_no_usage():
+    parent = user_state(id="parent")
+    call = call_of("slow", "c1")
+    parent._start_run(Agent(model=FakeModel([]), reporter=None, human=None), INFO)
+    parent._begin_think("fake/fake")
+    parent._record_reply(Reply(Message("assistant", (call,)), used(10)))
+    parent._close_pending(KeyboardInterrupt())
+    parent._late_result(call, "finished", ToolOutcomeKind.DONE)
+    late = results_of(parent)[-1]
+    assert late.late and late.child_ids == () and late.usage is None
+    assert_replays(parent)
+
+
+def test_a_child_that_starts_after_its_call_closed_is_counted_by_the_late_result():
+    parent = user_state(id="parent")
+    call = call_of("slow", "c1")
+    parent._start_run(Agent(model=FakeModel([]), reporter=None, human=None), INFO)
+    parent._begin_think("fake/fake")
+    parent._record_reply(Reply(Message("assistant", (call,)), used(10)))
+    first = child_state(parent, "c1")
+    parent._add_child("c1", first, call)
+    parent._close_pending(KeyboardInterrupt())
+    assert parent._children_of("c1") == ()  # a later call that reuses the id starts from nothing
+
+    second = child_state(parent, "c1")
+    parent._add_child("c1", second, call)  # the tool kept running and started another one after the close
+    assert parent._children_of("c1") == ()
+    parent._late_result(call, "finished", ToolOutcomeKind.DONE)
+    late = results_of(parent)[-1]
+    assert late.late and late.child_ids == (first.id, second.id)
+    assert parent.child(second.id) is second
+    assert_replays(parent)
+
+
+def test_a_child_that_starts_after_a_call_closed_without_children_is_counted_by_the_late_result():
+    parent = user_state(id="parent")
+    call = call_of("slow", "c1")
+    parent._start_run(Agent(model=FakeModel([]), reporter=None, human=None), INFO)
+    parent._begin_think("fake/fake")
+    parent._record_reply(Reply(Message("assistant", (call,)), used(10)))
+    parent._close_pending(KeyboardInterrupt())  # the tool had not started a subagent yet
+    assert results_of(parent)[-1].child_ids == () and results_of(parent)[-1].usage is None
+
+    kid = child_state(parent, "c1")
+    parent._add_child("c1", kid, call)  # the tool kept running and started one after the close
+    assert parent._children_of("c1") == ()  # not left in the list a later call with this id would take
+    kid._start_run(Agent(model=FakeModel([]), reporter=None, human=None), INFO)
+    kid._begin_think("fake/fake")
+    kid._record_reply(Reply(Message.assistant("done"), used(7)))
+    parent._late_result(call, "finished", ToolOutcomeKind.DONE)
+    late = results_of(parent)[-1]
+    assert late.late and late.child_ids == (kid.id,)
+    assert late.usage == kid.usage and kid.usage.requests == 1
+    assert parent.child(kid.id) is kid
+    assert parent.usage == own_usage(parent) + kid.usage  # counted once
+    assert_replays(parent)
+
+    # A later call that reuses the id does not adopt the child.
+    parent._begin_think("fake/fake")
+    parent._record_reply(Reply(Message("assistant", (call_of("slow", "c1"),)), used(10)))
+    assert parent._children_of("c1") == ()
+
+
+def test_a_former_subagent_that_runs_on_its_own_is_at_depth_zero_again():
+    helper = agent_of(["inner", "again"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state(id="parent")
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    kid = parent.child(entry.child_ids[0])
+    assert kid.depth == 1
+
+    kid.add_message(Message.user("Once more"))
+    helper.run(kid)  # outside any tool call: not a subagent run
+    assert kid.depth == 0
+    assert (starts_of(kid)[-1].parent_id, kid.parent_id) == (None, "parent")  # first link kept, this origin recorded
+    assert_replays(kid)
+
+
+# ---------------------------------------------------------------- usage
+
+
+def test_usage_of_children_is_added_once_even_with_a_second_turn():
+    helper = agent_of(["a", "b"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+    assert [len(e.child_ids) for e in results_of(parent)] == [1, 1]
+    assert parent.usage.requests == 5  # three of the parent, one for each of the two children
+    assert_counts_children(parent)
+
+
+def test_cost_adds_up_across_models_with_different_prices():
+    helper = Agent(
+        model=FakeModel(["inner"], name="cheap", price=Price(input=1.0, output=1.0)), reporter=None, human=None
+    )
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    model = FakeModel([tool_call("delegate"), "done"], name="dear", price=Price(input=100.0, output=100.0))
+    agent = Agent(model=model, tools=[delegate], reporter=None, human=None)
+    parent = user_state()
+    agent.run(parent)
+
+    (entry,) = results_of(parent)
+    kid = parent.child(entry.child_ids[0])
+    assert entry.usage is not None and entry.usage.cost == pytest.approx(kid.usage.cost)
+    assert parent.usage.cost == pytest.approx(own_usage(parent).cost + kid.usage.cost)
+    assert kid.usage.cost is not None and own_usage(parent).cost > 50 * kid.usage.cost
+    assert_counts_children(parent)
+
+
+def test_an_unknown_price_anywhere_makes_the_total_cost_unknown():
+    helper = agent_of(["inner"])  # no price: its cost is None
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    model = FakeModel([tool_call("delegate"), "done"], price=Price(input=1.0, output=1.0))
+    agent = Agent(model=model, tools=[delegate], reporter=None, human=None)
+    parent = user_state()
+    agent.run(parent)
+    (entry,) = results_of(parent)
+    assert own_usage(parent).cost is not None
+    assert entry.usage is not None and entry.usage.cost is None
+    assert parent.usage.cost is None
+    assert_counts_children(parent)
+
+
+def test_a_price_of_zero_keeps_the_total_cost_known():
+    free = Price(input=0, output=0)
+    helper = Agent(model=FakeModel(["inner"], price=free), reporter=None, human=None)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    model = FakeModel([tool_call("delegate"), "done"], price=Price(input=1.0, output=1.0))
+    agent = Agent(model=model, tools=[delegate], reporter=None, human=None)
+    parent = user_state()
+    agent.run(parent)
+    assert parent.usage.cost is not None
+    assert parent.usage.cost == pytest.approx(own_usage(parent).cost)
+
+
+def test_restore_keeps_the_usage_of_children_and_the_link_survives_it():
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate])
+    parent = user_state()
+    start = parent.snapshot()
+    agent.run(parent)
+    spent = parent.usage
+    assert spent.requests == 3
+
+    parent.restore(start)
+    assert parent.usage == spent  # tokens that were spent cannot be given back
+    assert len(parent.history) > len(start.history)
+    (entry,) = results_of(parent)
+    assert parent.child(entry.child_ids[0]).parent_id == parent.id
+    assert_replays(parent)
+
+
+def test_a_saved_parent_loads_with_the_children_and_usage_on_its_results(tmp_path: Path):
+    store = FileStore(tmp_path)
+    helper = agent_of(["inner"])
+    kid = user_state("kid", id="kid1")
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run(kid)
+
+    agent = agent_of([tool_call("delegate"), "done"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    loaded = assert_loads_equal(store, parent)
+    (entry,) = results_of(loaded)
+    assert entry.child_ids == ("kid1",)
+    assert entry.usage == results_of(parent)[0].usage and entry.usage is not None
+    assert loaded.usage == parent.usage
+    assert_replays(parent)

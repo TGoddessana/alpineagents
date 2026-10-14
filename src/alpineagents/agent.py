@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import _structured, _tokens
 from ._async import ASYNC_RUN, check_sync_call, is_async_callable, run_in_thread
-from ._runner import arun_calls, run_calls
+from ._runner import _CURRENT_CALL, arun_calls, run_calls
 from ._tokens import estimate_overhead_tokens
 from .errors import NoHumanError, OutputError, ResumeWarning, fix_message
 from .human import check_returns as check_human_returns
@@ -530,6 +530,9 @@ class Agent:
             raise self._store._async_only("write", "awrite")
         self._check_permissions("run")
         state = self._start_run(prompt_or_state, "run")
+        # What runs inside this run (its loop, Reporter, permissions) is not inside a tool call of the parent: only
+        # the tools of this run set the call again.
+        outside_call = _CURRENT_CALL.set(None)
         try:
             self._save(state)
             reporter = self.reporter
@@ -559,6 +562,7 @@ class Agent:
                         reporter.on_run_end(state, error)
         finally:
             state._end_run()
+            _CURRENT_CALL.reset(outside_call)
 
     async def arun(self, prompt_or_state: str | State, /) -> Any:
         """The async version of ``run``.
@@ -588,6 +592,9 @@ class Agent:
         loop = self._async_loop()
         self._check_permissions("arun")
         state = self._start_run(prompt_or_state, "arun")
+        # What runs inside this run (its loop, Reporter, permissions) is not inside a tool call of the parent: only
+        # the tools of this run set the call again.
+        outside_call = _CURRENT_CALL.set(None)
         try:
             await self._asave(state)
             reporter = self.reporter
@@ -619,6 +626,7 @@ class Agent:
                         reporter.on_run_end(state, error)
         finally:
             state._end_run()
+            _CURRENT_CALL.reset(outside_call)
 
     def think(self, state: State, tools: Iterable[Any] | None = None) -> None:
         """Sends the messages to the model once and records its reply in the State.
@@ -1067,19 +1075,27 @@ class Agent:
 
         info = self._agent_info_now()
         saved = state._take_saved_agent()
+        # A run started inside a tool call is a subagent of the State that call belongs to. A thread the tool made
+        # itself has no such context, and a custom loop, Reporter or permission is not inside a tool call.
+        scope = _CURRENT_CALL.get()
         try:
             if saved is not None:
                 changes = _resume_changes(saved, info)
                 if changes:
                     # stacklevel 3: the user's run()/arun() call (warn <- _start_run <- run <- caller).
                     warnings.warn(ResumeWarning(_describe_changes(changes), changes), stacklevel=3)
-            state._start_run(self, info)
+            if scope is None:
+                state._start_run(self, info)
+            else:
+                state._start_run(self, info, (scope.state.id, scope.call.id), scope.state.depth)
         except BaseException:
             # A warnings filter turned the warning into an exception, or the State is being run already: the run did
             # not start, so the next run compares again.
             if saved is not None:
                 state._set_saved_agent(saved)
             raise
+        if scope is not None:
+            scope.state._add_child(scope.call.id, state, scope.call)
         return state
 
     def _check_permissions(self, method: str) -> None:

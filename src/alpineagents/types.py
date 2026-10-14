@@ -911,9 +911,10 @@ class ToolResultEntry:
     started. Open one with ``state.child(child_id)``. Empty for a call that started none. A ``late`` result
     repeats the ids of its call."""
     usage: Usage | None = None
-    """The usage of those subagents, and of their own subagents, that this State has not counted yet. It is
-    added to ``state.usage`` when the entry is recorded, so a ``late`` result holds only what the subagents used
-    after the call was closed. ``None`` when the call started none."""
+    """The usage of those subagents, and of their own subagents, that this State has not counted yet: what each
+    one used since it joined the call. It is added to ``state.usage`` when the entry is recorded, so a ``late``
+    result holds only what the subagents used after the call was closed. An empty ``Usage()`` when they used
+    nothing; ``None`` only when the call started no subagent."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()

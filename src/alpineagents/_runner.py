@@ -12,6 +12,7 @@ import threading
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,32 @@ LATE_EXCEPTION = "(exception: {}: {})"
 _MAX_WORKERS = 32
 #: How long (seconds) the main thread waits at a time. Kept short so Ctrl+C gets through right away.
 _POLL = 0.1
+
+
+@dataclass
+class _CallScope:
+    """The tool call that is running, as the code inside the tool sees it (``_CURRENT_CALL``). A run that starts
+    there is a subagent of ``state``, started by ``call``."""
+
+    state: State
+    """The State whose tool call this is (the parent of a run that starts inside it)."""
+    call: ToolCall
+    """The call, as it is in ``state.pending_calls``."""
+    context: Any = None
+    """What the parent run passes on to the runs started inside the call (the human, reporter, store and
+    permissions that apply, and the depth). Filled in by the code that starts the tools, once there is something
+    to pass on."""
+
+
+#: The tool call running in this thread or task, or ``None`` outside one. It is set while ``tool.run`` runs, so a
+#: ``run``/``arun`` started inside a tool can find the call it belongs to. Worker threads of ``_Executor`` and asyncio
+#: tasks get a copy of the caller's context, so the call follows them; a thread the tool makes itself
+#: (``threading.Thread``, ``ThreadPoolExecutor``) starts with an empty context and is not linked. ``Agent.run``
+#: sets it back to ``None`` for its own loop, so only a tool call (not a custom loop or Reporter of a subagent run)
+#: links a run.
+_CURRENT_CALL: contextvars.ContextVar[_CallScope | None] = contextvars.ContextVar(
+    "alpineagents_current_call", default=None
+)
 
 _seq_lock = threading.Lock()
 _seq = 0
@@ -151,19 +178,24 @@ def _run_awaitable(job: _Job, awaitable: Any) -> Any:
 def _work(job: _Job, state: State) -> ToolResultContent:
     """Worker thread: calls the tool and builds the result. Does no State recording or Reporter notification.
     A ``ToolError`` or ``ToolInputError`` becomes an error result."""
+    # This thread has its own copy of the context (``_Executor.submit``), so setting the call here is private to it.
+    token = _CURRENT_CALL.set(_CallScope(state, job.call))
     try:
         try:
-            value = job.tool.run(job.args, state)
-            if inspect.isawaitable(value):
-                value = _run_awaitable(job, value)
-            text = format_result(value)
-        except (ToolError, ToolInputError) as e:
-            text = _error_result(job, e)
-    except BaseException:
+            try:
+                value = job.tool.run(job.args, state)
+                if inspect.isawaitable(value):
+                    value = _run_awaitable(job, value)
+                text = format_result(value)
+            except (ToolError, ToolInputError) as e:
+                text = _error_result(job, e)
+        except BaseException:
+            job.seq = _next_seq()
+            raise
         job.seq = _next_seq()
-        raise
-    job.seq = _next_seq()
-    return text
+        return text
+    finally:
+        _CURRENT_CALL.reset(token)
 
 
 def _error_result(job: _Job, error: ToolError | ToolInputError) -> str:
@@ -572,19 +604,24 @@ _abandoned: set[asyncio.Task[ToolResultContent]] = set()
 async def _awork(job: _Job, state: State) -> ToolResultContent:
     """An ``async def`` tool as a Task on the running event loop: calls it and builds the result. A
     ``ToolError`` or ``ToolInputError`` becomes an error result."""
+    # A Task has its own copy of the context, so setting the call here is private to it.
+    token = _CURRENT_CALL.set(_CallScope(state, job.call))
     try:
         try:
-            value = job.tool.run(job.args, state)
-            if inspect.isawaitable(value):
-                value = await value
-            text = format_result(value)
-        except (ToolError, ToolInputError) as e:
-            text = _error_result(job, e)
-    except BaseException:
+            try:
+                value = job.tool.run(job.args, state)
+                if inspect.isawaitable(value):
+                    value = await value
+                text = format_result(value)
+            except (ToolError, ToolInputError) as e:
+                text = _error_result(job, e)
+        except BaseException:
+            job.seq = _next_seq()
+            raise
         job.seq = _next_seq()
-        raise
-    job.seq = _next_seq()
-    return text
+        return text
+    finally:
+        _CURRENT_CALL.reset(token)
 
 
 def _astart(state: State, reporter: Reporter | None, executor: _Executor, job: _Job, running: list[_Job]) -> None:
