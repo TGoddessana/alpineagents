@@ -179,7 +179,7 @@ def test_compaction_line_appears_after_new_turn_header():
 class _StubState:
     def __init__(self, *, turn=1, depth=0):
         self.turn = turn
-        self.depth = depth
+        self._depth = depth
 
 
 def test_default_input_writes_prompt_to_configured_output_not_real_stdout(monkeypatch, capsys):

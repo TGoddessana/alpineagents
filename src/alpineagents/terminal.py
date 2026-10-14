@@ -57,6 +57,21 @@ def _format_size(content: ToolResultContent) -> str:
     return _byte_size(_content_bytes(content)) + tail
 
 
+def _subagent_name(state: State) -> str | None:
+    """The name of the Agent running a subagent's State, or ``None`` for the top-level run (which is not labelled)
+    and for a subagent whose Agent has no name."""
+    if state._depth == 0:
+        return None
+    agent = state._agent
+    return agent.name if agent is not None else None
+
+
+def _agent_prefix(state: State) -> str:
+    """``"researcher "`` for a subagent line, or ``""`` when the Agent has no name."""
+    name = _subagent_name(state)
+    return f"{name} " if name else ""
+
+
 def _turns(n: int) -> str:
     """``1 turn``, ``2 turns``."""
     return f"{n} turn" if n == 1 else f"{n} turns"
@@ -68,6 +83,10 @@ class Terminal(Reporter, Human):
 
     Output from several threads never interleaves, and while a question is being written, other output waits.
 
+    A subagent's lines are indented one level deeper per generation and start with its Agent's name, so its run
+    shows up under the tool call that started it. Only the structure lines of a subagent are shown, not its
+    streamed text (``show_text`` is for the top-level run).
+
     Example output::
 
         [turn 1] thinking
@@ -76,7 +95,16 @@ class Terminal(Reporter, Human):
           done 1.2KB
         [turn 2] thinking
           context compacted: 121k → 18k tokens (cache rebuilds)
-        done: stopped by waiting_for_user (5 turns, ~$0.42, cache hit 84%)
+          tool researcher(prompt="How does Redis evict keys?")
+          researcher started
+          [researcher turn 1] thinking
+            tool web_search(query="Redis eviction")
+            done 4.0KB
+          [researcher turn 2] thinking
+          researcher done: stopped by finish (2 turns, ~$0.01)
+          done 612B
+        [turn 3] thinking
+        done: stopped by waiting_for_user (3 turns, ~$0.42, cache hit 84%)
     """
 
     def __init__(
@@ -91,7 +119,8 @@ class Terminal(Reporter, Human):
             output: Where to write. ``None`` writes to ``sys.stdout``, looked up on every write.
             input: The function that reads an answer. It gets the full prompt text and shows it itself.
                 ``None`` uses ``builtins.input``, and Terminal writes the prompt to ``output``.
-            show_text: ``False`` hides the model's streamed text and shows only the structure lines.
+            show_text: ``False`` hides the model's streamed text and shows only the structure lines. A subagent's
+                streamed text is never shown.
         """
         # Holds two locks: the output lock (threading.RLock, all writes) and the question lock (one question at a
         # time). Looking up sys.stdout on every write lets tests' capsys capture it.
@@ -103,10 +132,10 @@ class Terminal(Reporter, Human):
         self._question_lock = threading.Lock()
         # Whether we are at the start of a line (where the indent must be written again). Starts True.
         self._at_line_start = True
-        # Lines queued by on_context_change and not shown yet: (depth, text).
-        # Flushed right after the next on_think_start turn header, or just before
-        # on_run_end if the run ends first.
-        self._pending_context_lines: list[tuple[int, str]] = []
+        # Lines queued by on_context_change and not shown yet, per State (keyed by id(state), as subagents run
+        # beside their parent and each other): (depth, text). A State's lines are flushed right after its next
+        # on_think_start turn header, or just before its on_run_end if the run ends first.
+        self._pending_context_lines: dict[int, list[tuple[int, str]]] = {}
 
     # ------------------------------------------------------------ internal helpers
 
@@ -119,15 +148,14 @@ class Terminal(Reporter, Human):
             out = self._out()
             if not self._at_line_start:
                 out.write("\n")
-            out.write("  " * state.depth + text + "\n")
+            out.write("  " * state._depth + text + "\n")
             out.flush()
             self._at_line_start = True
 
-    def _flush_pending_context_lines(self) -> None:
-        """Flush the lines queued by ``on_context_change`` now (if any)."""
+    def _flush_pending_context_lines(self, state: State) -> None:
+        """Flush the lines ``on_context_change`` queued for ``state`` now (if any). Other States' lines stay."""
         with self._output_lock:
-            pending = self._pending_context_lines
-            self._pending_context_lines = []
+            pending = self._pending_context_lines.pop(id(state), None)
             if not pending:
                 return
             out = self._out()
@@ -141,21 +169,29 @@ class Terminal(Reporter, Human):
     # ------------------------------------------------------------ Reporter
 
     def on_run_start(self, state: State) -> None:
-        """Prints nothing."""
+        """Prints nothing for the top-level run. A subagent's run writes ``researcher started``."""
+        if state._depth > 0:
+            self._write_line(state, f"{_agent_prefix(state)}started")
 
     def on_think_start(self, state: State) -> None:
-        """Writes ``[turn N] thinking``."""
+        """Writes ``[turn N] thinking``, with the Agent's name in a subagent's header:
+        ``[researcher turn N] thinking``."""
         # Right after the header, flushes the lines deferred by on_context_change (if any), so a compaction line
-        # shows up under the new turn header. The indent is "  " * state.depth.
-        self._write_line(state, f"[turn {state.turn}] thinking")
-        self._flush_pending_context_lines()
+        # shows up under the new turn header. The indent is "  " * state._depth (the runtime depth: 0 for the
+        # top-level run, one more for each generation of subagent).
+        name = _subagent_name(state)
+        head = f"{name} turn" if name else "turn"
+        with self._output_lock:  # the header and its context lines stay together
+            self._write_line(state, f"[{head} {state.turn}] thinking")
+            self._flush_pending_context_lines(state)
 
     def on_text(self, state: State, chunk: str) -> None:
-        """Writes the model's text as it arrives, unless ``show_text`` is ``False``."""
-        # Indents at each line start and remembers an unfinished line.
-        if not self.show_text or not chunk:
+        """Writes the model's text as it arrives, unless ``show_text`` is ``False`` or the run is a subagent's."""
+        # Indents at each line start and remembers an unfinished line. A subagent's text is not shown: several
+        # subagents may stream at once, and their lines would mix with the parent's structure lines.
+        if not self.show_text or not chunk or state._depth > 0:
             return
-        indent = "  " * state.depth
+        indent = "  " * state._depth
         with self._output_lock:
             out = self._out()
             parts = chunk.split("\n")
@@ -221,9 +257,9 @@ class Terminal(Reporter, Human):
         tail = " (cache rebuilds)" if change.kind in _CACHE_RESET_KINDS else ""
         before = _format_tokens(change.before_tokens)
         after = _format_tokens(change.after_tokens)
-        text = f"  {name}: {before} → {after} tokens{tail}"
+        text = f"  {_agent_prefix(state)}{name}: {before} → {after} tokens{tail}"
         with self._output_lock:
-            self._pending_context_lines.append((state.depth, text))
+            self._pending_context_lines.setdefault(id(state), []).append((state._depth, text))
 
     def on_model_event(self, state: State, event: ModelEvent) -> None:
         """Writes ``model: {event.message}``."""
@@ -231,15 +267,17 @@ class Terminal(Reporter, Human):
 
     def on_run_end(self, state: State, error: BaseException | None) -> None:
         """Writes one last line, such as ``done: stopped by waiting_for_user (5 turns, ~$0.42, cache hit 84%)``,
-        ``done: reached limit(50), the task may be unfinished (50 turns)`` or ``done: interrupted by user (3 turns)``."""
+        ``done: reached limit(50), the task may be unfinished (50 turns)`` or ``done: interrupted by user (3 turns)``.
+        A subagent's line starts with its name: ``researcher done: stopped by finish (2 turns)``."""
         # - Normal: "done: {str(state.stopped)} ({turns}[, ~${cost:.2f}][, cache hit {rate:.0%}])" (cost is left
         #   out when None; the cache hit rate is left out when None or 0. A loop without @loop that ended on its
         #   own check leaves stopped None: "done: (2 turns)").
         # - StoppedByLimit: "done: reached limit({turns}), the task may be unfinished ({turns})".
         # - Any other exception: "done: error {type(error).__name__}: {error} ({turns})"
+        # A subagent's line is "{name} done: ..." (just "done: ..." when its Agent has no name).
         # Before that, flushes any lines on_context_change still has queued because no next think came (e.g. the
         # last compaction happened after this run's last turn; otherwise they would be lost).
-        self._flush_pending_context_lines()
+        self._flush_pending_context_lines(state)
         turns = _turns(state.turn)
         stopped = state.stopped
         if error is not None:
@@ -259,7 +297,7 @@ class Terminal(Reporter, Human):
                 parts.append(f"cache hit {rate:.0%}")
             head = f"done: {stopped}" if stopped is not None else "done:"
             text = f"{head} ({', '.join(parts)})"
-        self._write_line(state, text)
+        self._write_line(state, _agent_prefix(state) + text)
 
     # ------------------------------------------------------------ Human
 
@@ -276,14 +314,14 @@ class Terminal(Reporter, Human):
         # question is abandoned without an answer (e.g. the tool was interrupted with Ctrl+C), the last line from
         # on_run_end does not get stuck waiting on the lock too.
         #
-        # - Ends the current line first if mid-line. The question is indented by "  " * state.depth.
+        # - Ends the current line first if mid-line. The question is indented by "  " * state._depth.
         # - If no input was given (builtins.input is used), we write the question ourselves to this Terminal's
         #   output: builtins.input always writes its prompt to the real sys.stdout, so with a different output=
         #   stream the question and the re-ask message would end up in different places. When input= is given,
         #   that function decides how to show the prompt (it gets the full text with describe_choices(returns)
         #   appended), so we leave it alone.
         # - If parse_answer(answer, returns) raises ValueError, writes its message on one line and asks again.
-        indent = "  " * state.depth
+        indent = "  " * state._depth
         choices = describe_choices(returns)
         shown = f"{prompt} ({choices}) " if choices else f"{prompt} "
         full_prompt = indent + shown

@@ -3190,3 +3190,168 @@ async def test_cancelling_an_async_run_stops_the_parent_through_a_subagent():
     assert results_of(kid)[0].outcome is ToolOutcomeKind.INTERRUPTED
     assert_replays(parent)
     assert_replays(kid)
+
+
+# ================================================================ Terminal
+
+
+def terminal_agent(replies, terminal: Terminal, **settings) -> Agent:
+    """An Agent that reports to ``terminal``. Subagents given with default settings inherit it."""
+    return Agent(model=FakeModel(replies), reporter=terminal, human=None, **settings)
+
+
+def inheriting_researcher(replies, **settings) -> Agent:
+    """A researcher with the default reporter, so it reports where the parent run does."""
+    settings.setdefault("name", "researcher")
+    settings.setdefault("description", "Finds material and summarizes it")
+    return Agent(model=FakeModel(replies), **settings)
+
+
+def test_terminal_shows_a_sequential_subagent_run_under_its_call_line():
+    @tool
+    def web_search(query: str) -> str:
+        """Search the web"""
+        return "x" * 40
+
+    out = io.StringIO()
+    helper = inheriting_researcher(
+        [tool_call("web_search", query="Redis eviction"), "Redis uses LRU."], tools=[web_search]
+    )
+    agent = terminal_agent([ask_researcher("Redis"), "All done"], Terminal(output=out), tools=[helper])
+    parent = user_state()
+    assert agent.run(parent) == "All done"
+    assert out.getvalue() == (
+        "[turn 1] thinking\n"
+        '  tool researcher(prompt="Redis")\n'
+        "  researcher started\n"
+        "  [researcher turn 1] thinking\n"
+        '    tool web_search(query="Redis eviction")\n'
+        "    done 40B\n"
+        "  [researcher turn 2] thinking\n"
+        "  researcher done: stopped by waiting_for_user (2 turns)\n"
+        "  done 15B\n"
+        "[turn 2] thinking\n"
+        "All done\n"
+        "done: stopped by waiting_for_user (2 turns)\n"
+    )
+    (entry,) = results_of(parent)
+    assert parent.child(entry.child_ids[0]).answer == "Redis uses LRU."
+    assert_replays(parent)
+
+
+def test_terminal_does_not_show_a_subagents_streamed_text():
+    out = io.StringIO()
+    helper = inheriting_researcher(["secret findings"])
+    agent = terminal_agent([ask_researcher(), "Top answer"], Terminal(output=out), tools=[helper])
+    agent.run(user_state())
+    shown = out.getvalue()
+    assert "secret findings" not in shown and "Top answer" in shown
+    assert "  [researcher turn 1] thinking\n  researcher done:" in shown
+
+
+def test_terminal_with_show_text_off_still_shows_subagent_structure_lines():
+    out = io.StringIO()
+    helper = inheriting_researcher(["secret findings"])
+    agent = terminal_agent([ask_researcher(), "Top answer"], Terminal(output=out, show_text=False), tools=[helper])
+    agent.run(user_state())
+    shown = out.getvalue()
+    assert "Top answer" not in shown and "secret findings" not in shown
+    assert "  researcher started\n  [researcher turn 1] thinking\n" in shown
+
+
+def test_terminal_shows_a_grandchild_one_level_deeper_with_its_own_name():
+    inner = inheriting_researcher(["deep"], name="inner", description="The inner one")
+    mid = inheriting_researcher([tool_call("inner", prompt="go"), "mid answer"], tools=[inner])
+    out = io.StringIO()
+    agent = terminal_agent([ask_researcher(), "top answer"], Terminal(output=out), tools=[mid])
+    parent = user_state()
+    agent.run(parent)
+    lines = out.getvalue().splitlines()
+    assert "  researcher started" in lines
+    assert '    tool inner(prompt="go")' in lines
+    assert "    inner started" in lines
+    assert "    [inner turn 1] thinking" in lines
+    assert lines.index("    inner started") < lines.index("    inner done: stopped by waiting_for_user (1 turn)")
+    assert lines.index("    inner done: stopped by waiting_for_user (1 turn)") < lines.index(
+        "  researcher done: stopped by waiting_for_user (2 turns)"
+    )
+    assert lines[-1] == "done: stopped by waiting_for_user (2 turns)"
+    assert_replays(parent)
+
+
+def test_terminal_shows_a_subagent_failure_on_its_done_line():
+    out = io.StringIO()
+    helper = inheriting_researcher([RuntimeError("boom")])
+    agent = terminal_agent([ask_researcher(), "recovered"], Terminal(output=out), tools=[helper])
+    agent.run(user_state())
+    lines = out.getvalue().splitlines()
+    assert "  researcher done: error RuntimeError: boom (0 turns)" in lines
+
+
+def test_terminal_shows_parallel_subagents_without_mixing_their_lines():
+    @tool
+    def pause() -> str:
+        """Wait a moment so both subagents are inside their run together"""
+        barrier.wait(5)
+        return "ok"
+
+    barrier = threading.Barrier(2)
+    out = io.StringIO()
+    helper = inheriting_researcher([tool_call("pause"), tool_call("pause"), "first", "second"], tools=[pause])
+    first, second = ask_researcher("one"), ask_researcher("two")
+    agent = terminal_agent([[first, second], "All done"], Terminal(output=out), tools=[helper])
+    parent = user_state()
+    agent.run(parent)
+    lines = out.getvalue().splitlines()
+    assert lines.count("  researcher started") == 2
+    assert lines.count("  [researcher turn 1] thinking") == 2
+    assert lines.count("    tool pause()") == 2
+    assert lines.count("  [researcher turn 2] thinking") == 2
+    assert lines.count("  researcher done: stopped by waiting_for_user (2 turns)") == 2
+    # every line is a whole line with a known shape: nothing from one subagent got written in the middle of another
+    assert all(line.startswith(("  ", "[turn", "All done", "done:")) for line in lines)
+    # the parent's lines stay at depth 0 and the subagents' at depth 1 or deeper
+    assert sorted(line for line in lines if line.startswith("  tool researcher")) == [
+        '  tool researcher(prompt="one")',
+        '  tool researcher(prompt="two")',
+    ]
+    ids = results_of(parent)
+    assert [len(e.child_ids) for e in ids] == [1, 1]
+    assert_replays(parent)
+    for entry in ids:
+        assert_replays(parent.child(entry.child_ids[0]))
+
+
+def test_terminal_shows_a_nameless_subagent_started_by_a_tool():
+    helper = Agent(model=FakeModel(["inner"]))  # no name: it is not a tool, so it does not need one
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    out = io.StringIO()
+    agent = terminal_agent([tool_call("delegate"), "done"], Terminal(output=out), tools=[delegate])
+    agent.run(user_state())
+    lines = out.getvalue().splitlines()
+    assert lines[:5] == [
+        "[turn 1] thinking",
+        "  tool delegate()",
+        "  started",
+        "  [turn 1] thinking",
+        "  done: stopped by waiting_for_user (1 turn)",
+    ]
+
+
+def test_terminal_goes_back_to_top_level_lines_when_a_former_subagent_runs_on_its_own():
+    out, own_out = io.StringIO(), io.StringIO()
+    helper = inheriting_researcher(["inner", "again"], reporter=Terminal(output=own_out), human=None)
+    agent = terminal_agent([ask_researcher(), "outer"], Terminal(output=out), tools=[helper])
+    parent = user_state()
+    agent.run(parent)
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    own_out.truncate(0)
+    own_out.seek(0)
+    kid.add_message(Message.user("Once more"))
+    helper.run(kid)  # outside a tool call: a top-level run, so no name and no indent
+    assert own_out.getvalue() == "[turn 2] thinking\nagain\ndone: stopped by waiting_for_user (2 turns)\n"
