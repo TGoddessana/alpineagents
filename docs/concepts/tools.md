@@ -47,7 +47,8 @@ print(read_file.spec)
   [Write permission rules](../guides/permissions.md).
 - A mistake in the function raises `TypeError` when `@tool` runs, before any model request.
 - Other kinds of tools are in [Tools on objects and from data](../guides/more-tools.md): `@tool` methods of an
-  object, `Tool` subclasses, and MCP servers ([Use MCP servers](../guides/mcp.md)).
+  object, `Tool` subclasses, and MCP servers ([Use MCP servers](../guides/mcp.md)). An Agent in `tools=` is a tool the
+  model calls to run that Agent: see [Subagents](subagents.md).
 
 ## Return values
 

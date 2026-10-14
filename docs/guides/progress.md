@@ -26,6 +26,19 @@ done: stopped by waiting_for_user (2 turns)
 - The last line says why the run stopped and how many turns it took. When the Model has prices, it also shows the
   cost, for example `done: stopped by waiting_for_user (5 turns, ~$0.42)`.
 
+A [subagent](subagents.md)'s lines are indented under the tool call that started it, and start with its name. Its
+streamed text is not shown:
+
+```text
+  tool researcher(prompt="How does Redis evict keys?")
+  researcher started
+  [researcher turn 1] thinking
+    tool web_search(query="Redis eviction")
+    done 4.0KB
+  researcher done: stopped by finish (2 turns)
+  done 612B
+```
+
 Other last lines:
 
 ```text
@@ -64,6 +77,9 @@ Subclass `Reporter` and override only the events you need. Every event does noth
   the Reporter thread-safe.
 - A call a [permission](permissions.md) refused gets `on_tool_end` without `on_tool_start`, with `outcome.kind`
   `"denied"`, or `"cancelled"` for the other calls of a turn it stopped. `outcome.decided_by` names the permission.
+- A [subagent](subagents.md) with no `reporter=` reports to the Reporter of the run above it. Its events come with the
+  subagent's State, so `state.parent_id` (the parent State's id, or `None`) tells them apart from the top-level run's.
+  [Use subagents](subagents.md#show-the-tree) has a Reporter that prints a tree.
 - Exceptions raised in a Reporter propagate.
 
 ## Write a Human
@@ -75,6 +91,7 @@ Subclass `Human` and implement `ask`:
 ```
 
 - `returns` is `str`, `bool` or a `Literal[...]` of choices. Return a value of that type.
+- A subagent with no `human=` asks the person of the run above it.
 - For a person reached asynchronously, such as on a web page, implement `async def aask(...)` instead and use
   `agent.aask_human`.
 

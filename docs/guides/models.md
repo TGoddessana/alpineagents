@@ -91,6 +91,24 @@ Each `Reply` records the model that answered in `reply.model`, as the provider r
 requested name: an alias resolved to a dated id, or a router that picked another model. The cost still uses the
 requested Model's price.
 
+### Models with no price
+
+`usage.cost` is `None` when the Model has no price, and a `None` anywhere makes a total `None`. That includes the
+total of a run with [subagents](subagents.md), which adds up every request of the tree. A model you pay for with a
+subscription, or run on your own machine, costs nothing extra, which is not the same as an unknown price. Say so with a
+price of zero:
+
+```python
+from alpineagents import OpenAICompatible, Price
+
+free = Price(input=0, output=0)
+local = OpenAICompatible("llama3:8b", base_url="http://localhost:11434/v1", price=free)
+```
+
+Its requests add `0` to the cost, so the total stays a number. Each request is priced with the price of the Model that
+made it, so the cost of a lead and its subagents is right even when they use different models. Token counts add up
+across models too, so read them as a sum over all the models.
+
 ## Switch models in one conversation
 
 A State does not belong to the Agent that ran it. Any Agent may run, think, use tools and compact the same State, so a

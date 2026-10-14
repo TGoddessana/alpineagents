@@ -4,6 +4,55 @@ All notable changes to alpineagents are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/)
 (while the version is 0.x, a minor release may change the API).
 
+## [Unreleased]
+
+### Added
+
+- **Subagents.** A run started inside a tool call is a subagent of the run that made the call, with a State of its own.
+  An Agent with a `name` and a `description` in `tools=` is a tool the model calls with a `prompt`, which runs that
+  Agent on the prompt alone (it raised `NotImplementedError` before):
+
+  ```python
+  researcher = Agent(model="claude-sonnet-5", name="researcher", description="Reads files", tools=[read_file])
+  lead = Agent(model="claude-sonnet-5", tools=[researcher])
+  ```
+
+  For another input shape, write a `@tool` that runs the Agent: the run inside it is a subagent too, with
+  `asyncio.gather` as well. A thread you start yourself loses the link. The model gets the answer, with a note when
+  the subagent stopped at its limit or by a permission, or `(researcher failed: ...)` when it raised an exception.
+  See [Use subagents](https://tgoddessana.github.io/alpineagents/guides/subagents/) and
+  [Subagents](https://tgoddessana.github.io/alpineagents/concepts/subagents/).
+- **`state.parent_id` and `state.parent_call_id`**: the id of the State whose tool call started this one, and the
+  `ToolCall.id` of that call. Both are `None` for a State no tool call started.
+- **`state.child(child_id)`** and **`await state.achild(child_id)`**: the State of a subagent that one of this State's
+  tool calls started. `KeyError` for an id that is not a direct child, `ValueError` when the State has no way to open
+  it. A State loaded from a store opens its subagents from the store.
+- **`ToolResultEntry.child_ids`** (the subagents the call started, in start order) and **`ToolResultEntry.usage`**
+  (what they used and `state.usage` has not counted yet). **`RunStartEntry.parent_id`** and **`parent_call_id`** record
+  the link on the subagent's side.
+- **`StateInfo.parent_id`** (the `parent_id` key of the info dict): `store.list()` shows subagents beside the runs you
+  started, and `parent_id is None` picks the latter.
+
+### Changed
+
+- `state.usage` includes the usage of the subagents, added when the call that started them closes. `usage.cost` is
+  exact across different models, and `None` if any model has no price. For a subscription or a local model, use
+  `Price(input=0, output=0)`.
+- `permissions=` applies to every tool call of the run, the calls inside its subagents included. The
+  `DenyPermission`s of the runs above always apply. A subagent without `permissions=` is checked by the whole list of
+  the run above it, and one with a list of its own is checked by that list, so the allow and decide permissions of the
+  run above are not asked about its calls. A permission asks the `human` of the Agent that wrote it.
+- A run started inside a tool call now takes the `reporter`, `human` and `store` of the run above it when its Agent was
+  not given one, and is checked by that run's permissions. Before, it was independent of the run around it.
+- A Reporter gets the events of a subagent with the subagent's State. The default `Terminal` shows them indented under
+  the call that started them, with the Agent's name, and without the subagent's streamed text.
+- Stored format version 5. A State saved in format 4 loads as before, and is saved on as format 5.
+
+### Removed
+
+- **Breaking:** `state.parent`, `state.root` and `state.depth`. They were placeholders (`None`, the State itself, `0`),
+  and object links do not survive `store.load`. Use `state.parent_id` and open States by id.
+
 ## [0.6.0] - 2026-10-04
 
 ### Added

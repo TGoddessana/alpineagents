@@ -59,10 +59,13 @@ All of these are read-only properties. They read the current snapshot.
 | `stopped` | Why this run is set to stop, or `None`. See [Loops and stop rules](loops.md#when-a-loop-stops) |
 | `pending_calls` | Tool calls the model asked for that have no result yet |
 | `turn` | How many model replies there were. It is one more while a request waits on the model |
-| `usage` | Tokens, requests and cost of every `think`, `ask` and `compact` on this State |
+| `usage` | Tokens, requests and cost of every `think`, `ask` and `compact` on this State, and of its [subagents](subagents.md) |
 | `extra_data` | Your notepad. Read-only here: change it with `edit_extra_data()` |
 | `created_at`, `updated_at` | When the first and the latest history entry were recorded, in UTC |
 | `id` | The name a store saves the State under |
+| `parent_id`, `parent_call_id` | For a State that a tool call started as a [subagent](subagents.md): the id of the parent State and the `ToolCall.id` of the call. `None` otherwise |
+
+`state.child(child_id)` returns a [subagent](subagents.md#open-a-subagent)'s State.
 
 The size of the context is a question for the Agent: `agent.context_used(state)`. See
 [Keep the context small](../guides/context-size.md).
@@ -91,10 +94,10 @@ entry classes. Check `kind`, or use `isinstance` or `match`, to know what an ent
 | `ModelRequestEntry` | `model_request` | `think` sends a request. `content` is the model name |
 | `ModelReplyEntry` | `model_reply` | The model answered. `content` is the `Reply`, including `reply.model` |
 | `ModelEventEntry` | `model_event` | The model adapter reported something, such as a retry or a fallback to another model |
-| `ToolResultEntry` | `tool_result` | A tool call got its result, whichever way it ended. `outcome` says how |
+| `ToolResultEntry` | `tool_result` | A tool call got its result, whichever way it ended. `outcome` says how. `child_ids` lists the [subagents](subagents.md) the call started |
 | `ExchangeEntry` | `ask`, `human` | `agent.ask` or `agent.ask_human` got an answer. `content` is an `Exchange` |
 | `ContextChangeEntry` | `context_change` | `State(messages=...)`, `compact`, `clear_tool_results`, `restore` |
-| `RunStartEntry` | `run_start` | A run started. `content` is the [`AgentInfo`](#agentinfo) of the Agent |
+| `RunStartEntry` | `run_start` | A run started. `content` is the [`AgentInfo`](#agentinfo) of the Agent. `parent_id` and `parent_call_id` say which tool call started it, for a subagent |
 | `StopEntry` | `stop` | The run was set to stop: `finish`, a loop's `until` or `limit`, a permission |
 | `ExtraDataEntry` | `extra_data` | `State(extra_data=...)` or `edit_extra_data()` changed something |
 | `ErrorEntry` | `error` | An exception was raised in `think`, `use_tools` or `run` |
@@ -214,7 +217,8 @@ warnings.filterwarnings("error", category=ResumeWarning)
 ## StateInfo
 
 `store.list()` returns one `StateInfo` per saved State, without loading it: `id`, `first_message`, `created_at`,
-`updated_at`, `turn`, `stopped` and `finished`.
+`updated_at`, `turn`, `stopped`, `finished` and `parent_id`. `parent_id` is `state.parent_id`: a [subagent](subagents.md)
+is listed beside the runs you started, and `parent_id is None` picks the ones you started.
 
 ## StateSnapshot: a value you can keep
 

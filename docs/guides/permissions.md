@@ -157,6 +157,48 @@ raises `TypeError` when the run starts, before the first model call. A permissio
 only `acheck` counts as async-only: a sync `run` raises `TypeError` rather than ask the Human. One that overrides only
 `check` decides the same way in `arun`.
 
+## Permissions in subagents
+
+`permissions=` applies to **every tool call in the run, including the calls inside its [subagents](subagents.md)**.
+You write the list once, on the Agent you run, and a subagent cannot get around it. The code below has two subagents:
+
+```python
+--8<-- "docs_src/subagent_permissions.py"
+```
+
+1. `editor` has no `permissions=`, so the whole list of `lead` checks its calls. `delete_*` is refused, and
+   `write_file` goes to `DecideByHuman()`, which asks the person of `lead`.
+2. `drafter` has a list of its own. It decides for `drafter`'s calls instead of the allow and decide rules of `lead`:
+   `write_file` is allowed without asking.
+3. `delete_*` is still refused for both. A subagent cannot widen a `DenyPermission` of the runs above it.
+4. `AllowByName(["editor", "drafter"])` lets `lead` call the subagents. A subagent's tool does not say it is
+   read-only, so `AllowByReadOnly()` does not allow it.
+
+The rule for the calls of one subagent:
+
+| The subagent's `permissions=` | Which permissions check its calls |
+| --- | --- |
+| `None` (left out) | The whole list of the run above it |
+| A list | The `DenyPermission`s of every run above it, from the top, then its own list |
+
+So:
+
+- **Put what must always hold in `DenyBy...` permissions**, such as `DenyByName(["delete_*"])`. They reach every
+  subagent and every subagent of a subagent.
+- **A list of allow rules does not bind a subagent with a list of its own.** `[AllowByName(["read_file"])]` on the
+  lead means "refuse the rest" for the lead's own calls. A subagent with its own list is checked by that list, so a
+  call that list allows is not refused by the lead's "refuse the rest". To refuse it everywhere, use a
+  `DenyPermission`.
+- A subagent with `permissions=[]` has every call refused (with a `PermissionWarning`), after the `DenyPermission`s
+  above it.
+- **A permission asks the person of the Agent that wrote it.** `DecideByHuman()` in the lead's list asks the lead's
+  `human` about a call the editor makes. A `DecideByHuman()` in the subagent's own list asks the subagent's `human`,
+  which is the lead's when the subagent has none of its own
+  ([Subagents](../concepts/subagents.md#what-a-subagent-takes-from-the-run-above)).
+- `outcome.decided_by` in the Reporter names the permission that decided, wherever it was written.
+- The checks before the run starts apply to the inherited list too: a `DecideByHuman()` with no person to ask, or an
+  async-only permission under a sync `run`, raises before the first request.
+
 ## Not a security boundary
 
 Permissions keep an honest model from doing what you did not want. They do not stop a determined one:
@@ -171,6 +213,7 @@ files, network access and credentials the task needs.
 
 ## Related
 
+- [Use subagents](subagents.md)
 - [Show progress and ask the person](progress.md): answer questions from somewhere other than the terminal
 - [Stop a run](stop-conditions.md): every way a run stops
 - [Test your agent](../learn/testing.md): test the approval flow with `FakeHuman`

@@ -28,13 +28,13 @@ quiet = agent.copy(reporter=None)
 | --- | --- | --- |
 | `model` | required | A model name such as `"claude-sonnet-5"`, or a `Model` object. See [Use other models](../guides/models.md) |
 | `system` | `None` | The system prompt |
-| `tools` | none | `@tool` functions, objects with `@tool` methods, objects of `Tool` subclasses, MCP servers. See [Tool calls](tools.md) |
+| `tools` | none | `@tool` functions, objects with `@tool` methods, objects of `Tool` subclasses, MCP servers, and Agents with a `name` and a `description`, which become [subagents](subagents.md). See [Tool calls](tools.md) |
 | `loop` | `default_loop` | The loop `run` calls. See [Loops and stop rules](loops.md) |
 | `reporter` | `Terminal` | Receives progress. `None` shows nothing. See [Show progress and ask the person](../guides/progress.md) |
 | `human` | `Terminal` | Answers `ask_human`. `None` means nobody can answer |
 | `permissions` | `None` | Permissions that decide, before a tool call runs, whether it may run. `None` runs every call without checks. See [Write permission rules](../guides/permissions.md) |
 | `store` | `None` | Saves each State as it runs, so it can be continued later. See [Survive crashes and restarts](../guides/production.md) |
-| `name`, `description` | `None` | Labels for your own use |
+| `name`, `description` | `None` | Labels for your own use. An Agent in another Agent's `tools=` needs both: they are the name and description of its tool |
 
 - Creating an Agent uses no network and needs no API key.
 - Settings do not change after creation. `copy` returns a new Agent with some settings changed.

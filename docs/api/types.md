@@ -37,7 +37,8 @@ about the model, `ToolResultEntry` about a tool call.
 | `ErrorEntry` | `error` | `str` such as `"TimeoutError: ..."` |
 
 Every entry has `kind`, `content`, `turn` and `at`. The other fields are only on the classes where they mean
-something: `call` on `ToolResultEntry` and `ErrorEntry`, for example.
+something: `call` on `ToolResultEntry` and `ErrorEntry`, for example. The [subagent](../concepts/subagents.md) fields
+are `child_ids` and `usage` on `ToolResultEntry`, and `parent_id` and `parent_call_id` on `RunStartEntry`.
 
 Values in history are read-only. A `ToolCall`'s `args`, a `ModelEvent`'s `data`, an `ExtraDataEntry`'s `content` and
 an `Exchange`'s `answer` are frozen dicts and lists: they work with indexing, `json.dumps` and `==`, and a change

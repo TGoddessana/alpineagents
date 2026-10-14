@@ -169,6 +169,41 @@ Every change to a State adds an entry to `state.history`, and everything else is
 `state.restore(snapshot)` goes back to a `state.snapshot()` taken earlier, `state.fork()` tries another path from here,
 and `FileStore` with `Agent(store=...)` saves the history to continue it in another process.
 
+## Subagents
+
+An Agent in `tools=` becomes a tool the model can call. The Agent runs on the prompt it gets, and its answer is the
+tool result:
+
+```python
+from pathlib import Path
+
+from alpineagents import Agent, tool
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a text file"""
+    return Path(path).read_text()
+
+
+researcher = Agent(
+    model="claude-sonnet-5",
+    name="researcher",
+    description="Reads files and reports what they say",
+    system="Read what you need, then answer with the facts only.",
+    tools=[read_file],
+)
+lead = Agent(model="claude-sonnet-5", tools=[researcher])
+print(lead.run("Which Python versions does this project support? Ask the researcher to read pyproject.toml"))
+```
+
+- `name` and `description` are the tool's name and description. The model calls it with a `prompt`.
+- The researcher sees only that prompt. It runs in a State of its own, linked to the lead's (`state.child(...)`).
+- `lead`'s permissions apply to the researcher's tool calls too, and its cost includes the researcher's.
+- Any run started inside a tool call is a subagent in the same way, so a `@tool` can start Agents with its own input.
+
+[Use subagents](https://tgoddessana.github.io/alpineagents/guides/subagents/) has the rest.
+
 ## Documentation
 
 [tgoddessana.github.io/alpineagents](https://tgoddessana.github.io/alpineagents/)
@@ -189,7 +224,6 @@ and `FileStore` with `Agent(store=...)` saves the history to continue it in anot
 ## Roadmap
 
 - OpenAI adapter, LiteLLM adapter
-- Subagents (`tools=[researcher]`). Passing an Agent in `tools=` raises `NotImplementedError` for now
 - Skills (`skills=`). Passing `skills=` raises `NotImplementedError` for now
 - `agent.run_tool`, `agent.load_skill`
 - More tool result types (`File`, image URLs)
