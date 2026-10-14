@@ -16,6 +16,7 @@ import io
 import json
 import threading
 import time
+import warnings
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,10 +33,12 @@ from alpineagents import (
     Price,
     Reply,
     NoHumanError,
+    PermissionWarning,
     Reporter,
     RunStartEntry,
     State,
     StateInfo,
+    StoppedByPermission,
     Terminal,
     ToolCall,
     ToolError,
@@ -46,10 +49,19 @@ from alpineagents import (
     tool,
 )
 from alpineagents import terminal as terminal_module
-from alpineagents.permissions import AllowPermission, Allowed, DecideByHuman, DenyByName
+from alpineagents.permissions import (
+    AllowByDefault,
+    AllowByName,
+    AllowPermission,
+    Allowed,
+    DecideByHuman,
+    DenyByName,
+    DenyPermission,
+)
 from alpineagents.terminal import default_terminal
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.store import Record
+from alpineagents.human import Human
 from alpineagents.types import AgentInfo, HistoryEntry
 
 INFO = AgentInfo(model="fake/fake")
@@ -2118,3 +2130,551 @@ def test_state_info_of_a_top_level_run_and_a_subagent_differ_by_parent_id(tmp_pa
     agent_of(["alone"], store=store).run(user_state(id="another"))
     top_level = sorted(info.id for info in store.list() if info.parent_id is None)
     assert top_level == ["another", "parent"]
+
+
+# ---------------------------------------------------------------- permissions
+#
+# ``permissions=`` applies to every tool call of the run, the calls inside its subagents included. A subagent's calls
+# are checked by the DenyPermission of the runs above plus its own list, or the parent run's whole list when it has
+# none. Each permission asks the human of the Agent that wrote it.
+
+
+@tool
+def peek() -> str:
+    """Peek at the files"""
+    return "peeked"
+
+
+def passing_on(helper: Agent, name: str = "delegate"):
+    """A tool for the Agent above ``helper`` that runs it (the helper becomes a subagent)."""
+
+    @tool(name=name)
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    return delegate
+
+
+def passing_on_async(helper: Agent, name: str = "delegate"):
+    @tool(name=name)
+    async def delegate() -> str:
+        """Ask the helper"""
+        return await helper.arun("Inner task")
+
+    return delegate
+
+
+def kid_agent(replies, **settings) -> Agent:
+    """A subagent that peeks once. It gives no reporter or human, so it takes those of the run above."""
+    return Agent(model=FakeModel(replies), tools=[peek], **settings)
+
+
+def kid_of(state: State, index: int = 0) -> State:
+    return state.child(results_of(state)[index].child_ids[0])
+
+
+class Outcomes(Reporter):
+    """Remembers how every tool call ended: ``(state id, tool name, outcome kind, decided_by)``."""
+
+    def __init__(self) -> None:
+        self.ends: list[tuple[str, str, ToolOutcomeKind, str | None]] = []
+        self._lock = threading.Lock()
+
+    def on_tool_end(self, state, call, result, outcome):
+        with self._lock:
+            self.ends.append((state.id, call.name, outcome.kind, outcome.decided_by))
+
+    def of(self, state: State) -> list[tuple[str, ToolOutcomeKind, str | None]]:
+        return [(name, kind, by) for state_id, name, kind, by in self.ends if state_id == state.id]
+
+
+NO_PEEKING = DenyByName(["peek"], reason="no peeking")
+
+
+def human_questions(state: State) -> list[str]:
+    return [e.content.question for e in state.history if e.kind == "human"]
+
+
+@pytest.mark.parametrize("own", [None, [AllowByDefault()]])
+def test_a_deny_of_the_parent_blocks_the_call_of_a_subagent(own):
+    report = Outcomes()
+    helper = kid_agent(([tool_call("peek"), "inner"]), permissions=own)
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=report,
+        human=None,
+    )
+    parent = user_state(id="parent")
+    assert agent.run(parent) == "outer"
+
+    kid = kid_of(parent)
+    (peeked,) = results_of(kid)
+    assert peeked.outcome is ToolOutcomeKind.DENIED and peeked.content == "no peeking"
+    # the rule that decided is the parent's, and it is told about the child's call
+    assert report.of(kid) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]
+    assert report.of(parent) == [("delegate", ToolOutcomeKind.DONE, None)]
+    assert_counts_children(parent)
+    assert_counts_children(kid)
+
+
+def test_a_subagent_without_permissions_runs_under_the_whole_list_of_the_parent_run():
+    parent_human, own_human = FakeHuman(["yes"]), FakeHuman([])
+    helper = kid_agent([tool_call("peek"), "inner"], human=own_human)
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=None,
+        human=parent_human,
+    )
+    parent = user_state(id="parent")
+    assert agent.run(parent) == "outer"
+
+    kid = kid_of(parent)
+    # the parent's DecideByHuman asked the parent's person, not the one the subagent was given
+    assert parent_human.questions == ["Run peek()?"]
+    assert own_human.questions == []
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DONE
+    # the question and the answer are in the history of the State that made the call
+    assert human_questions(kid) == ["Run peek()?"] and human_questions(parent) == []
+    assert_replays(parent)
+    assert_replays(kid)
+
+
+def test_a_no_from_the_person_stops_the_subagent_only_and_is_recorded_in_its_history():
+    report, human = Outcomes(), FakeHuman(["no"])
+    helper = kid_agent([tool_call("peek"), "never asked again"])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=report,
+        human=human,
+    )
+    parent = user_state(id="parent")
+    assert agent.run(parent) == "outer"
+
+    kid = kid_of(parent)
+    assert isinstance(kid.stopped, StoppedByPermission) and kid.stopped.permission == "DecideByHuman()"
+    assert kid.stopped.call.name == "peek"
+    assert not isinstance(parent.stopped, StoppedByPermission)
+    assert report.of(kid) == [("peek", ToolOutcomeKind.DENIED, "DecideByHuman()")]
+    assert human.questions == ["Run peek()?"]
+    assert_replays(parent)
+    assert_replays(kid)
+
+
+def test_a_subagent_with_a_list_of_its_own_is_not_asked_about_by_the_allow_and_decide_rules_of_the_parent():
+    human = FakeHuman([])
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[AllowByDefault()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],  # it would ask about peek, and say no to the rest
+        reporter=None,
+        human=human,
+    )
+    parent = user_state(id="parent")
+    agent.run(parent)
+    kid = kid_of(parent)
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DONE
+    assert human.questions == []
+    assert_replays(kid)
+
+
+def test_the_implicit_deny_the_rest_of_a_parent_list_does_not_bind_a_subagent_with_its_own_list():
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[AllowByDefault()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"])],  # nothing else is allowed for the parent's own calls
+        reporter=None,
+        human=None,
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_a_subagent_with_an_empty_list_has_every_call_denied_with_a_warning():
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    parent = user_state()
+    with pytest.warns(PermissionWarning, match="peek"):
+        agent.run(parent)
+    kid = kid_of(parent)
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DENIED
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_a_deny_of_the_parent_decides_before_the_empty_list_of_a_subagent_so_nothing_warns():
+    report = Outcomes()
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=report,
+        human=None,
+    )
+    parent = user_state()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PermissionWarning)
+        agent.run(parent)
+    assert report.of(kid_of(parent)) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]
+
+
+@pytest.mark.parametrize("leaf_permissions", [None, [AllowByDefault()]])
+def test_a_deny_of_the_top_run_reaches_a_grandchild(leaf_permissions):
+    report = Outcomes()
+    leaf = kid_agent([tool_call("peek"), "leaf"], permissions=leaf_permissions)
+    middle = Agent(
+        model=FakeModel([tool_call("delegate_leaf"), "middle"]),
+        tools=[passing_on(leaf, "delegate_leaf")],
+        permissions=[AllowByDefault()],  # its own list: the allow rules of the top run are not asked
+    )
+    top = Agent(
+        model=FakeModel([tool_call("delegate_middle"), "top"]),
+        tools=[passing_on(middle, "delegate_middle")],
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=report,
+        human=None,
+    )
+    state = user_state(id="top")
+    assert top.run(state) == "top"
+    middle_state = kid_of(state)
+    leaf_state = kid_of(middle_state)
+    assert [e.outcome for e in results_of(middle_state)] == [ToolOutcomeKind.DONE]
+    assert report.of(leaf_state) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]
+    assert_replays(state)
+    assert_replays(middle_state)
+    assert_replays(leaf_state)
+
+
+def test_the_denials_of_every_run_above_apply_top_run_first():
+    order: list[str] = []
+
+    class Noting(DenyPermission):
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def check(self, state, call, tool):
+            if call.name == "peek":
+                order.append(self.label)
+            return None
+
+        def __repr__(self) -> str:
+            return f"Noting({self.label!r})"
+
+    leaf = kid_agent([tool_call("peek"), "leaf"], permissions=[Noting("leaf"), AllowByDefault()])
+    middle = Agent(
+        model=FakeModel([tool_call("delegate_leaf"), "middle"]),
+        tools=[passing_on(leaf, "delegate_leaf")],
+        permissions=[Noting("middle"), AllowByDefault()],
+    )
+    top = Agent(
+        model=FakeModel([tool_call("delegate_middle"), "top"]),
+        tools=[passing_on(middle, "delegate_middle")],
+        permissions=[AllowByDefault(), Noting("top")],  # a deny sits first wherever it is written
+        reporter=None,
+        human=None,
+    )
+    top.run(user_state())
+    assert order == ["top", "middle", "leaf"]
+
+
+def test_a_denial_is_not_asked_twice_when_the_subagent_takes_the_whole_list():
+    asked: list[str] = []
+
+    class Counting(DenyPermission):
+        def check(self, state, call, tool):
+            asked.append(call.name)
+            return None
+
+    helper = kid_agent([tool_call("peek"), "inner"])  # permissions=None: the list of the parent run
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[Counting(), AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    agent.run(user_state())
+    assert asked == ["delegate", "peek"]
+
+
+def test_without_permissions_anywhere_nothing_is_checked():
+    helper = kid_agent([tool_call("peek"), "inner"])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]), tools=[passing_on(helper)], reporter=None, human=None
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_a_subagent_with_a_list_of_its_own_under_a_parent_without_one_uses_only_its_own():
+    report = Outcomes()
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[NO_PEEKING, AllowByDefault()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]), tools=[passing_on(helper)], reporter=report, human=None
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert report.of(parent) == [("delegate", ToolOutcomeKind.DONE, None)]
+    assert report.of(kid_of(parent)) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]
+
+
+def test_a_decide_by_human_of_the_subagent_asks_the_human_of_the_subagent():
+    parent_human, own_human = FakeHuman([]), FakeHuman(["yes"])
+    helper = kid_agent([tool_call("peek"), "inner"], human=own_human, permissions=[DecideByHuman()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByDefault()],
+        reporter=None,
+        human=parent_human,
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert own_human.questions == ["Run peek()?"] and parent_human.questions == []
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_a_decide_by_human_of_a_subagent_without_a_human_of_its_own_asks_the_human_of_the_parent_run():
+    parent_human = FakeHuman(["yes"])
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[DecideByHuman()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByDefault()],
+        reporter=None,
+        human=parent_human,
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert parent_human.questions == ["Run peek()?"]
+    assert human_questions(kid_of(parent)) == ["Run peek()?"]
+
+
+def test_a_decide_by_human_with_a_human_of_its_own_keeps_asking_it_inside_a_subagent():
+    parent_human, approvals = FakeHuman([]), FakeHuman(["yes"])
+    helper = kid_agent([tool_call("peek"), "inner"])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman(human=approvals)],
+        reporter=None,
+        human=parent_human,
+    )
+    parent = user_state()
+    agent.run(parent)
+    assert approvals.questions == ["Run peek()?"] and parent_human.questions == []
+
+
+def test_a_permission_asks_the_human_of_the_run_that_wrote_it_down_a_chain():
+    top_human, middle_human, leaf_human = FakeHuman(["yes"]), FakeHuman(["yes"]), FakeHuman([])
+    leaf = kid_agent([tool_call("peek"), "leaf"], human=leaf_human)  # no permissions: the whole list of the middle
+    middle = Agent(
+        model=FakeModel([tool_call("delegate_leaf"), "middle"]),
+        tools=[passing_on(leaf, "delegate_leaf")],
+        permissions=[AllowByName(["delegate_leaf"]), DecideByHuman()],
+        human=middle_human,
+    )
+    top = Agent(
+        model=FakeModel([tool_call("delegate_middle"), "top"]),
+        tools=[passing_on(middle, "delegate_middle")],
+        permissions=[AllowByDefault()],
+        reporter=None,
+        human=top_human,
+    )
+    state = user_state()
+    top.run(state)
+    middle_state = kid_of(state)
+    # the middle run wrote the DecideByHuman, so its person is asked about the leaf's call, and the leaf's person is not
+    assert middle_human.questions == ["Run peek()?"]
+    assert top_human.questions == [] and leaf_human.questions == []
+    assert human_questions(kid_of(middle_state)) == ["Run peek()?"]
+
+
+def test_a_decide_by_human_of_the_top_run_asks_the_top_person_for_a_grandchild_that_has_a_human_in_between():
+    top_human, middle_human = FakeHuman(["yes"]), FakeHuman([])
+    leaf = kid_agent([tool_call("peek"), "leaf"])
+    middle = Agent(  # no permissions: the whole list of the top run, with the top run's person
+        model=FakeModel([tool_call("delegate_leaf"), "middle"]),
+        tools=[passing_on(leaf, "delegate_leaf")],
+        human=middle_human,
+    )
+    top = Agent(
+        model=FakeModel([tool_call("delegate_middle"), "top"]),
+        tools=[passing_on(middle, "delegate_middle")],
+        permissions=[AllowByName(["delegate_middle", "delegate_leaf"]), DecideByHuman()],
+        reporter=None,
+        human=top_human,
+    )
+    state = user_state()
+    top.run(state)
+    assert top_human.questions == ["Run peek()?"] and middle_human.questions == []
+
+
+class AsyncOnlyDeny(DenyPermission):
+    async def acheck(self, state, call, tool):
+        return None
+
+
+class AsyncHuman(Human):
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.questions: list[str] = []
+
+    async def aask(self, state, prompt, returns=str):
+        self.questions.append(prompt)
+        return self.answers.pop(0)
+
+
+@pytest.mark.parametrize("own", [None, [AllowByDefault()]])
+async def test_an_async_only_permission_of_the_parent_run_fails_a_sync_subagent_before_it_starts(own):
+    helper = kid_agent(["inner"], permissions=own)  # even a list of its own keeps the parent's denials
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],  # a sync tool: the subagent is started with the sync run
+        permissions=[AsyncOnlyDeny(), AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    parent = user_state()
+    with pytest.raises(TypeError, match="checks calls only asynchronously"):
+        await agent.arun(parent)
+    assert parent._children == {}  # the check comes before the RunStartEntry
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.ABORTED
+
+
+async def test_the_same_permission_is_fine_for_an_async_subagent_and_the_checks_run_with_acheck():
+    helper = kid_agent([tool_call("peek"), "inner"])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on_async(helper)],
+        permissions=[AsyncOnlyDeny(), AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+async def test_a_human_of_the_parent_run_that_answers_only_asynchronously_fails_a_sync_subagent_that_would_ask_it():
+    human = AsyncHuman([])
+    helper = kid_agent(["inner"])  # the whole list of the parent run: its DecideByHuman asks the parent's person
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=None,
+        human=human,
+    )
+    parent = user_state()
+    with pytest.raises(TypeError, match="answers only asynchronously"):
+        await agent.arun(parent)
+    assert parent._children == {} and human.questions == []
+
+
+async def test_a_sync_subagent_with_a_list_of_its_own_does_not_ask_the_async_human_of_the_parent_run():
+    human = AsyncHuman([])
+    helper = kid_agent([tool_call("peek"), "inner"], permissions=[AllowByDefault()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=None,
+        human=human,
+    )
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    assert human.questions == []
+
+
+async def test_an_async_subagent_is_checked_by_the_parent_list_and_asks_the_parent_human_with_aask():
+    human = AsyncHuman(["yes"])
+    helper = kid_agent([tool_call("peek"), "inner"])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on_async(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=None,
+        human=human,
+    )
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    kid = kid_of(parent)
+    assert human.questions == ["Run peek()?"]
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DONE
+    assert human_questions(kid) == ["Run peek()?"]
+    assert_replays(kid)
+
+
+def test_no_human_for_a_decide_by_human_of_the_subagent_itself_fails_before_it_starts():
+    helper = kid_agent(["inner"], human=None, permissions=[DecideByHuman()])
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        reporter=None,
+        human=FakeHuman([]),
+    )
+    parent = user_state()
+    with pytest.raises(NoHumanError, match="human=None"):
+        agent.run(parent)
+    assert parent._children == {}
+
+
+def test_a_decide_by_human_of_the_parent_does_not_need_a_human_of_the_subagent():
+    helper = kid_agent([tool_call("peek"), "inner"], human=None)
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[passing_on(helper)],
+        permissions=[AllowByName(["delegate"]), DecideByHuman()],
+        reporter=None,
+        human=FakeHuman(["yes"]),
+    )
+    parent = user_state()
+    assert agent.run(parent) == "outer"
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_another_agent_called_on_a_state_inside_a_run_checks_with_its_own_permissions():
+    other = Agent(
+        model=FakeModel([tool_call("peek"), "from other"]),
+        tools=[peek],
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+
+    def mixed(agent: Agent, state: State):
+        other.think(state)  # another Agent: its own list, not the one of the run
+        other.use_tools(state)
+        return state.answer
+
+    agent = Agent(
+        model=FakeModel(["x"]), tools=[peek], loop=mixed, permissions=[AllowByDefault()], reporter=None, human=None
+    )
+    state = user_state()
+    agent.run(state)
+    assert results_of(state)[0].outcome is ToolOutcomeKind.DENIED
+
+
+def test_permissions_of_the_agent_still_show_its_own_list_only():
+    helper = kid_agent(["inner"])
+    agent = Agent(
+        model=FakeModel(["x"]), tools=[passing_on(helper)], permissions=[NO_PEEKING], reporter=None, human=None
+    )
+    assert helper.permissions == () and agent.permissions == (NO_PEEKING,)

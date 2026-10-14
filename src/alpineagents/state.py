@@ -80,6 +80,7 @@ from .types import (
 if TYPE_CHECKING:
     from .agent import Agent
     from .human import Human
+    from .permissions import _Owned
     from .reporter import Reporter
     from .store import Store
 
@@ -525,9 +526,10 @@ def _error_text(error: BaseException) -> str:
 @dataclass(frozen=True, eq=False)
 class _RunContext:
     """What applies to one run of ``agent`` on this State (runtime only, never saved): the reporter, human and store
-    the run uses. A setting the Agent did not give (``reporter``/``human`` left at their default, no ``store``) is the
-    value of the run that started this one as a subagent, so the person and the store are the ones the parent run
-    uses. Set by ``Agent.run``/``arun`` when the run starts, passed on to the runs the tools start."""
+    the run uses, and the permissions that check its tool calls. A setting the Agent did not give
+    (``reporter``/``human`` left at their default, no ``store``) is the value of the run that started this one as a
+    subagent, so the person and the store are the ones the parent run uses. Set by ``Agent.run``/``arun`` when the run
+    starts, passed on to the runs the tools start."""
 
     agent: Agent
     """The Agent running. Only that Agent uses the values below: another Agent that is called on the State (a
@@ -537,6 +539,10 @@ class _RunContext:
     store: Store | None
     human_inherited: bool = False
     """``human`` is the parent run's (the Agent was not given one), for the wording of ``NoHumanError``."""
+    permissions: tuple[_Owned, ...] | None = None
+    """The permissions asked about every tool call of the run, each with the Human of the Agent that wrote it. For a
+    subagent: the ``DenyPermission`` of the runs above, then its own list, or the whole list of the run that started
+    it when it has none (``permissions._effective``). ``None``: no checks."""
 
 
 @dataclass
