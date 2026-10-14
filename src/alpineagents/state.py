@@ -520,6 +520,40 @@ def _error_text(error: BaseException) -> str:
     return f"{name}: {message}" if message else name
 
 
+@dataclass
+class _ClosedCall:
+    """A tool call that closed (runtime only): the call object, the ids of the subagents it started in start order
+    (empty for most calls), and the usage of each that the State has counted so far. It is what lets a subagent that
+    starts after the call closed, and a late result, find the call again."""
+
+    call: ToolCall
+    ids: list[str]
+    counted: dict[str, Usage]
+
+
+def _grown(now: Usage, before: Usage) -> Usage:
+    """What a subagent used since ``before`` (an earlier ``Usage`` of the same State). The cost is ``None`` when it
+    is unknown for the new requests: the price is unknown now, or was unknown for the earlier ones, so the part
+    cannot be told apart."""
+    requests = now.requests - before.requests
+    if requests <= 0:
+        cost = None
+    elif before.requests == 0:
+        cost = now.cost
+    elif now.cost is None or before.cost is None:
+        cost = None
+    else:
+        cost = now.cost - before.cost
+    return Usage(
+        input_tokens=now.input_tokens - before.input_tokens,
+        output_tokens=now.output_tokens - before.output_tokens,
+        cache_read_tokens=now.cache_read_tokens - before.cache_read_tokens,
+        cache_write_tokens=now.cache_write_tokens - before.cache_write_tokens,
+        requests=max(requests, 0),
+        cost=cost,
+    )
+
+
 @dataclass(frozen=True)
 class _Batch:
     """What a store does not have yet (``State._unsaved``): JSON-ready entries and the info dict.
@@ -615,6 +649,13 @@ class State:
         # lists it. ``fork()`` copies the first table; a rebuilt State starts without them.
         self._children: dict[str, State] = {}
         self._call_children: dict[str, list[str]] = {}
+        # What the usage of the children of an open call was when it was last counted (when the child started, then
+        # when the call closed), by call id and child id. A child that already had usage when it started (a State
+        # that ran before) only counts what it used inside the call.
+        self._call_counted: dict[str, dict[str, Usage]] = {}
+        # The calls that closed with children, by ``id(call)``: a result that arrives late (``_late_result``) finds
+        # its children here, and counts only what they used since.
+        self._closed_calls: dict[int, _ClosedCall] = {}
         # Reserved for subagents (see _child).
         self._parent: State | None = None
         self._root: State = self
@@ -1330,9 +1371,14 @@ class State:
         this is only a link to the latest one, not an owner."""
         self._agent = agent
 
-    def _start_run(self, agent: Agent, info: AgentInfo) -> None:
+    def _start_run(
+        self, agent: Agent, info: AgentInfo, parent: tuple[str, str] | None = None, parent_depth: int = -1
+    ) -> None:
         """Start of ``Agent.run``/``arun``, after the checks that need no lock: the one-run-at-a-time guard, the
         link to ``agent`` (``_attach``) and ``RunStartEntry(info)``, which clears ``stopped``, as one change.
+        ``parent`` is the ``(State id, ToolCall.id)`` of the tool call this run started in, for a subagent run: it
+        goes into the entry (the caller also registers the State with the parent, ``_add_child``). The depth of this
+        run is ``parent_depth + 1``, so a State that was a subagent and runs on its own again is back at depth 0.
 
         Every call that returned is paired with ``_end_run``.
 
@@ -1349,23 +1395,69 @@ class State:
                         "agent.run(state)\nagent.run(state)  # one after the other",
                     )
                 )
-            self._commit(RunStartEntry(content=info, turn=self._snap.turn))
+            parent_id, parent_call_id = parent if parent is not None else (None, None)
+            self._commit(
+                RunStartEntry(content=info, parent_id=parent_id, parent_call_id=parent_call_id, turn=self._snap.turn)
+            )
             self._running = True
             self._agent = agent
+            self._depth = parent_depth + 1
 
-    def _add_child(self, call_id: str, child: State) -> None:
+    def _add_child(self, call_id: str, child: State, call: ToolCall | None = None) -> None:
         """A subagent run started inside the tool call ``call_id``: remember it (not saved), in start order. Called
-        by the Agent when the child starts, before the call has a result."""
+        by the Agent when the child starts, before the call has a result. The child is one level deeper than this
+        State (the depth the Terminal indents by). ``call`` is the call object, to find the call again if it closed
+        already (a tool that started a subagent after it was closed without waiting)."""
         with self._lock:
             self._children[child.id] = child
+            child._depth = self._depth + 1
+            closed = None if call is None else self._closed_calls.get(id(call))
+            if closed is not None and closed.call is call:
+                if child.id not in closed.ids:
+                    closed.ids.append(child.id)
+                    closed.counted[child.id] = child.usage
+                return
             ids = self._call_children.setdefault(call_id, [])
             if child.id not in ids:
                 ids.append(child.id)
+                self._call_counted.setdefault(call_id, {})[child.id] = child.usage
 
     def _children_of(self, call_id: str) -> tuple[str, ...]:
         """The ids of the subagents the tool call ``call_id`` started so far, in start order."""
         with self._lock:
             return tuple(self._call_children.get(call_id, ()))
+
+    def _close_children(self, call: ToolCall) -> tuple[tuple[str, ...], Usage | None]:
+        """The ``child_ids`` and ``usage`` for the ``ToolResultEntry`` that closes ``call``, and forget the call's
+        runtime list (a later call may reuse the id). ``usage`` is what the children used since they started, as
+        they stand now. ``((), None)`` for a call that started none. Call under the lock, right before committing the
+        entry."""
+        ids = self._call_children.pop(call.id, None) or []
+        counted = self._call_counted.pop(call.id, {})
+        # Recorded even without children: a subagent that starts after the call closed (the tool was cut off before
+        # it got there) must not land in the list of a later call that reuses the id.
+        usage, counted = self._used_since(ids, counted)
+        self._closed_calls[id(call)] = _ClosedCall(call, ids, counted)
+        return (tuple(ids), usage) if ids else ((), None)
+
+    def _late_children(self, call: ToolCall) -> tuple[tuple[str, ...], Usage | None]:
+        """Like ``_close_children`` for a result that arrives after its call was closed: the same child ids, and only
+        the usage that grew since the call was closed (what the closing result did not count)."""
+        closed = self._closed_calls.get(id(call))
+        if closed is None or closed.call is not call or not closed.ids:
+            return (), None
+        usage, closed.counted = self._used_since(closed.ids, closed.counted)
+        return tuple(closed.ids), usage
+
+    def _used_since(self, ids: Sequence[str], counted: Mapping[str, Usage]) -> tuple[Usage, dict[str, Usage]]:
+        """The usage of the children ``ids`` beyond ``counted`` (zero for a child not in it), and their usage now."""
+        total = Usage()
+        now: dict[str, Usage] = {}
+        for child_id in ids:
+            usage = self._children[child_id].usage
+            now[child_id] = usage
+            total = total + _grown(usage, counted.get(child_id, Usage()))
+        return total, now
 
     def _end_run(self) -> None:
         """End of a run, whether it ended or raised (also when the first save of the run failed): the State may be run
@@ -1499,9 +1591,17 @@ class State:
                     return False
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot record a result for a call that is not pending: {shown}")
+            closing = snap._turn_calls[slot]
+            child_ids, usage = self._close_children(closing)
             self._commit(
                 ToolResultEntry(
-                    content=content, call=snap._turn_calls[slot], outcome=outcome, error=error, turn=snap.turn
+                    content=content,
+                    call=closing,
+                    outcome=outcome,
+                    error=error,
+                    child_ids=child_ids,
+                    usage=usage,
+                    turn=snap.turn,
                 )
             )
             return True
@@ -1529,9 +1629,17 @@ class State:
                 result is None and pending is call
                 for pending, result in zip(snap._turn_calls, snap._turn_results, strict=True)
             )
+            child_ids, usage = self._close_children(call) if still_pending else self._late_children(call)
             self._commit(
                 ToolResultEntry(
-                    content=content, call=call, outcome=outcome, late=not still_pending, error=error, turn=snap.turn
+                    content=content,
+                    call=call,
+                    outcome=outcome,
+                    late=not still_pending,
+                    error=error,
+                    child_ids=child_ids,
+                    usage=usage,
+                    turn=snap.turn,
                 )
             )
 
@@ -1549,16 +1657,29 @@ class State:
             if slot is None:
                 shown = format_call(call) if isinstance(call, ToolCall) else repr(call)
                 raise ValueError(f"cannot deny a call that is not pending: {shown}")
+            denied = snap._turn_calls[slot]
+            child_ids, usage = self._close_children(denied)
             self._commit(
                 ToolResultEntry(
-                    content=reason, call=snap._turn_calls[slot], outcome=ToolOutcomeKind.DENIED, turn=snap.turn
+                    content=reason,
+                    call=denied,
+                    outcome=ToolOutcomeKind.DENIED,
+                    child_ids=child_ids,
+                    usage=usage,
+                    turn=snap.turn,
                 )
             )
             cancelled = list(self._snap.pending_calls)
             for other in cancelled:
+                child_ids, usage = self._close_children(other)
                 self._commit(
                     ToolResultEntry(
-                        content=STOPPED_TURN, call=other, outcome=ToolOutcomeKind.CANCELLED, turn=self._snap.turn
+                        content=STOPPED_TURN,
+                        call=other,
+                        outcome=ToolOutcomeKind.CANCELLED,
+                        child_ids=child_ids,
+                        usage=usage,
+                        turn=self._snap.turn,
                     )
                 )
             if not self._snap.finished:
@@ -1577,7 +1698,18 @@ class State:
         with self._lock:
             closed = list(self._snap.pending_calls)
             for call in closed:
-                self._commit(ToolResultEntry(content=text, call=call, outcome=kind, error=error, turn=self._snap.turn))
+                child_ids, usage = self._close_children(call)
+                self._commit(
+                    ToolResultEntry(
+                        content=text,
+                        call=call,
+                        outcome=kind,
+                        error=error,
+                        child_ids=child_ids,
+                        usage=usage,
+                        turn=self._snap.turn,
+                    )
+                )
             return closed
 
     def _record_error(self, error: BaseException, call: ToolCall | None = None) -> None:
