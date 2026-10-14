@@ -508,7 +508,7 @@ def test_state_info_from_info_for_store_implementers():
 def test_state_info_from_info_refuses_other_formats_and_missing_keys():
     info = an_info()
     with pytest.raises(ValueError, match="newer alpineagents"):
-        StateInfo.from_info("x", {**info, "v": 5})
+        StateInfo.from_info("x", {**info, "v": 6})
     with pytest.raises(ValueError, match=r"damaged: its info has no turn, finished"):
         StateInfo.from_info("x", {k: v for k, v in info.items() if k not in ("turn", "finished")})
 
@@ -534,8 +534,17 @@ def test_write_contract_of_a_custom_store():
     record = store.states["c"]
     assert [e["seq"] for e in record.entries] == list(range(len(state.history)))
     # info: exactly the StateInfo fields (but id) and the format version, no messages, no history.
-    assert set(record.info) == {"v", "first_message", "created_at", "updated_at", "turn", "stopped", "finished"}
-    assert record.info["v"] == _serial.VERSION == 4
+    assert set(record.info) == {
+        "v",
+        "first_message",
+        "created_at",
+        "updated_at",
+        "turn",
+        "stopped",
+        "finished",
+        "parent_id",
+    }
+    assert record.info["v"] == _serial.VERSION == 5
     assert json.loads(json.dumps(record.info)) == record.info
     assert record.info["first_message"] == "Sum" and record.info["turn"] == 2
 
@@ -657,7 +666,7 @@ def test_load_refuses_a_newer_format(tmp_path, version):
     with pytest.raises(ValueError) as raised:
         store.load("new")
     assert str(raised.value).splitlines()[0] == (
-        f"saved State 'new' was saved by a newer alpineagents (format {version}); this alpineagents reads format 4"
+        f"saved State 'new' was saved by a newer alpineagents (format {version}); this alpineagents reads formats 4 to 5"
     )
     assert "upgrade alpineagents" in str(raised.value)
 
@@ -672,7 +681,7 @@ def test_load_checks_the_format_before_reading_entries(tmp_path):
 
 async def test_aload_refuses_other_formats_too():
     store = MemoryStore()
-    store.states["x"] = Record([], {"v": 5})
+    store.states["x"] = Record([], {"v": 6})
     with pytest.raises(ValueError, match="newer alpineagents"):
         await store.aload("x")
 
@@ -1193,8 +1202,8 @@ def test_file_store_layout_on_disk(tmp_path):
     assert "v" not in entries[0]  # the version is in the info only
 
     info = json.loads((tmp_path / "lay" / "info.json").read_text("utf-8"))
-    assert info["v"] == 4
-    assert set(info) == {"v", "first_message", "created_at", "updated_at", "turn", "stopped", "finished"}
+    assert info["v"] == 5
+    assert set(info) == {"v", "first_message", "created_at", "updated_at", "turn", "stopped", "finished", "parent_id"}
     assert info["first_message"] == "Sum" and info["turn"] == 2 and info["finished"] is False
     assert info["stopped"] == {"kind": "until", "name": "waiting_for_user"}
     assert store.read("lay") == Record(entries, info)

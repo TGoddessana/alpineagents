@@ -906,6 +906,14 @@ class ToolResultEntry:
     """The ``ToolError`` behind an error result (its ``__cause__`` is the original exception when
     ``exception_handler`` made it), or the exception that closed the call. Not saved by a store, and ignored by
     ``==``."""
+    child_ids: tuple[str, ...] = ()
+    """The ids of the subagent States this call started (runs started inside the call), in the order they
+    started. Open one with ``state.child(child_id)``. Empty for a call that started none. A ``late`` result
+    repeats the ids of its call."""
+    usage: Usage | None = None
+    """The usage of those subagents, and of their own subagents, that this State has not counted yet. It is
+    added to ``state.usage`` when the entry is recorded, so a ``late`` result holds only what the subagents used
+    after the call was closed. ``None`` when the call started none."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()
@@ -914,6 +922,15 @@ class ToolResultEntry:
     def __post_init__(self) -> None:
         # ValueError for a string that is not an outcome kind.
         object.__setattr__(self, "outcome", ToolOutcomeKind(self.outcome))
+        if isinstance(self.child_ids, (str, bytes)):
+            raise TypeError(
+                fix_message(
+                    f"ToolResultEntry.child_ids needs a sequence of ids, not one string (got: {self.child_ids!r})",
+                    "Wrap a single id in a tuple",
+                    'ToolResultEntry(..., child_ids=("kid1",))',
+                )
+            )
+        object.__setattr__(self, "child_ids", tuple(self.child_ids))
 
     @property
     def is_error(self) -> bool:
@@ -962,6 +979,11 @@ class RunStartEntry:
     """Always ``"run_start"``."""
     content: AgentInfo
     """The ``AgentInfo`` of the Agent that started the run."""
+    parent_id: str | None = None
+    """The id of the State whose tool call started this run (a subagent run), or ``None`` for a run started
+    anywhere else."""
+    parent_call_id: str | None = None
+    """The ``ToolCall.id`` of that tool call, or ``None`` together with ``parent_id``."""
     turn: int
     """``state.turn`` when the entry was recorded."""
     at: datetime = _stamp()

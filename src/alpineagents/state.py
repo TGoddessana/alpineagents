@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any, Never, cast
 
 from . import _serial, _tokens
 from ._frozen import FrozenDict, thaw
@@ -79,6 +79,7 @@ from .types import (
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .store import Store
 
 __all__ = ["State", "StateSnapshot"]
 
@@ -226,6 +227,10 @@ class StateSnapshot:
     """The text of the latest reply without tool calls."""
     _finish_answer: Any = field(default=None, compare=False, repr=False)
     """The latest ``finish`` answer that was not ``None``."""
+    _parent_id: str | None = field(default=None, compare=False, repr=False)
+    """``parent_id`` of the first ``RunStartEntry`` that has one: the State whose tool call started this one."""
+    _parent_call_id: str | None = field(default=None, compare=False, repr=False)
+    """``parent_call_id`` of that same entry."""
     _memo: dict[int, StateSnapshot] = field(default_factory=dict, compare=False, repr=False)
     """The snapshots ``restore`` went back to, by history length. A cache of folds this State already did: all
     snapshots of one State share it, so a history with many restores replays in linear time. Never part of
@@ -267,7 +272,7 @@ def fold(snap: StateSnapshot, entry: HistoryEntry) -> StateSnapshot:
         case StopEntry():
             changes = _on_stop(entry.content)
         case RunStartEntry():
-            changes = {"stopped": None}
+            changes = _on_run_start(snap, entry)
         case ExtraDataEntry():
             changes = _on_extra_data(snap, entry)
         case ExchangeEntry():
@@ -365,17 +370,19 @@ def _pending_slot(snap: StateSnapshot, call_id: str | None) -> int | None:
 
 
 def _on_tool_result(snap: StateSnapshot, entry: ToolResultEntry) -> dict[str, Any]:
+    # What the subagents of the call used is part of this State's usage, late or not.
+    spent: dict[str, Any] = {} if entry.usage is None else {"usage": snap.usage + entry.usage}
     if entry.late:
         # The call was closed already. The model hears of it at the next request.
         text = LATE_RESULT.format(call=format_call(entry.call), content=result_text(entry.content))
-        return {"_late_notices": snap._late_notices + (text,)}
+        return {**spent, "_late_notices": snap._late_notices + (text,)}
     slot = _pending_slot(snap, entry.call.id)
     if slot is None:
         raise ValueError(f"{format_call(entry.call)} is not a pending call, so it cannot get a result")
     call = snap._turn_calls[slot]
     block = ToolResultBlock(call.id, entry.content, name=call.name, is_error=entry.is_error)
     results = snap._turn_results[:slot] + (block,) + snap._turn_results[slot + 1 :]
-    changes: dict[str, Any] = {"_turn_results": results}
+    changes: dict[str, Any] = {**spent, "_turn_results": results}
     if all(result is not None for result in results):
         # The last call closed: the results go in as one message in the order the model asked for them, then the
         # messages that waited.
@@ -384,6 +391,15 @@ def _on_tool_result(snap: StateSnapshot, entry: ToolResultEntry) -> dict[str, An
         changes["_queued"] = ()
         changes["_turn_calls"] = ()
         changes["_turn_results"] = ()
+    return changes
+
+
+def _on_run_start(snap: StateSnapshot, entry: RunStartEntry) -> dict[str, Any]:
+    changes: dict[str, Any] = {"stopped": None}
+    if snap._parent_id is None and entry.parent_id is not None:
+        # The first link stays: a later run of the same State may be started from elsewhere.
+        changes["_parent_id"] = entry.parent_id
+        changes["_parent_call_id"] = entry.parent_call_id
     return changes
 
 
@@ -436,7 +452,18 @@ def _on_restore(snap: StateSnapshot, change: ContextChange) -> dict[str, Any]:
     target = _restored(snap, length)
     # Everything goes back to its value at that point, except what cannot be undone: the tokens that were spent
     # (usage), and the history, which keeps everything.
-    keep = {"history", "usage", "created_at", "updated_at", "pending_calls", "answer", "_memo"}
+    # The link to a parent is a fact about the whole history, which restore keeps.
+    keep = {
+        "history",
+        "usage",
+        "created_at",
+        "updated_at",
+        "pending_calls",
+        "answer",
+        "_parent_id",
+        "_parent_call_id",
+        "_memo",
+    }
     return {f.name: getattr(target, f.name) for f in dataclasses.fields(StateSnapshot) if f.name not in keep}
 
 
@@ -577,8 +604,17 @@ class State:
         self._running = False
         self._compacting: int | None = None
         self._saved_store: object | None = None
+        # The store ``child``/``achild`` open subagents from: the first one this State was bound to (``store.load``,
+        # the first ``Store.save``), and ``fork()`` carries it over, so a fork can open the children of the State it
+        # was copied from. Only read for that; it never decides where a State is saved (``_saved_store`` does).
+        self._child_store: Store | None = None
         self._saved_len = 0
         self._saved_agent: AgentInfo | None = None
+        # The subagent States this State started, by id, and for each tool call (``ToolCall.id``) the ids it started
+        # in the order they started. A child is added when it starts, so a call that ends in an exception still
+        # lists it. ``fork()`` copies the first table; a rebuilt State starts without them.
+        self._children: dict[str, State] = {}
+        self._call_children: dict[str, list[str]] = {}
         # Reserved for subagents (see _child).
         self._parent: State | None = None
         self._root: State = self
@@ -713,6 +749,19 @@ class State:
     def id(self) -> str:
         """The name a store saves this State under. Given with ``State(id=...)``, or random."""
         return self._id
+
+    @property
+    def parent_id(self) -> str | None:
+        """The id of the State whose tool call started this one as a subagent, or ``None`` for a State that no
+        tool call started. It is the first link in the history (``RunStartEntry.parent_id``), so it is the same
+        while it runs and after ``store.load``."""
+        return self._snap._parent_id
+
+    @property
+    def parent_call_id(self) -> str | None:
+        """The ``ToolCall.id`` of the parent's tool call that started this State, or ``None`` together with
+        ``parent_id``."""
+        return self._snap._parent_call_id
 
     @property
     def parent(self) -> State | None:
@@ -1065,7 +1114,9 @@ class State:
 
         The copy is independent: running or changing it leaves this State as it was, and
         ``fork().snapshot() == state.snapshot()``. With ``Agent(store=...)``, the copy is saved under its own id the
-        first time the Agent runs it.
+        first time the Agent runs it. The one thing it shares is the subagent States this State ran, which it can
+        open with ``child`` too (they do not change because of the copy): the ones in memory, and, for a State from
+        ``store.load``, the ones in that store.
 
         Example:
             ```python
@@ -1086,7 +1137,89 @@ class State:
                     "attempt = state.fork()\nagent.think(state)",
                 )
             )
-        return State(history=snap.history)
+        copy = State(history=snap.history)
+        with self._lock:
+            # The children are the same States (they do not change because of this copy).
+            copy._children = dict(self._children)
+            copy._child_store = self._child_store
+        return copy
+
+    def child(self, child_id: str) -> State:
+        """The subagent State with id ``child_id``, one that a tool call of this State started (one of the
+        ``child_ids`` of a ``ToolResultEntry`` in the history). A grandchild is ``state.child(a).child(b)``.
+
+        While the process that ran the subagents is alive, this is the very State object the subagent ran with
+        (``state.child(a) is state.child(a)``). After ``store.load``, or in a State that did not run them, it is
+        loaded from the store this State is bound to. That State is not cached: every call loads a new one, so
+        ``state.child(a) is state.child(a)`` is ``False`` then. A subagent whose Agent has a store of its own is not
+        in this State's store, so it cannot be opened from here: open it with that store's ``load(child_id)``.
+
+        Example:
+            ```python
+            for entry in state.history:
+                if entry.kind == "tool_result":
+                    for child_id in entry.child_ids:
+                        print(entry.call.name, state.child(child_id).answer)
+            ```
+
+        Raises:
+            KeyError: ``child_id`` is not a child of this State (a grandchild is not either).
+            ValueError: It is a child, but this State has no way to open it: it is not in memory and no store is
+                bound to this State.
+            TypeError: The store works only asynchronously. Use ``achild``.
+            LookupError: The store has no State with this id (a subagent with a store of its own).
+        """
+        found, store = self._find_child(child_id)
+        if found is not None:
+            return found
+        return store.load(child_id)
+
+    async def achild(self, child_id: str) -> State:
+        """The async version of ``child``: the same lookup and the same errors, but a child that is not in memory
+        is loaded with ``await store.aload(child_id)``. Use it with a store that works only asynchronously. Like
+        ``child``, it does not cache what it loads from the store.
+
+        Example:
+            ```python
+            state = await store.aload("bug-hunt-1")
+            researcher_state = await state.achild(child_id)
+            ```
+        """
+        found, store = self._find_child(child_id)
+        if found is not None:
+            return found
+        return await store.aload(child_id)
+
+    def _find_child(self, child_id: str) -> tuple[State | None, Store]:
+        """The child in the runtime table, or else the store to load it from (``_child_store``, else the store this
+        State is bound to). ``KeyError`` for an id that is not a child of this State, ``ValueError`` for a child
+        with no way to open it."""
+        with self._lock:
+            found = self._children.get(child_id)
+            store = self._child_store if self._child_store is not None else cast("Store | None", self._saved_store)
+            known = found is not None or any(
+                child_id in entry.child_ids for entry in self._snap.history if isinstance(entry, ToolResultEntry)
+            )
+        if found is not None:
+            return found, cast("Store", store)
+        if not known:
+            raise KeyError(
+                f"{child_id!r} is not a subagent of State {self._id!r} (state.child() finds direct children)"
+            )
+        if store is None:
+            raise ValueError(
+                fix_message(
+                    f"subagent {child_id!r} is not in memory, and State {self._id!r} has no store to load it from "
+                    "(it was not loaded from a store or saved in one)",
+                    "run the subagents with Agent(store=...), which saves them in that store, "
+                    "and load this State from it",
+                    "store = FileStore('.alpine/states')\n"
+                    "agent = Agent(model=..., store=store)\n"
+                    "state = store.load(state_id)\n"
+                    "state.child(child_id)",
+                )
+            )
+        return None, cast("Store", store)
 
     def restore(self, snapshot: StateSnapshot) -> None:
         """Go back to ``snapshot``, a ``state.snapshot()`` taken earlier from this State.
@@ -1219,6 +1352,20 @@ class State:
             self._commit(RunStartEntry(content=info, turn=self._snap.turn))
             self._running = True
             self._agent = agent
+
+    def _add_child(self, call_id: str, child: State) -> None:
+        """A subagent run started inside the tool call ``call_id``: remember it (not saved), in start order. Called
+        by the Agent when the child starts, before the call has a result."""
+        with self._lock:
+            self._children[child.id] = child
+            ids = self._call_children.setdefault(call_id, [])
+            if child.id not in ids:
+                ids.append(child.id)
+
+    def _children_of(self, call_id: str) -> tuple[str, ...]:
+        """The ids of the subagents the tool call ``call_id`` started so far, in start order."""
+        with self._lock:
+            return tuple(self._call_children.get(call_id, ()))
 
     def _end_run(self) -> None:
         """End of a run, whether it ended or raised (also when the first save of the run failed): the State may be run
@@ -1611,6 +1758,7 @@ class State:
                 turn=snap.turn,
                 stopped=snap.stopped,
                 finished=snap.finished,
+                parent_id=snap._parent_id,
             )
             return _Batch(entries, info, end, create)
 
@@ -1619,6 +1767,8 @@ class State:
         the next save (stores skip entries they already have by ``seq``)."""
         with self._lock:
             self._saved_store = store
+            if self._child_store is None:
+                self._child_store = cast("Store", store)
             self._saved_len = max(self._saved_len, batch.end)
 
     @classmethod
@@ -1644,6 +1794,7 @@ class State:
                 )
             ) from e
         state._saved_store = store
+        state._child_store = cast("Store", store)
         state._saved_len = len(entries)
         for entry in reversed(entries):
             if isinstance(entry, RunStartEntry):
@@ -1794,6 +1945,8 @@ _COMMAND_FOR = {
     "created_at": ("it is the time of the first history entry", "state.created_at"),
     "updated_at": ("it is the time of the latest history entry", "state.updated_at"),
     "id": ("the id is given when the State is made", 'State(id="bug-1")'),
+    "parent_id": ("it is the first RunStartEntry.parent_id in the history", "state.parent_id"),
+    "parent_call_id": ("it is the first RunStartEntry.parent_call_id in the history", "state.parent_call_id"),
     "parent": ("it is reserved for subagents", "state.parent"),
     "root": ("it is reserved for subagents", "state.root"),
     "depth": ("it is reserved for subagents", "state.depth"),
