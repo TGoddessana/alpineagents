@@ -1392,11 +1392,11 @@ def test_a_former_subagent_that_runs_on_its_own_is_at_depth_zero_again():
     agent.run(parent)
     (entry,) = results_of(parent)
     kid = parent.child(entry.child_ids[0])
-    assert kid.depth == 1
+    assert kid._depth == 1
 
     kid.add_message(Message.user("Once more"))
     helper.run(kid)  # outside any tool call: not a subagent run
-    assert kid.depth == 0
+    assert kid._depth == 0
     assert (starts_of(kid)[-1].parent_id, kid.parent_id) == (None, "parent")  # first link kept, this origin recorded
     assert_replays(kid)
 

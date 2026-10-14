@@ -357,11 +357,10 @@ def test_a_non_string_id_is_a_type_error():
         State(id=123)  # type: ignore[arg-type]
 
 
-def test_a_new_state_has_no_parent_and_is_its_own_root():
+def test_a_new_state_has_no_parent():
     state = State()
-    assert state.parent is None
-    assert state.root is state
-    assert state.depth == 0
+    assert state.parent_id is None
+    assert state.parent_call_id is None
 
 
 # ===========================================================================
@@ -564,12 +563,11 @@ def test_fork_has_the_same_content_and_a_new_id():
     assert fork.fork().id != fork.id
 
 
-def test_fork_is_a_fresh_root():
+def test_fork_of_a_top_level_state_is_top_level():
     state = task()
     fork = state.fork()
-    assert fork.parent is None
-    assert fork.root is fork
-    assert fork.depth == 0
+    assert fork.parent_id is None
+    assert fork.parent_call_id is None
 
 
 def test_fork_and_original_are_independent():

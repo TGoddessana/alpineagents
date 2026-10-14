@@ -1267,7 +1267,7 @@ class Agent:
             if scope is None:
                 state._start_run(self, info, context=context)
             else:
-                state._start_run(self, info, (scope.state.id, scope.call.id), scope.state.depth, context)
+                state._start_run(self, info, (scope.state.id, scope.call.id), scope.state._depth, context)
         except BaseException:
             # A warnings filter turned the warning into an exception, or the State is being run already: the run did
             # not start, so the next run compares again.
