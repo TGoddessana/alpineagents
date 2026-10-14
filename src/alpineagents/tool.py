@@ -1266,7 +1266,7 @@ def collect_tools(items: Iterable[Any]) -> dict[str, Tool]:
             raise ValueError(
                 fix_message(
                     f"Duplicate tool name {t.name!r}: {sources[t.name]!r} and {source!r}",
-                    'Rename one of them with @tool(name="...")',
+                    'Rename one of them with @tool(name="..."), or give the Agent another name= if it is an Agent',
                 )
             )
         result[t.name] = t
