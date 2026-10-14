@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import io
 import json
 import threading
 import time
@@ -30,10 +31,12 @@ from alpineagents import (
     ModelRequestEntry,
     Price,
     Reply,
+    NoHumanError,
     Reporter,
     RunStartEntry,
     State,
     StateInfo,
+    Terminal,
     ToolCall,
     ToolError,
     ToolOutcomeKind,
@@ -42,8 +45,10 @@ from alpineagents import (
     _serial,
     tool,
 )
-from alpineagents.permissions import AllowPermission, Allowed, DenyByName
-from alpineagents.testing import FakeModel, tool_call
+from alpineagents import terminal as terminal_module
+from alpineagents.permissions import AllowPermission, Allowed, DecideByHuman, DenyByName
+from alpineagents.terminal import default_terminal
+from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.store import Record
 from alpineagents.types import AgentInfo, HistoryEntry
 
@@ -1500,3 +1505,616 @@ def test_a_saved_parent_loads_with_the_children_and_usage_on_its_results(tmp_pat
     assert entry.usage == results_of(parent)[0].usage and entry.usage is not None
     assert loaded.usage == parent.usage
     assert_replays(parent)
+
+
+# ================================================================ the run context: human, reporter, store
+#
+# A subagent that was not given a human, reporter or store uses the ones the run that started it uses. A value it was
+# given (``None`` included) is its own.
+
+
+class Recorder(Reporter):
+    """Remembers which State each notification was about: ``(method, state id, parent id of that State)``."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str | None]] = []
+        self._lock = threading.Lock()
+
+    def _note(self, method: str, state: State) -> None:
+        with self._lock:
+            self.events.append((method, state.id, state.parent_id))
+
+    def on_run_start(self, state):
+        self._note("run_start", state)
+
+    def on_think_start(self, state):
+        self._note("think_start", state)
+
+    def on_tool_start(self, state, call):
+        self._note("tool_start", state)
+
+    def on_tool_end(self, state, call, result, outcome):
+        self._note("tool_end", state)
+
+    def on_run_end(self, state, error):
+        self._note("run_end", state)
+
+    def of(self, state: State) -> list[str]:
+        return [method for method, state_id, _ in self.events if state_id == state.id]
+
+
+def asks_the_human(agent_box: list, question: str = "Proceed?"):
+    """A tool for the Agent that ends up in ``agent_box[0]``: it asks that Agent's human."""
+
+    @tool
+    def check(state: State) -> str:
+        """Ask the person"""
+        return agent_box[0].ask_human(state, question)
+
+    return check
+
+
+def test_a_subagent_without_a_reporter_or_human_uses_those_of_the_run_that_started_it():
+    report, human = Recorder(), FakeHuman(["go"])
+    box: list = []
+    helper = Agent(model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)])
+    box.append(helper)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=report, human=human)
+    parent = user_state(id="parent")
+    assert agent.run(parent) == "outer"
+
+    (entry,) = results_of(parent)
+    kid = parent.child(entry.child_ids[0])
+    # the reporter got the child State in every callback, run_start and run_end included
+    assert report.of(kid) == ["run_start", "think_start", "tool_start", "tool_end", "think_start", "run_end"]
+    assert {parent_id for _, state_id, parent_id in report.events if state_id == kid.id} == {"parent"}
+    assert {parent_id for _, state_id, parent_id in report.events if state_id == "parent"} == {None}
+    # the question went to the human of the parent run and was recorded in the child's history
+    assert human.questions == ["Proceed?"]
+    assert [e.kind for e in kid.history if e.kind == "human"] == ["human"]
+    assert not [e for e in parent.history if e.kind == "human"]
+    assert_replays(parent)
+    assert_replays(kid)
+
+
+def test_a_subagent_with_its_own_reporter_and_human_keeps_them():
+    parent_report, own_report = Recorder(), Recorder()
+    parent_human, own_human = FakeHuman(["parent"]), FakeHuman(["own"])
+    box: list = []
+    helper = Agent(
+        model=FakeModel([tool_call("check"), "inner"]),
+        tools=[asks_the_human(box)],
+        reporter=own_report,
+        human=own_human,
+    )
+    box.append(helper)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[delegate],
+        reporter=parent_report,
+        human=parent_human,
+    )
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert own_report.of(kid)[0] == "run_start" and own_report.of(kid)[-1] == "run_end"
+    assert parent_report.of(kid) == []
+    assert own_human.questions == ["Proceed?"] and parent_human.questions == []
+
+
+def test_a_subagent_given_reporter_none_stays_silent_while_the_parent_reports():
+    report = Recorder()
+    helper = agent_of(["inner"])  # reporter=None given on purpose
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=report, human=None)
+    parent = user_state(id="parent")
+    agent.run(parent)
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert report.of(kid) == [] and report.of(parent)
+
+
+def test_a_subagent_given_human_none_has_no_human_even_when_the_parent_has_one():
+    box: list = []
+    helper = Agent(
+        model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)], reporter=None, human=None
+    )
+    box.append(helper)
+    human = FakeHuman(["go"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=None, human=human)
+    with pytest.raises(NoHumanError):
+        agent.run(user_state())
+    assert human.questions == []
+
+
+def test_a_subagent_that_inherits_no_human_has_none_and_a_decide_by_human_fails_before_it_starts():
+    helper = Agent(model=FakeModel(["inner"]), reporter=None, permissions=[DecideByHuman()])  # human is inherited
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=None, human=None)
+    parent = user_state(id="parent")
+    with pytest.raises(NoHumanError, match="human=None"):
+        agent.run(parent)
+    # the helper never started: the check comes before its RunStartEntry
+    assert parent._children == {}
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.ABORTED
+
+
+def test_the_no_human_error_of_a_subagent_that_inherits_none_names_the_parent_run():
+    helper = Agent(model=FakeModel(["inner"]), reporter=None, permissions=[DecideByHuman()])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=None, human=None)
+    with pytest.raises(NoHumanError) as info:
+        agent.run(user_state())
+    assert "this subagent has no human to ask" in str(info.value)
+    assert "the run that started it has human=None" in str(info.value)
+    assert "give one to the Agent that runs it" in str(info.value)
+
+
+def test_ask_human_in_a_subagent_that_inherits_no_human_names_the_parent_run():
+    box: list = []
+    helper = Agent(model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)], reporter=None)
+    box.append(helper)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=None, human=None)
+    with pytest.raises(NoHumanError, match="called by a subagent with no human to ask") as info:
+        agent.run(user_state())
+    assert "the run that started it has human=None" in str(info.value)
+
+
+def test_ask_human_on_an_agent_that_has_human_none_keeps_its_wording():
+    agent = Agent(model=FakeModel(["a"]), reporter=None, human=None)
+    with pytest.raises(NoHumanError, match="was called on an Agent with human=None"):
+        agent.ask_human(user_state("Hi"), "Proceed?")
+
+
+def test_the_context_passes_down_a_chain_and_a_middle_agent_with_its_own_value_decides_for_its_children():
+    top_report, middle_report = Recorder(), Recorder()
+    leaf = Agent(model=FakeModel(["leaf"]))
+    middle_human = FakeHuman(["m"])
+
+    @tool
+    def ask_leaf() -> str:
+        """Ask the leaf"""
+        return leaf.run("Leaf task")
+
+    middle = Agent(model=FakeModel([tool_call("ask_leaf"), "middle"]), tools=[ask_leaf], reporter=middle_report)
+
+    @tool
+    def ask_middle() -> str:
+        """Ask the middle"""
+        return middle.run("Middle task")
+
+    top = Agent(
+        model=FakeModel([tool_call("ask_middle"), "top"]),
+        tools=[ask_middle],
+        reporter=top_report,
+        human=middle_human,
+    )
+    root = user_state(id="root")
+    top.run(root)
+
+    mid = root.child(results_of(root)[0].child_ids[0])
+    (leaf_id,) = results_of(mid)[0].child_ids
+    kid = mid.child(leaf_id)
+    # the middle Agent has its own reporter and the top human; the leaf has neither, so it gets the middle's
+    # reporter (not the top's) and the human the middle run uses
+    assert top_report.of(mid) == []
+    assert middle_report.of(mid)[0] == "run_start"
+    assert top_report.of(kid) == []
+    assert middle_report.of(kid)[0] == "run_start" and middle_report.of(kid)[-1] == "run_end"
+    assert top_report.of(root)
+
+
+def test_a_custom_loop_that_calls_think_and_use_tools_sees_the_same_context():
+    report, human = Recorder(), FakeHuman(["go"])
+    box: list = []
+
+    def two_turns(agent: Agent, state: State):
+        agent.think(state)
+        agent.use_tools(state)
+        agent.think(state)
+        return state.answer
+
+    helper = Agent(model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)], loop=two_turns)
+    box.append(helper)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]),
+        tools=[delegate],
+        loop=two_turns,
+        reporter=report,
+        human=human,
+    )
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert report.of(kid) == ["run_start", "think_start", "tool_start", "tool_end", "think_start", "run_end"]
+    assert human.questions == ["Proceed?"]
+    assert_replays(kid)
+
+
+def test_a_state_made_inside_a_subagent_run_uses_the_context_of_that_run(tmp_path: Path):
+    report, human, store = Recorder(), FakeHuman(["go"]), FileStore(tmp_path)
+    box: list = []
+    forks: list[State] = []
+
+    def tries_on_a_fork(agent: Agent, state: State):
+        attempt = state.fork()
+        forks.append(attempt)
+        agent.think(attempt)
+        agent.use_tools(attempt)
+        agent.think(attempt)
+        return attempt.answer
+
+    helper = Agent(model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)], loop=tries_on_a_fork)
+    box.append(helper)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = Agent(
+        model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=report, human=human, store=store
+    )
+    agent.run(user_state(id="parent"))
+
+    (attempt,) = forks
+    # the fork is not the State of the run, but it is notified, asked and saved like the run's State
+    assert report.of(attempt) == ["think_start", "tool_start", "tool_end", "think_start"]
+    assert human.questions == ["Proceed?"]
+    assert {info.id for info in store.list()} >= {attempt.id}
+    assert store.load(attempt.id).snapshot() == attempt.snapshot()
+    assert_replays(attempt)
+
+
+def test_the_run_context_does_not_outlive_the_run():
+    report = Recorder()
+    agent = Agent(model=FakeModel(["a", "b"]), reporter=report, human=None)
+    state = user_state("Hi")
+    agent.run(state)
+    assert agent._active_context(state) is None
+    assert agent._active_context(State(history=state.history)) is None
+
+
+def test_another_agent_called_on_a_state_inside_a_run_uses_its_own_settings():
+    report, other_report = Recorder(), Recorder()
+    other = Agent(model=FakeModel(["from other"]), reporter=other_report, human=None)
+
+    def mixed(agent: Agent, state: State):
+        agent.think(state)
+        other.think(state)  # another Agent: not the one running, so its reporter, not the run's
+        return state.answer
+
+    agent = Agent(model=FakeModel(["from agent"]), loop=mixed, reporter=report, human=None)
+    state = user_state("Hi")
+    agent.run(state)
+    assert report.of(state) == ["run_start", "think_start", "run_end"]
+    assert other_report.of(state) == ["think_start"]
+
+
+def test_a_run_started_outside_a_tool_call_does_not_inherit(monkeypatch: pytest.MonkeyPatch):
+    default = Terminal(output=io.StringIO(), input=lambda prompt: "go")
+    monkeypatch.setattr(terminal_module, "_default_terminal", default)
+    report = Recorder()
+    helper = Agent(model=FakeModel(["inner"]))  # defaults, so the shared Terminal
+
+    def starts_it(agent: Agent, state: State):
+        helper.run("Inner task")  # in the loop, not in a tool call
+        agent.think(state)
+        return state.answer
+
+    agent = Agent(model=FakeModel(["outer"]), loop=starts_it, reporter=report, human=None)
+    state = user_state(id="parent")
+    agent.run(state)
+    assert [e for e in report.events if e[0] == "run_start"] == [("run_start", "parent", None)]
+    assert default._output.getvalue()  # type: ignore[union-attr]  # the helper reported to the shared Terminal
+
+
+async def test_an_async_subagent_inherits_the_context_too():
+    report, human = Recorder(), FakeHuman(["go"])
+    box: list = []
+    helper = Agent(model=FakeModel([tool_call("check"), "inner"]), tools=[asks_the_human(box)])
+    box.append(helper)
+
+    @tool
+    async def delegate() -> str:
+        """Ask the helper"""
+        return await helper.arun("Inner task")
+
+    agent = Agent(model=FakeModel([tool_call("delegate"), "outer"]), tools=[delegate], reporter=report, human=human)
+    parent = user_state(id="parent")
+    assert await agent.arun(parent) == "outer"
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert report.of(kid)[0] == "run_start" and report.of(kid)[-1] == "run_end"
+    assert human.questions == ["Proceed?"]
+    assert_replays(kid)
+
+
+def test_agent_properties_still_show_the_agents_own_settings():
+    helper = Agent(model=FakeModel(["inner"]))
+    assert helper.reporter is default_terminal() and helper.human is default_terminal()
+    assert helper.store is None
+
+
+# ---------------------------------------------------------------- saving
+
+
+def test_children_are_saved_under_their_own_id_in_the_store_of_the_parent_run(tmp_path: Path):
+    store = FileStore(tmp_path)
+    helper = agent_of(["inner"])  # no store of its own
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert {info.id for info in store.list()} == {"parent", kid.id}
+    assert {info.id: info.parent_id for info in store.list()} == {"parent": None, kid.id: "parent"}
+    loaded_kid = store.load(kid.id)
+    assert loaded_kid.snapshot() == kid.snapshot()
+    assert (loaded_kid.parent_id, loaded_kid.parent_call_id) == (kid.parent_id, kid.parent_call_id)
+    assert_loads_equal(store, parent)
+    assert_replays(kid)
+    assert_replays(parent)
+
+
+def test_a_child_is_saved_while_it_runs_at_the_normal_save_points(tmp_path: Path):
+    store = FileStore(tmp_path)
+    seen: list[tuple[str, int, int]] = []
+
+    @tool
+    def peek(state: State) -> str:
+        """Look at what the store has of this State and of its parent"""
+        for saved in (store.load(state.id), store.load(state.parent_id)):
+            seen.append((saved.id, saved.turn, sum(isinstance(e, ModelReplyEntry) for e in saved.history)))
+        return "peeked"
+
+    helper = agent_of([tool_call("peek"), "inner"], tools=[peek])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    # the reply of turn 1 (asking for the tool) was saved before the tool ran, for the child and for its parent
+    assert seen == [(kid.id, 1, 1), ("parent", 1, 1)]
+    assert store.load(kid.id).snapshot() == kid.snapshot()
+    assert_replays(kid)
+
+
+def test_a_child_with_its_own_store_is_saved_there_and_not_in_the_parents(tmp_path: Path):
+    parent_store, own_store = FileStore(tmp_path / "parent"), FileStore(tmp_path / "own")
+    helper = agent_of(["inner"], store=own_store)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=parent_store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert [info.id for info in parent_store.list()] == ["parent"]
+    assert [info.id for info in own_store.list()] == [kid.id]
+    assert own_store.load(kid.id).snapshot() == kid.snapshot()
+    # the loaded parent is bound to the parent store only, so it cannot open a child that lives in another store
+    loaded = parent_store.load("parent")
+    with pytest.raises(LookupError):
+        loaded.child(kid.id)
+
+
+def test_a_child_without_a_store_in_a_run_without_a_store_is_not_saved():
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate])
+    parent = user_state()
+    agent.run(parent)
+    assert parent.child(results_of(parent)[0].child_ids[0])._saved_store is None
+
+
+def test_after_store_load_the_parent_opens_its_child_from_the_bound_store(tmp_path: Path):
+    store = FileStore(tmp_path)
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+    (child_id,) = results_of(parent)[0].child_ids
+    kid = parent.child(child_id)
+
+    loaded = store.load("parent")
+    opened = loaded.child(child_id)
+    assert opened is not kid and opened.snapshot() == kid.snapshot()
+    assert (opened.parent_id, opened.parent_call_id) == ("parent", results_of(parent)[0].call.id)
+    assert loaded.usage == parent.usage and loaded.usage.requests == 3  # 2 of its own + the child's
+
+
+def test_a_child_loaded_from_the_store_is_a_normal_state_that_can_be_continued(tmp_path: Path):
+    store = FileStore(tmp_path)
+    helper = agent_of(["inner", "more"], store=store)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    agent.run(parent)
+    (child_id,) = results_of(parent)[0].child_ids
+
+    loaded = store.load(child_id)
+    loaded.add_message(Message.user("Go on"))
+    assert helper.run(loaded) == "more"
+    assert loaded.parent_id == "parent"  # the first link stays
+    assert store.load(child_id).snapshot() == loaded.snapshot()
+    assert_replays(loaded)
+
+
+def test_grandchildren_are_saved_too_and_the_chain_opens_after_load(tmp_path: Path):
+    store = FileStore(tmp_path)
+    leaf = agent_of(["leaf"])
+
+    @tool
+    def ask_leaf() -> str:
+        """Ask the leaf"""
+        return leaf.run("Leaf task")
+
+    middle = agent_of([tool_call("ask_leaf"), "middle"], tools=[ask_leaf])
+
+    @tool
+    def ask_middle() -> str:
+        """Ask the middle"""
+        return middle.run("Middle task")
+
+    top = agent_of([tool_call("ask_middle"), "top"], tools=[ask_middle], store=store)
+    root = user_state(id="root")
+    top.run(root)
+
+    mid = root.child(results_of(root)[0].child_ids[0])
+    kid = mid.child(results_of(mid)[0].child_ids[0])
+    assert {info.id: info.parent_id for info in store.list()} == {"root": None, mid.id: "root", kid.id: mid.id}
+    loaded = store.load("root")
+    assert loaded.child(mid.id).child(kid.id).snapshot() == kid.snapshot()
+    assert kid.usage.requests == 1 and mid.usage.requests == 3  # mid: 2 requests of its own + the leaf's 1
+    assert_loads_equal(store, root)
+
+
+def test_a_failing_save_of_a_child_run_stops_that_run_like_any_other(tmp_path: Path):
+    class FailingStore(FileStore):
+        def write(self, state_id, entries, info, *, create=False):
+            if state_id != "parent":
+                raise OSError("disk full")
+            return super().write(state_id, entries, info, create=create)
+
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=FailingStore(tmp_path))
+    parent = user_state(id="parent")
+    with pytest.raises(OSError, match="disk full"):
+        agent.run(parent)
+    # the child never started its run (the first save failed), but the parent's call is still closed in its history
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.ABORTED
+    assert_replays(parent)
+
+
+async def test_an_async_run_saves_children_with_asave(tmp_path: Path):
+    store = AsyncOnlyStore()
+    helper = agent_of(["inner"])
+
+    @tool
+    async def delegate() -> str:
+        """Ask the helper"""
+        return await helper.arun("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    await agent.arun(parent)
+    (child_id,) = results_of(parent)[0].child_ids
+    kid = await store.aload(child_id)
+    assert kid.snapshot() == parent.child(child_id).snapshot()
+    assert (await (await store.aload("parent")).achild(child_id)).snapshot() == kid.snapshot()
+
+
+async def test_a_sync_run_in_a_tool_cannot_inherit_a_store_that_only_works_asynchronously():
+    store = AsyncOnlyStore()
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")  # a worker thread: sync run is allowed, the inherited store is not
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    parent = user_state(id="parent")
+    with pytest.raises(TypeError, match="works only asynchronously"):
+        await agent.arun(parent)
+    assert parent._children == {}
+
+
+def test_state_info_of_a_top_level_run_and_a_subagent_differ_by_parent_id(tmp_path: Path):
+    store = FileStore(tmp_path)
+    helper = agent_of(["inner"])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate], store=store)
+    agent.run(user_state(id="parent"))
+    agent_of(["alone"], store=store).run(user_state(id="another"))
+    top_level = sorted(info.id for info in store.list() if info.parent_id is None)
+    assert top_level == ["another", "parent"]
