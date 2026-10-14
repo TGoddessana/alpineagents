@@ -4,7 +4,7 @@ Learn: [Keep the conversation](../learn/conversation.md). Concepts: [State and h
 
 ::: alpineagents.State
     options:
-      filters: ["!^_", "!^(parent|root|depth)$"]
+      filters: ["!^_"]
 
 ## StateSnapshot
 

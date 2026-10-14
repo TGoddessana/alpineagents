@@ -117,6 +117,16 @@ def test_assigning_a_read_only_property_names_the_command(name, command):
     assert state.snapshot() == before
 
 
+@pytest.mark.parametrize("name", ["parent", "root", "depth"])
+def test_assigning_a_name_removed_with_subagents_explains_it(name):
+    state = make()
+    with pytest.raises(AttributeError) as e:
+        setattr(state, name, 1)
+    assert f"state.{name} is gone" in str(e.value)
+    assert "Fix:" in str(e.value)
+    assert not hasattr(state, name)
+
+
 def test_assigning_a_typo_says_the_attribute_does_not_exist():
     state = make()
     with pytest.raises(AttributeError) as e:
@@ -187,6 +197,9 @@ def test_a_state_with_a_history_pickles_the_state_free_way():
         ("context", "state.messages"),
         ("task", "state.messages[0]"),
         ("lock", "edit_extra_data()"),
+        ("parent", "state.parent_id"),
+        ("root", "permission can hold its own memory"),
+        ("depth", "parent_id"),
         ("is_answered", "waiting_for_user"),
         ("wants_tools", "pending_calls"),
         ("is_finished", "state.finished"),

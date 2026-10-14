@@ -683,9 +683,8 @@ class State:
         # The calls that closed with children, by ``id(call)``: a result that arrives late (``_late_result``) finds
         # its children here, and counts only what they used since.
         self._closed_calls: dict[int, _ClosedCall] = {}
-        # Reserved for subagents (see _child).
-        self._parent: State | None = None
-        self._root: State = self
+        # How many subagent levels deep the run in progress is (0 for a State no tool call started). Only the
+        # Terminal indents by it; it is not saved.
         self._depth = 0
 
         self._snap = StateSnapshot()
@@ -830,21 +829,6 @@ class State:
         """The ``ToolCall.id`` of the parent's tool call that started this State, or ``None`` together with
         ``parent_id``."""
         return self._snap._parent_call_id
-
-    @property
-    def parent(self) -> State | None:
-        """Reserved for subagents, which are not implemented yet. Always ``None``."""
-        return self._parent
-
-    @property
-    def root(self) -> State:
-        """Reserved for subagents, which are not implemented yet. Always this State."""
-        return self._root
-
-    @property
-    def depth(self) -> int:
-        """Reserved for subagents, which are not implemented yet. Always ``0``."""
-        return self._depth
 
     @property
     def history(self) -> tuple[HistoryEntry, ...]:
@@ -1981,15 +1965,6 @@ class State:
                 )
         return state
 
-    @classmethod
-    def _child(cls, parent: State, messages: Iterable[Message] = ()) -> State:
-        """State for a subagent (extension). ``parent``, ``root=parent.root``, ``depth=parent.depth+1``."""
-        child = cls(messages=messages)
-        child._parent = parent
-        child._root = parent.root
-        child._depth = parent.depth + 1
-        return child
-
     # ------------------------------------------------------------ helpers
 
     def _notify_context_change(self, change: ContextChange) -> None:
@@ -2083,6 +2058,21 @@ _REMOVED_NAMES: dict[str, tuple[str, str, str]] = {
         "ask the Agent that will run the State",
         "agent.context_tokens(state)",
     ),
+    "parent": (
+        "state.parent is gone: a link to another State object does not survive store.load",
+        "read state.parent_id, and open the parent with store.load(state.parent_id)",
+        "parent = store.load(state.parent_id) if state.parent_id else None",
+    ),
+    "root": (
+        "state.root is gone: a link to another State object does not survive store.load",
+        "keep run-wide values in the object that needs them (a permission can hold its own memory)",
+        "class AskOnce(DecidePermission):\n    def __init__(self):\n        self.allowed = set()  # its own memory",
+    ),
+    "depth": (
+        "state.depth is gone: it was only the Terminal's indentation",
+        "follow state.parent_id up through the stored States to count the levels",
+        "state.parent_id is not None  # a subagent",
+    ),
 }
 
 #: What to do instead of assigning a read-only property, per property name.
@@ -2114,9 +2104,6 @@ _COMMAND_FOR = {
     "id": ("the id is given when the State is made", 'State(id="bug-1")'),
     "parent_id": ("it is the first RunStartEntry.parent_id in the history", "state.parent_id"),
     "parent_call_id": ("it is the first RunStartEntry.parent_call_id in the history", "state.parent_call_id"),
-    "parent": ("it is reserved for subagents", "state.parent"),
-    "root": ("it is reserved for subagents", "state.root"),
-    "depth": ("it is reserved for subagents", "state.depth"),
 }
 
 #: Assigning a removed 0.4 name: what to do instead (more specific than reading it).

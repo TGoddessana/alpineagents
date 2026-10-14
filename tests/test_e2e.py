@@ -556,20 +556,20 @@ def write_file(path: str, content: str) -> str:
 
 
 class AskPermission(DecidePermission):
-    """The "permission check" example with an "always" answer. The 'always allow' list lives in the extra_data of
-    ``state.root``, and is changed with ``edit_extra_data()`` (atomic, so parallel calls cannot lose an entry)."""
+    """The "permission check" example with an "always" answer. The 'always allow' list lives in the permission
+    object itself, so it covers every State the run reaches, subagents included."""
 
     def __init__(self, human: FakeHuman) -> None:
         self.human = human
+        self.always_allow: list[str] = []
 
     def check(self, state, call, tool):
-        root = state.root
-        if call.name not in DANGEROUS or call.name in root.extra_data.get("always_allow", []):
+        if call.name not in DANGEROUS or call.name in self.always_allow:
             return Allowed()
         answer = self.human.ask(state, f"Run {call.name}({call.args})?", Literal["yes", "no", "always"])
         if answer == "always":
-            with root.edit_extra_data() as data:
-                data.setdefault("always_allow", []).append(call.name)
+            if call.name not in self.always_allow:
+                self.always_allow.append(call.name)
         elif answer == "no":
             return Denied("The user denied it")
         return Allowed()
@@ -592,7 +592,7 @@ def test_permission_block_denies_dangerous_call():
 
 
 def test_permission_block_always_allow_skips_asking_again_same_turn():
-    """ "The 'always allow' list lives in the extra_data of the top-level State (state.root).
+    """ "The 'always allow' list lives in the permission object.
 
     The next call to the same tool in the same turn is not asked again (parallel calls see the same list too).
     """
@@ -603,15 +603,15 @@ def test_permission_block_always_allow_skips_asking_again_same_turn():
     ]
     fake = FakeModel([calls, "All done"])  # request two calls together in one turn
     human = FakeHuman(["always"])
-    agent = Agent(model=fake, tools=[write_file], permissions=[AskPermission(human)], human=human, reporter=None)
+    permission = AskPermission(human)
+    agent = Agent(model=fake, tools=[write_file], permissions=[permission], human=human, reporter=None)
     state = State(messages=[Message.user("Write two files")])
     agent.run(state)
 
     assert sorted(_write_calls) == [("a.txt", "x"), ("b.txt", "y")]
     assert len(human.questions) == 1  # the second call hit always_allow and was not asked
-    assert state.root.extra_data.get("always_allow") == ["write_file"]
-    extra = [e for e in state.history if e.kind == "extra_data"]
-    assert len(extra) == 1 and dict(extra[0].content) == {"always_allow": ["write_file"]}
+    assert permission.always_allow == ["write_file"]
+    assert not [e for e in state.history if e.kind == "extra_data"]
 
 
 def test_plan_then_execute_runs_each_step_with_coding_loop():
