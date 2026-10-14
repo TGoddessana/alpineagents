@@ -20,17 +20,29 @@ from . import _structured, _tokens
 from ._async import ASYNC_RUN, check_sync_call, is_async_callable, run_in_thread
 from ._runner import _CURRENT_CALL, arun_calls, run_calls
 from ._tokens import estimate_overhead_tokens
-from .errors import NoHumanError, OutputError, ResumeWarning, fix_message
+from .errors import NoHumanError, OutputError, ResumeWarning, ToolError, ToolInputError, fix_message
 from .human import check_returns as check_human_returns
 from .mcp_tools import MCP, MCPTool, MCPToolRef, check_tool_names, wait_sync
 from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
 from .permissions import Permission, _asks_only_async, _effective, _needs_agent_human, _only_async, _owned
 from .reporter import Reporter
-from .state import State, _RunContext
+from .state import State, _RunContext, _turns
 from .store import Store
-from .tool import FunctionTool, Tool, ToolMap, collect_tools
-from .types import AgentInfo, Message, ModelEvent, Request, TextBlock, Usage
+from .tool import _TOOL_NAME, FunctionTool, Tool, ToolMap, collect_tools, format_result
+from .types import (
+    AgentInfo,
+    Message,
+    ModelEvent,
+    Request,
+    StoppedByLimit,
+    StoppedByPermission,
+    TextBlock,
+    ToolOutcomeKind,
+    ToolResultEntry,
+    Usage,
+    result_text,
+)
 
 if TYPE_CHECKING:
     from .human import Human
@@ -112,6 +124,119 @@ def _same_tool(a: Tool, b: Tool) -> bool:
     return isinstance(a, FunctionTool) and isinstance(b, FunctionTool) and a.fn is b.fn and a.bound_to is b.bound_to
 
 
+#: The ``prompt`` argument of a subagent tool, as the model reads it.
+_SUBAGENT_PROMPT = (
+    "The task for the subagent. It sees only this prompt, not your conversation, so include all the context it needs"
+)
+
+
+class _AgentTool(Tool):
+    """The tool an Agent in ``tools=`` becomes: the model calls it with a ``prompt``, and a new State that starts from
+    that prompt alone is run by the Agent, as ``agent.run(prompt)`` would. A run started inside a tool call is a
+    subagent of the run that called it, so the links, permissions, human, reporter, store and usage all follow from
+    that rule, not from anything here.
+
+    What the model gets is the value ``run`` returned, converted as any tool result is. This tool alone also tells the
+    model how a subagent that did not simply finish ended, in the words of the other results of this framework:
+
+    - the loop stopped at its ``limit``: the value and ``(NAME stopped after N turns before finishing)``
+    - a permission denied a call of the subagent with ``stop=True``: ``(NAME was stopped by the user: REASON)``
+    - an ``Exception`` left the run: ``(NAME failed: TYPE: MESSAGE)``, as a ``ToolError`` (outcome ``ERROR``) whose
+      ``__cause__`` is the exception, as ``@tool(exception_handler=...)`` makes one
+    - a ``BaseException`` (Ctrl+C, task cancellation) is not turned into a result: it stops the run above too
+
+    A ``@tool`` that calls ``agent.run()`` itself gets none of these: its exceptions follow the rules of any tool.
+    """
+
+    def __init__(self, agent: Agent) -> None:
+        name = agent.name
+        assert name is not None and agent.description is not None
+        if not _TOOL_NAME.fullmatch(name):
+            raise TypeError(
+                fix_message(
+                    f"name={name!r} of {agent!r} passed in tools= cannot be used as a tool name. "
+                    "It must be 1-64 characters of letters, digits, _ and -",
+                    "Give the Agent a valid name",
+                    'researcher = Agent(name="researcher", description="...", model=...)',
+                )
+            )
+        super().__init__(
+            name=name,
+            description=agent.description,
+            input_schema={
+                "type": "object",
+                "properties": {"prompt": {"type": "string", "description": _SUBAGENT_PROMPT}},
+                "required": ["prompt"],
+            },
+            parallel=True,
+        )
+        self.agent = agent
+
+    def __repr__(self) -> str:
+        return f"Agent(name={self.name!r})"
+
+    @property
+    def is_async(self) -> bool:
+        """``True`` when ``run`` returns a coroutine that runs ``agent.arun``: in an async run (so the subagent runs
+        on its event loop) if the Agent can ``arun``, and always for an Agent whose loop is async (it cannot ``run``).
+        Otherwise ``run`` is ``agent.run``."""
+        from .loop import default_loop
+
+        loop = self.agent.loop
+        if loop is default_loop:
+            return ASYNC_RUN.get() is not None
+        return is_async_callable(loop)
+
+    def run(self, args: dict[str, Any], state: State) -> Any:
+        prompt = args.get("prompt")
+        extra = sorted(set(args) - {"prompt"})
+        if extra:
+            raise ToolInputError(f"unexpected argument: {', '.join(extra)}")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ToolInputError("prompt: must be a non-empty string")
+        child = State(messages=[Message.user(prompt)])
+        if self.is_async:
+            return self._arun(child)
+        try:
+            return self._result(child, self.agent.run(child))
+        except Exception as error:
+            raise self._failed(error) from error
+
+    async def _arun(self, child: State) -> Any:
+        try:
+            return self._result(child, await self.agent.arun(child))
+        except Exception as error:
+            raise self._failed(error) from error
+
+    def _failed(self, error: Exception) -> ToolError:
+        detail = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+        return ToolError(f"({self.name} failed: {detail})")
+
+    def _result(self, child: State, value: Any) -> Any:
+        """What the model is told about a subagent that ended without an exception. The runner converts what ``run``
+        returns once more with ``format_result``, so this returns a str or a list of str and ``Image`` parts, which
+        that conversion leaves as they are (a tuple of blocks would be turned into JSON)."""
+        stopped = child.stopped
+        if isinstance(stopped, StoppedByPermission):
+            # The reason is what the model of the subagent was told when the call was denied.
+            for entry in reversed(child.history):
+                if (
+                    isinstance(entry, ToolResultEntry)
+                    and entry.outcome is ToolOutcomeKind.DENIED
+                    and entry.call.id == stopped.call.id
+                ):
+                    return f"({self.name} was stopped by the user: {result_text(entry.content)})"
+            return f"({self.name} was stopped by the user)"
+        content = format_result(value)
+        parts = content if isinstance(content, str) else [b.text if isinstance(b, TextBlock) else b for b in content]
+        if isinstance(stopped, StoppedByLimit):
+            note = f"({self.name} stopped after {_turns(stopped.turns)} before finishing)"
+            if value is None:
+                return note
+            return f"{parts}\n{note}" if isinstance(parts, str) else [*parts, note]
+        return parts
+
+
 class Agent:
     """An agent's settings, and the actions that need a model, tools or a human.
 
@@ -149,7 +274,11 @@ class Agent:
                 ``"ollama/llama3:8b"``, or a ``Model`` object such as ``Anthropic(...)`` when you need settings.
             system: The system prompt.
             tools: ``@tool`` functions, objects with ``@tool`` methods, single ``@tool`` methods, objects of ``Tool``
-                subclasses, ``MCP`` servers and single MCP tools (``github.create_issue``).
+                subclasses, ``MCP`` servers and single MCP tools (``github.create_issue``). An ``Agent`` with a
+                ``name`` and a ``description`` becomes a subagent: the model sees a tool of that name and
+                description that takes a ``prompt``, and calling it runs that Agent on the prompt alone. The
+                model gets the Agent's answer, with a note when it stopped at its limit or by a permission, or
+                ``(NAME failed: ...)`` when it raised an exception.
             skills: Not implemented yet. A non-empty value raises ``NotImplementedError``.
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
             reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent. An
@@ -179,13 +308,15 @@ class Agent:
                 a ``loop`` that is not callable, a Reporter, Human, Store or Permission class instead of an object.
                 In ``tools=``: an unbound method (``FileSystem.read_file``: create an object first), a ``Tool``
                 subclass instead of an object, a ``Tool`` object whose class does not call ``Tool.__init__`` or
-                does not define ``run``, or an object with no ``@tool`` methods.
-            ValueError: Two tools share a name, or the model string is ambiguous.
+                does not define ``run``, or an object with no ``@tool`` methods, or an Agent whose name is not a
+                valid tool name.
+            ValueError: Two tools share a name, an Agent in ``tools=`` has no name or no description, or the model
+                string is ambiguous.
         """
         # - model: resolve_model(model), no network.
-        # - tools: Agent items are checked first: missing name or description is a ValueError; with both,
-        #   NotImplementedError (subagents are outside the MVP). MCP items are grouped by server (_add_mcp).
-        #   The rest are flattened with collect_tools (duplicate names and missing @tool error there).
+        # - tools: Agent items are checked first: missing name or description is a ValueError; with both, the Agent
+        #   becomes a subagent tool (_AgentTool) that is flattened with the rest. MCP items are grouped by server
+        #   (_add_mcp). The rest are flattened with collect_tools (duplicate names and missing @tool error there).
         # - skills: NotImplementedError if not empty (outside the MVP).
         # - loop: default_loop if None. TypeError if not callable.
         # - reporter/human: DEFAULT means terminal.default_terminal() (one per process, the same object for
@@ -253,7 +384,8 @@ class Agent:
                             ")",
                         )
                     )
-                raise NotImplementedError(f"Subagents are not supported yet (Agent {item.name!r} passed in tools=)")
+                plain.append(_AgentTool(item))
+                continue
             if isinstance(item, (MCP, MCPToolRef)):
                 _add_mcp(mcp_uses, item)
                 continue
@@ -1676,15 +1808,17 @@ class Agent:
         mcp_items = (MCP, MCPToolRef, MCPTool)
         mcp_specs = [t.spec for t in self._chosen_mcp_tools(i for i in items if isinstance(i, mcp_items))]
         items = tuple(i for i in items if not isinstance(i, mcp_items))
+        # A subagent in tools= is shown by passing the Agent itself (or its tool from tool_map).
+        subagents = {t.agent: t for t in self._tool_by_name.values() if isinstance(t, _AgentTool)}
         for item in items:
-            if isinstance(item, Agent):
+            if isinstance(item, Agent) and item not in subagents:
                 raise ValueError(
                     fix_message(
                         f"{item!r} passed in think(tools=...) is not one of this Agent's tools",
                         "think(tools=...) only takes tools that were passed in Agent(tools=...)",
                     )
                 )
-        chosen = collect_tools(items)
+        chosen = collect_tools(subagents[i] if isinstance(i, Agent) else i for i in items)
         specs = []
         for tool_name, chosen_tool in chosen.items():
             mine = self._tool_by_name.get(tool_name)

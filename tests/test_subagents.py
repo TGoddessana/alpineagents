@@ -26,6 +26,7 @@ import pytest
 from alpineagents import (
     Agent,
     FileStore,
+    Image,
     Store,
     Message,
     ModelReplyEntry,
@@ -38,6 +39,7 @@ from alpineagents import (
     RunStartEntry,
     State,
     StateInfo,
+    StoppedByLimit,
     StoppedByPermission,
     Terminal,
     ToolCall,
@@ -46,23 +48,26 @@ from alpineagents import (
     ToolResultEntry,
     Usage,
     _serial,
+    loop,
     tool,
 )
 from alpineagents import terminal as terminal_module
 from alpineagents.permissions import (
     AllowByDefault,
     AllowByName,
+    AllowByReadOnly,
     AllowPermission,
     Allowed,
     DecideByHuman,
     DenyByName,
     DenyPermission,
+    Denied,
 )
 from alpineagents.terminal import default_terminal
 from alpineagents.testing import FakeHuman, FakeModel, tool_call
 from alpineagents.store import Record
 from alpineagents.human import Human
-from alpineagents.types import AgentInfo, HistoryEntry
+from alpineagents.types import AgentInfo, HistoryEntry, TextBlock
 
 INFO = AgentInfo(model="fake/fake")
 
@@ -2678,3 +2683,510 @@ def test_permissions_of_the_agent_still_show_its_own_list_only():
         model=FakeModel(["x"]), tools=[passing_on(helper)], permissions=[NO_PEEKING], reporter=None, human=None
     )
     assert helper.permissions == () and agent.permissions == (NO_PEEKING,)
+
+
+# ---------------------------------------------------------------- tools=[agent]
+#
+# An Agent in tools= is a tool that takes a ``prompt`` and runs the Agent on it. What the model gets back, and how a
+# subagent that did not simply finish is reported, is only for this tool: a @tool that calls ``agent.run()`` itself
+# follows the rules of any tool.
+
+
+def never(state: State) -> bool:
+    return False
+
+
+def researcher_of(replies, **settings) -> Agent:
+    settings.setdefault("name", "researcher")
+    settings.setdefault("description", "Finds material and summarizes it")
+    return agent_of(replies, **settings)
+
+
+def ask_researcher(prompt: str = "Look into Redis") -> ToolCall:
+    return tool_call("researcher", prompt=prompt)
+
+
+def run_with(helper: Agent, *replies, **settings) -> tuple[State, State | None]:
+    """The parent State after the parent (which calls the helper once and then answers) ran, and the child."""
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper], **settings)
+    parent = user_state()
+    assert agent.run(parent) == "outer"
+    ids = results_of(parent)[0].child_ids
+    return parent, (parent.child(ids[0]) if ids else None)
+
+
+def test_an_agent_in_tools_is_a_tool_with_the_name_description_and_a_prompt_argument():
+    helper = researcher_of(["x"])
+    plain = agent_of(["y"], tools=[peek, helper])
+    spec = plain.tool_map["researcher"].spec
+    assert (spec.name, spec.description) == ("researcher", "Finds material and summarizes it")
+    schema = spec.input_schema
+    assert schema["type"] == "object" and schema["required"] == ["prompt"]
+    assert list(schema["properties"]) == ["prompt"] and schema["properties"]["prompt"]["type"] == "string"
+    assert "sees only this prompt" in schema["properties"]["prompt"]["description"]
+    assert list(plain.tool_map) == ["peek", "researcher"]
+    assert plain.tools == (peek, helper)  # as given
+    assert plain.copy(reporter=None).tool_map["researcher"].spec == spec
+    tool_ = plain.tool_map["researcher"]
+    assert tool_.parallel is True
+    assert (tool_.read_only, tool_.destructive, tool_.idempotent, tool_.open_world) == (False, True, False, True)
+
+
+def test_a_subagent_tool_is_not_read_only_so_allow_by_read_only_does_not_allow_it():
+    helper = researcher_of(["x"])
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[AllowByReadOnly()])
+    hints = agent.tool_map["researcher"].hints_for({"prompt": "look"})
+    assert (hints.read_only, hints.destructive, hints.idempotent, hints.open_world) == (False, True, False, True)
+    parent = user_state()
+    with pytest.warns(PermissionWarning, match="No permission allowed or denied"):
+        assert agent.run(parent) == "outer"
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.child_ids == ()
+    assert helper.model.remaining == 1  # type: ignore[attr-defined]  # never ran
+    assert_counts_children(parent)
+
+
+def test_the_model_of_the_parent_is_shown_the_subagent_tool():
+    model = FakeModel(["done"])
+    Agent(model=model, tools=[researcher_of(["x"])], reporter=None, human=None).run("Go")
+    assert [t.name for t in model.requests[0].tools] == ["researcher"]
+
+
+def test_a_subagent_is_listed_in_agent_info_tools():
+    agent = agent_of([ask_researcher(), "outer"], tools=[peek, researcher_of(["x"])])
+    state = user_state()
+    agent.run(state)
+    assert starts_of(state)[0].content.tools == ("peek", "researcher")
+
+
+def test_think_can_show_just_the_subagent_by_passing_the_agent_or_its_tool():
+    helper = researcher_of(["x"])
+    model = FakeModel(["a", "b"])
+    agent = Agent(model=model, tools=[peek, helper], reporter=None, human=None)
+    agent.think(user_state(), tools=[helper])
+    agent.think(user_state(), tools=[agent.tool_map["researcher"]])
+    assert [[t.name for t in r.tools] for r in model.requests] == [["researcher"], ["researcher"]]
+    with pytest.raises(ValueError, match="not one of this Agent's tools"):
+        agent.think(user_state(), tools=[researcher_of(["x"])])
+
+
+@pytest.mark.parametrize("missing", ["name", "description"])
+def test_an_agent_in_tools_without_a_name_or_description_is_still_refused(missing):
+    settings = {"name": "researcher", "description": "Finds things"}
+    del settings[missing]
+    with pytest.raises(ValueError, match=f"has no {missing}"):
+        Agent(model=FakeModel([]), tools=[agent_of([], **settings)])
+
+
+def test_the_name_of_a_subagent_must_be_a_valid_tool_name_and_not_taken():
+    with pytest.raises(TypeError, match="cannot be used as a tool name"):
+        Agent(model=FakeModel([]), tools=[researcher_of([], name="my researcher")])
+
+    @tool(name="researcher")
+    def other() -> str:
+        """Another"""
+        return "x"
+
+    with pytest.raises(ValueError, match="Duplicate tool name 'researcher'"):
+        Agent(model=FakeModel([]), tools=[other, researcher_of([])])
+    with pytest.raises(
+        ValueError, match=r"(?s)Agent\(name='researcher'\) and Agent\(name='researcher'\).*another name="
+    ):
+        Agent(model=FakeModel([]), tools=[researcher_of([]), researcher_of([])])
+
+
+def test_the_subagent_starts_from_the_prompt_alone_and_the_parent_gets_its_answer():
+    helper = researcher_of(["Redis evicts keys"])
+    agent = agent_of([ask_researcher("Look into Redis eviction"), "outer"], tools=[helper])
+    parent = user_state("What does Redis do when full?")
+    assert agent.run(parent) == "outer"
+
+    (entry,) = results_of(parent)
+    assert (entry.content, entry.outcome, entry.error) == ("Redis evicts keys", ToolOutcomeKind.DONE, None)
+    kid = parent.child(entry.child_ids[0])
+    assert [m.text for m in kid.messages if m.role == "user"] == ["Look into Redis eviction"]
+    assert [m.role for m in kid.messages] == ["user", "assistant"]
+    assert helper.model.requests[0].messages[0].text == "Look into Redis eviction"  # type: ignore[attr-defined]
+    assert link_of(kid) == (parent.id, entry.call.id)
+    assert starts_of(kid)[0].content.name == "researcher"
+    assert parent.usage == own_usage(parent) + own_usage(kid) and entry.usage == kid.usage
+    assert_counts_children(parent)
+    assert_counts_children(kid)
+
+
+def test_a_result_that_is_not_a_string_is_converted_as_any_tool_result():
+    def structured(agent: Agent, state: State):
+        agent.think(state)
+        return {"found": ["a", "b"]}
+
+    helper = researcher_of(["ignored"], loop=structured)
+    parent, _ = run_with(helper)
+    assert results_of(parent)[0].content == '{"found": ["a", "b"]}'
+
+
+def test_a_subagent_that_returns_nothing_gives_done():
+    def silent(agent: Agent, state: State):
+        agent.think(state)
+        return None
+
+    parent, _ = run_with(researcher_of(["x"], loop=silent))
+    assert results_of(parent)[0].content == "(done)"
+
+
+@pytest.mark.parametrize(
+    "prompt_args",
+    [{}, {"prompt": ""}, {"prompt": "  "}, {"prompt": 3}, {"prompt": "ok", "extra": 1}],
+)
+def test_wrong_arguments_are_an_input_error_and_no_child_starts(prompt_args):
+    helper = researcher_of(["x"])
+    agent = agent_of([tool_call("researcher", **prompt_args), "outer"], tools=[helper])
+    parent = user_state()
+    assert agent.run(parent) == "outer"
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.INPUT_ERROR and entry.content.startswith("(input error: ")
+    assert entry.child_ids == () and parent._children == {} and helper.model.remaining == 1  # type: ignore[attr-defined]
+    assert_counts_children(parent)
+
+
+def test_finish_in_the_subagent_ends_only_the_subagent():
+    @tool
+    def conclude(state: State) -> str:
+        """Ends the work"""
+        state.finish("the answer")
+        return "concluded"
+
+    helper = researcher_of([tool_call("conclude"), "never"], tools=[conclude])
+    parent, kid = run_with(helper)
+    assert results_of(parent)[0].content == "the answer"
+    assert kid is not None and kid.finished and kid.answer == "the answer"
+    assert not parent.finished and parent.answer == "outer"
+    assert helper.model.remaining == 1  # type: ignore[attr-defined]
+    assert_counts_children(parent)
+    assert_replays(kid)
+
+
+def test_a_subagent_that_stopped_at_its_limit_tells_the_model_it_did_not_finish(tmp_path: Path):
+    @loop(until=never, limit=2)
+    def chatty(agent: Agent, state: State):
+        agent.think(state)
+
+    store = FileStore(tmp_path)
+    parent, kid = run_with(researcher_of(["first", "second"], loop=chatty), store=store)
+    (entry,) = results_of(parent)
+    assert entry.content == "second\n(researcher stopped after 2 turns before finishing)"
+    assert entry.outcome is ToolOutcomeKind.DONE
+    assert kid is not None and kid.stopped == StoppedByLimit(2)
+    assert_counts_children(parent)
+    assert_loads_equal(store, parent)
+    assert_loads_equal(store, kid)
+
+
+def returning_parts(parts, limit: int | None = None):
+    """A loop function whose subagent hands back ``parts`` (a plain function: its value is not a tool result)."""
+
+    def parts_loop(agent: Agent, state: State):
+        agent.think(state)
+        if limit is not None:
+            state._record_stop(StoppedByLimit(limit))
+        return parts
+
+    return parts_loop
+
+
+def test_a_subagent_that_returns_text_and_an_image_keeps_the_text_as_text():
+    image = Image(b"png", "image/png")
+    parent, _ = run_with(researcher_of(["x"], loop=returning_parts(["caption", image])))
+    assert results_of(parent)[0].content == (TextBlock("caption"), image)
+
+
+def test_a_limit_note_after_text_and_an_image_is_text_too():
+    image = Image(b"png", "image/png")
+    parent, _ = run_with(researcher_of(["x"], loop=returning_parts(["caption", image], limit=3)))
+    note = TextBlock("(researcher stopped after 3 turns before finishing)")
+    assert results_of(parent)[0].content == (TextBlock("caption"), image, note)
+    parent, _ = run_with(researcher_of(["x"], loop=returning_parts(image, limit=1)))
+    assert results_of(parent)[0].content == (image, TextBlock("(researcher stopped after 1 turn before finishing)"))
+
+
+def test_a_limit_with_nothing_to_hand_back_gives_just_the_note():
+    @loop(until=never, limit=1)
+    def asking_loop(agent: Agent, state: State):
+        agent.think(state)
+        if state.pending_calls:
+            agent.use_tools(state)
+
+    parent, _ = run_with(researcher_of([tool_call("peek"), "never"], loop=asking_loop, tools=[peek]))
+    assert results_of(parent)[0].content == "(researcher stopped after 1 turn before finishing)"
+
+
+def test_a_stop_by_permission_inside_the_subagent_is_reported_and_the_parent_goes_on(tmp_path: Path):
+    class StopPeek(DenyPermission):
+        def check(self, state, call, tool):
+            return Denied("The user does not want peeking", stop=True)
+
+    helper = researcher_of([tool_call("peek"), "never"], tools=[peek], permissions=[StopPeek()])
+    reporter = Outcomes()
+    store = FileStore(tmp_path)
+    parent, kid = run_with(helper, reporter=reporter, store=store)
+    (entry,) = results_of(parent)
+    assert entry.content == "(researcher was stopped by the user: The user does not want peeking)"
+    assert entry.outcome is ToolOutcomeKind.DONE
+    assert kid is not None and isinstance(kid.stopped, StoppedByPermission)
+    assert parent.stopped != kid.stopped and not isinstance(parent.stopped, StoppedByPermission)
+    assert reporter.of(parent) == [("researcher", ToolOutcomeKind.DONE, None)]
+    assert_counts_children(parent)
+    assert_replays(kid)
+    assert_loads_equal(store, parent)
+    assert_loads_equal(store, kid)
+
+
+def test_a_permission_stop_without_a_denied_result_to_read_is_reported_without_a_reason():
+    kid = user_state()
+    kid._record_stop(StoppedByPermission(call_of("peek", "c9"), "SomePermission()"))
+    tool_ = agent_of(["x"], tools=[researcher_of(["y"])]).tool_map["researcher"]
+    assert tool_._result(kid, "ignored") == "(researcher was stopped by the user)"
+
+
+def test_a_subagent_that_raised_gives_a_failed_result_and_the_parent_goes_on(tmp_path: Path):
+    helper = researcher_of([RuntimeError("boom")])
+    reporter = Outcomes()
+    store = FileStore(tmp_path)
+    parent, kid = run_with(helper, reporter=reporter, store=store)
+    (entry,) = results_of(parent)
+    assert entry.content == "(researcher failed: RuntimeError: boom)"
+    assert entry.outcome is ToolOutcomeKind.ERROR and entry.is_error
+    assert isinstance(entry.error, ToolError) and str(entry.error) == entry.content
+    assert isinstance(entry.error.__cause__, RuntimeError)  # the exception itself, as with exception_handler
+    assert reporter.of(parent) == [("researcher", ToolOutcomeKind.ERROR, None)]
+    assert kid is not None and any(e.kind == "error" for e in kid.history)  # the child's history has the error
+    assert parent.answer == "outer"
+    assert_counts_children(parent)
+    assert_replays(kid)
+    assert_loads_equal(store, parent)
+    assert_loads_equal(store, kid)
+
+
+def test_a_subagent_exception_without_a_message_still_names_its_type():
+    parent, _ = run_with(researcher_of([KeyError()]))
+    assert results_of(parent)[0].content == "(researcher failed: KeyError)"
+
+
+def test_a_failure_before_the_subagent_starts_is_a_failed_result_too():
+    helper = researcher_of(["x"], permissions=[DecideByHuman()], human=None)
+    parent = user_state()
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    assert agent.run(parent) == "outer"
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ERROR and entry.content.startswith("(researcher failed: NoHumanError: ")
+    assert entry.child_ids == () and parent._children == {}
+
+
+def test_a_tool_that_runs_the_agent_itself_gets_none_of_the_conversions():
+    helper = researcher_of([RuntimeError("boom")])
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    agent = agent_of([tool_call("delegate"), "outer"], tools=[delegate])
+    parent = user_state()
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ABORTED and entry.child_ids != ()
+
+    @loop(until=never, limit=1)
+    def chatty(agent: Agent, state: State):
+        agent.think(state)
+
+    limited = researcher_of(["partial"], loop=chatty)
+
+    @tool
+    def delegate_limited() -> str:
+        """Ask the helper"""
+        return limited.run("Inner task")
+
+    agent = agent_of([tool_call("delegate_limited"), "outer"], tools=[delegate_limited])
+    parent = user_state()
+    agent.run(parent)
+    assert results_of(parent)[0].content == "partial"  # no note about the limit
+
+
+def test_ctrl_c_in_a_subagent_interrupts_the_call_and_stops_the_parent_run():
+    helper = researcher_of([KeyboardInterrupt()])
+    agent = agent_of([ask_researcher(), "never"], tools=[helper])
+    parent = user_state()
+    with pytest.raises(KeyboardInterrupt):
+        agent.run(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.INTERRUPTED
+    assert entry.child_ids != () and parent.stopped is None and not parent._running
+    assert agent.model.remaining == 1  # type: ignore[attr-defined]
+    assert_replays(parent)
+    assert_replays(parent.child(entry.child_ids[0]))
+
+
+def test_other_base_exceptions_of_a_subagent_also_pass_through():
+    agent = agent_of([ask_researcher(), "never"], tools=[researcher_of([SystemExit(3)])])
+    parent = user_state()
+    with pytest.raises(SystemExit):
+        agent.run(parent)
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.ABORTED
+
+
+def test_the_subagents_of_one_turn_run_at_the_same_time_each_with_its_own_state():
+    barrier = threading.Barrier(2, timeout=5)
+
+    @tool
+    def meet() -> str:
+        """Waits until both subagents are here"""
+        barrier.wait()
+        return "met"
+
+    def meets_then_answers(request):
+        return tool_call("meet") if len(request.messages) == 1 else "answer"
+
+    helper = researcher_of([meets_then_answers] * 4, tools=[meet])
+    agent = agent_of([[ask_researcher("a"), ask_researcher("b")], "outer"], tools=[helper])
+    parent = user_state()
+    assert agent.run(parent) == "outer"
+    first, second = results_of(parent)
+    assert first.content == second.content == "answer"
+    assert first.child_ids != second.child_ids and len(parent._children) == 2
+    prompts = sorted(parent.child(e.child_ids[0]).messages[0].text for e in (first, second))
+    assert prompts == ["a", "b"]
+    assert_counts_children(parent)
+
+
+def test_a_subagent_of_a_subagent_is_linked_down_the_chain():
+    inner = researcher_of(["deep"], name="inner", description="The inner one")
+    middle = researcher_of([tool_call("inner", prompt="go deeper"), "middle"], name="middle", tools=[inner])
+    agent = agent_of([tool_call("middle", prompt="go"), "outer"], tools=[middle])
+    top = user_state()
+    assert agent.run(top) == "outer"
+    mid = top.child(results_of(top)[0].child_ids[0])
+    low = mid.child(results_of(mid)[0].child_ids[0])
+    assert (mid.parent_id, low.parent_id) == (top.id, mid.id)
+    assert results_of(mid)[0].content == "deep" and results_of(top)[0].content == "middle"
+    for state in (top, mid, low):
+        assert_counts_children(state)
+
+
+def test_the_parents_settings_reach_a_subagent_from_tools(tmp_path: Path):
+    store = FileStore(tmp_path)
+    # no reporter or store of its own: it takes those of the run above
+    helper = Agent(
+        model=FakeModel([tool_call("peek"), "inner"]),
+        name="researcher",
+        description="Finds things",
+        tools=[peek],
+        human=None,
+    )
+    reporter = Outcomes()
+    agent = agent_of(
+        [ask_researcher(), "outer"],
+        tools=[helper],
+        store=store,
+        reporter=reporter,
+        permissions=[NO_PEEKING, AllowByDefault()],
+    )
+    parent = user_state(id="parent")
+    agent.run(parent)
+    kid = parent.child(results_of(parent)[0].child_ids[0])
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DENIED  # the permissions of the parent run
+    assert reporter.of(kid) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]  # the reporter of the parent run
+    assert {info.id: info.parent_id for info in store.list()} == {"parent": None, kid.id: "parent"}
+    assert_loads_equal(store, parent)
+    loaded = store.load("parent")
+    assert loaded.child(kid.id).snapshot() == kid.snapshot()  # and it opens after load, from the store
+    assert_loads_equal(store, kid)
+
+
+def test_a_second_run_of_the_parent_calls_the_subagent_again_as_a_new_child():
+    helper = researcher_of(["one", "two"])
+    agent = agent_of([ask_researcher("a"), "first", ask_researcher("b"), "second"], tools=[helper])
+    parent = user_state()
+    agent.run(parent)
+    parent.add_message(Message.user("again"))
+    agent.run(parent)
+    ids = [e.child_ids[0] for e in results_of(parent)]
+    assert len(set(ids)) == 2
+    assert [results_of(parent)[i].content for i in (0, 1)] == ["one", "two"]
+    assert_counts_children(parent)
+
+
+async def test_in_an_async_run_the_subagent_runs_with_arun_on_the_same_event_loop():
+    human = AsyncHuman(["yes"])
+    # Only arun can ask this human (it implements aask, not ask), so a plain run of the subagent would fail
+    helper = researcher_of([tool_call("peek"), "inner"], tools=[peek], permissions=[DecideByHuman()], human=human)
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    parent = user_state()
+    assert agent.tool_map["researcher"].is_async is False  # no async run yet
+    assert await agent.arun(parent) == "outer"
+    assert human.questions == ["Run peek()?"]
+    (entry,) = results_of(parent)
+    assert entry.content == "inner" and entry.outcome is ToolOutcomeKind.DONE
+    assert_counts_children(parent)
+
+
+async def test_an_async_run_with_a_failing_subagent_gives_a_failed_result():
+    helper = researcher_of([ValueError("bad")])
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    (entry,) = results_of(parent)
+    assert entry.content == "(researcher failed: ValueError: bad)" and entry.outcome is ToolOutcomeKind.ERROR
+    assert isinstance(entry.error.__cause__, ValueError)
+
+
+async def test_a_subagent_with_a_sync_custom_loop_runs_with_run_on_a_worker_thread_in_an_async_run():
+    threads = []
+
+    def sync_loop(agent: Agent, state: State):
+        threads.append(threading.current_thread() is threading.main_thread())
+        agent.think(state)
+        return state.answer
+
+    helper = researcher_of(["inner"], loop=sync_loop)
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    assert threads == [False] and results_of(parent)[0].content == "inner"
+
+
+def test_a_subagent_with_an_async_loop_runs_with_arun_under_a_sync_run():
+    async def async_loop(agent: Agent, state: State):
+        await agent.athink(state)
+        return state.answer
+
+    helper = researcher_of(["inner"], loop=async_loop)
+    parent, kid = run_with(helper)
+    assert results_of(parent)[0].content == "inner" and kid is not None
+    assert_counts_children(parent)
+
+
+async def test_cancelling_an_async_run_stops_the_parent_through_a_subagent():
+    started = asyncio.Event()
+
+    @tool
+    async def hang() -> str:
+        """Never returns"""
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    helper = researcher_of([tool_call("hang"), "never"], tools=[hang])
+    agent = agent_of([ask_researcher(), "never"], tools=[helper])
+    parent = user_state()
+    task = asyncio.ensure_future(agent.arun(parent))
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.INTERRUPTED and parent.stopped is None
+    kid = parent.child(entry.child_ids[0])
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.INTERRUPTED
+    assert_replays(parent)
+    assert_replays(kid)
