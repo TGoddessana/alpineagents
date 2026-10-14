@@ -60,6 +60,7 @@ from .types import (
 
 __all__ = [
     "VERSION",
+    "MIN_VERSION",
     "InfoDict",
     "check_version",
     "info_to_dict",
@@ -80,13 +81,19 @@ __all__ = [
     "agent_info_from_dict",
 ]
 
-#: Version of the saved formats. A record with any other version is refused when loading (there is no converter).
+#: Version of the saved formats. A record with a version outside ``MIN_VERSION``..``VERSION`` is refused when loading
+#: (there is no converter).
 #: 2: tool results can hold images.
 #: 3: the snapshot has ``stopped`` (a dict, see ``stopped_to_dict``) instead of ``stopped_by`` and ``stopped_limit``.
 #: 4 (alpineagents 0.5): a Store keeps history entries and a small info dict only. New entry kinds and fields
 #: (``model_request``, ``run_start``, ``stop``, ``extra_data``, outcomes on ``tool_result``, ...), and user
 #: messages can hold images.
-VERSION = 4
+#: 5 (subagents): ``run_start`` entries can have ``parent_id`` and ``parent_call_id``, ``tool_result`` entries
+#: ``child_ids`` and ``usage``, and the info dict has ``parent_id``. Format 4 is still read: the keys it lacks mean
+#: their defaults (no parent, no children, no usage).
+VERSION = 5
+#: The oldest format that is still read.
+MIN_VERSION = 4
 
 
 # ---------------------------------------------------------------- saved shapes
@@ -152,14 +159,16 @@ class InfoDict(TypedDict):
     turn: int
     stopped: StoppedDict | None
     finished: bool
+    parent_id: NotRequired[str | None]
+    """The id of the State that started this one as a subagent, or ``None``. Missing in format 4."""
 
 
 # ---------------------------------------------------------------- version and info
 
 
 def check_version(state_id: str, data: Mapping[str, Any]) -> None:
-    """``ValueError`` unless the info dict ``data`` a Store returned has the current format ``VERSION``. There is no
-    converter: States saved by another version cannot be loaded."""
+    """``ValueError`` unless the info dict ``data`` a Store returned has a format this alpineagents reads
+    (``MIN_VERSION`` to ``VERSION``). There is no converter: States saved by an older version cannot be loaded."""
     version = data.get("v")
     if not isinstance(version, int) or isinstance(version, bool):
         raise ValueError(
@@ -169,9 +178,9 @@ def check_version(state_id: str, data: Mapping[str, Any]) -> None:
                 "check that the Store returns what it was given to write",
             )
         )
-    if version == VERSION:
+    if MIN_VERSION <= version <= VERSION:
         return
-    if version < VERSION:
+    if version < MIN_VERSION:
         release = ", 0.4.x" if version == 3 else ""
         raise ValueError(
             fix_message(
@@ -183,7 +192,7 @@ def check_version(state_id: str, data: Mapping[str, Any]) -> None:
     raise ValueError(
         fix_message(
             f"saved State {state_id!r} was saved by a newer alpineagents (format {version}); "
-            f"this alpineagents reads format {VERSION}",
+            f"this alpineagents reads formats {MIN_VERSION} to {VERSION}",
             "upgrade alpineagents to load it",
         )
     )
@@ -197,6 +206,7 @@ def info_to_dict(
     turn: int,
     stopped: Stopped | None,
     finished: bool,
+    parent_id: str | None = None,
 ) -> InfoDict:
     """The info dict of a State (see ``InfoDict``). ``id`` is not in it: the Store knows it from where it keeps
     the State."""
@@ -208,6 +218,7 @@ def info_to_dict(
         "turn": turn,
         "stopped": stopped_to_dict(stopped),
         "finished": finished,
+        "parent_id": parent_id,
     }
 
 
@@ -217,13 +228,14 @@ _INFO_KEYS = ("first_message", "created_at", "updated_at", "turn", "stopped", "f
 def info_from_dict(state_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
     """The ``StateInfo`` fields (all but ``id``) from an info dict a Store returned, as keyword arguments:
     ``first_message``, ``created_at``, ``updated_at`` (``datetime`` or ``None``), ``turn``, ``stopped``
-    (``Stopped`` or ``None``) and ``finished``.
+    (``Stopped`` or ``None``), ``finished`` and ``parent_id`` (``None`` for format 4, which has no such key).
 
     Raises:
-        ValueError: the format version is not ``VERSION`` (``check_version``), or a key is missing.
+        ValueError: the format version is not one that is read (``check_version``), or a key is missing.
     """
     check_version(state_id, data)
-    missing = [key for key in _INFO_KEYS if key not in data]
+    keys = _INFO_KEYS if data["v"] < 5 else _INFO_KEYS + ("parent_id",)
+    missing = [key for key in keys if key not in data]
     if missing:
         raise ValueError(
             fix_message(
@@ -239,6 +251,7 @@ def info_from_dict(state_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
         "turn": data["turn"],
         "stopped": stopped_from_dict(data["stopped"]),
         "finished": data["finished"],
+        "parent_id": data.get("parent_id"),
     }
 
 
@@ -452,8 +465,8 @@ def agent_info_from_dict(data: Mapping[str, Any]) -> AgentInfo:
 
 # ---------------------------------------------------------------- history entries
 # Every kind is saved with the same keys: seq, kind, turn, at, content, plus the extra fields the class has
-# (call, outcome, late, usage, removed) when they are set. So the format does not depend on which class holds the
-# entry.
+# (call, outcome, late, usage, child_ids, parent_id, parent_call_id, removed) when they are set. So the format does
+# not depend on which class holds the entry.
 
 
 def _reply_to_plain(reply: Reply) -> dict[str, Any]:
@@ -548,8 +561,13 @@ def entry_to_dict(entry: HistoryEntry, seq: int) -> dict[str, Any]:
         data["outcome"] = entry.outcome.value
         if entry.late:
             data["late"] = True
-    if isinstance(entry, ExchangeEntry) and entry.usage is not None:
+    if isinstance(entry, (ToolResultEntry, ExchangeEntry)) and entry.usage is not None:
         data["usage"] = usage_to_dict(entry.usage)
+    if isinstance(entry, ToolResultEntry) and entry.child_ids:
+        data["child_ids"] = list(entry.child_ids)
+    if isinstance(entry, RunStartEntry) and entry.parent_id is not None:
+        data["parent_id"] = entry.parent_id
+        data["parent_call_id"] = entry.parent_call_id
     if isinstance(entry, ExtraDataEntry) and entry.removed:
         data["removed"] = list(entry.removed)
     return data
@@ -583,11 +601,16 @@ def _entry_from_dict(data: Mapping[str, Any]) -> HistoryEntry:
         event = ModelEvent(content["kind"], content["message"], content["data"])
         return ModelEventEntry(content=event, turn=turn, at=at)
     if kind == "tool_result":
+        child_ids = data.get("child_ids", ())
+        if not isinstance(child_ids, (list, tuple)):
+            raise TypeError(f"child_ids is not a list (got: {type(child_ids).__name__})")
         return ToolResultEntry(
             content=_result_from_plain(content),
             call=_needs_call(kind, call),
             outcome=ToolOutcomeKind(data["outcome"]),
             late=bool(data.get("late", False)),
+            child_ids=tuple(child_ids),
+            usage=None if data.get("usage") is None else usage_from_dict(data["usage"]),
             turn=turn,
             at=at,
         )
@@ -603,7 +626,13 @@ def _entry_from_dict(data: Mapping[str, Any]) -> HistoryEntry:
     if kind == "context_change":
         return ContextChangeEntry(content=_change_from_plain(content), turn=turn, at=at)
     if kind == "run_start":
-        return RunStartEntry(content=agent_info_from_dict(content), turn=turn, at=at)
+        return RunStartEntry(
+            content=agent_info_from_dict(content),
+            parent_id=data.get("parent_id"),
+            parent_call_id=data.get("parent_call_id"),
+            turn=turn,
+            at=at,
+        )
     if kind == "stop":
         return StopEntry(content=stopped_from_dict(content), turn=turn, at=at)
     if kind == "extra_data":

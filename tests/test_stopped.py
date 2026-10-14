@@ -375,8 +375,8 @@ def test_unknown_saved_stop_kind_is_refused():
         _serial.stopped_from_dict({"kind": "timeout"})
 
 
-def test_format_version_is_4():
-    assert _serial.VERSION == 4
+def test_format_version_is_5():
+    assert _serial.VERSION == 5
 
 
 @pytest.mark.parametrize(
@@ -413,7 +413,7 @@ def test_permission_stop_survives_a_store_and_does_not_block_the_next_run(tmp_pa
     assert state.stopped == BY_PERMISSION
 
     info = json.loads((tmp_path / "perm" / "info.json").read_text("utf-8"))
-    assert info["v"] == 4 and info["stopped"]["kind"] == "permission"
+    assert info["v"] == 5 and info["stopped"]["kind"] == "permission"
     assert "stopped_by" not in info and "stopped_limit" not in info
     loaded = store.load("perm")
     assert loaded.stopped == BY_PERMISSION

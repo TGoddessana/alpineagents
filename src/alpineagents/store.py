@@ -6,7 +6,7 @@ the Agent at its save points) hands them over (ARCHITECTURE.md "Store"). A saved
 - **entries**: history, one dict per entry, in order. Each has ``seq``, its index in history. Writes only add
   entries, and a store skips entries whose ``seq`` it already has, so writing the same batch again is harmless.
 - **info**: one small dict with what a listing shows (``StateInfo``: the first message, times, turn, why it
-  stopped) and the format version. Each write replaces it.
+  stopped, the parent State of a subagent) and the format version. Each write replaces it.
 
 History is the only source of truth: ``load`` replays every entry through the same ``fold`` that built the State
 (``State(history=...)``), so nothing else needs saving.
@@ -69,6 +69,9 @@ class StateInfo:
     or ``StoppedByPermission``), or ``None`` if it ended with an exception or was still running."""
     finished: bool
     """Whether ``finish()`` was called. A finished State cannot run again."""
+    parent_id: str | None = None
+    """The id of the State that started this one as a subagent (``state.parent_id``), or ``None`` for a State
+    that no tool call started. Keep the ``None`` ones to list only the top-level runs."""
 
     @classmethod
     def from_info(cls, state_id: str, info: Mapping[str, Any]) -> StateInfo:
