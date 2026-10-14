@@ -81,6 +81,7 @@ plugins:
           - guides/progress.md: Show progress and ask the person
           - guides/async.md: Use async
           - guides/mcp.md: Use MCP servers
+          - guides/subagents.md: Use subagents
           - guides/undo-and-fork.md: Go back or try another path
           - guides/production.md: Survive crashes and restarts
         Concepts:
@@ -89,6 +90,7 @@ plugins:
           - concepts/state.md: State and history
           - concepts/loops.md: Loops and stop rules
           - concepts/tools.md: Tool calls
+          - concepts/subagents.md: Subagents
           - concepts/errors.md: Errors and interruptions
           - concepts/glossary.md: Glossary
         API reference:
@@ -129,6 +131,7 @@ nav:
       - Show progress and ask the person: guides/progress.md
       - Use async: guides/async.md
       - Use MCP servers: guides/mcp.md
+      - Use subagents: guides/subagents.md
       - Go back or try another path: guides/undo-and-fork.md
       - Survive crashes and restarts: guides/production.md
   - Concepts:
@@ -137,6 +140,7 @@ nav:
       - State and history: concepts/state.md
       - Loops and stop rules: concepts/loops.md
       - Tool calls: concepts/tools.md
+      - Subagents: concepts/subagents.md
       - Errors and interruptions: concepts/errors.md
       - Glossary: concepts/glossary.md
   - API reference:

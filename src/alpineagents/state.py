@@ -886,8 +886,8 @@ class State:
 
     @property
     def usage(self) -> Usage:
-        """Total tokens, requests and cost of every ``think``, ``ask`` and ``compact`` on this State. ``restore``
-        does not lower it."""
+        """Total tokens, requests and cost of every ``think``, ``ask`` and ``compact`` on this State, and of the
+        subagents its tool calls started (added when the call closes). ``restore`` does not lower it."""
         return self._snap.usage
 
     @property

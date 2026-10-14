@@ -69,8 +69,9 @@ Nothing that failed to save is lost from the State: the next save writes it.
   with `store.load(id)`, or pick another id.
 - `FileStore` files are readable only by their owner, because history holds tool results and messages. Images in tool
   results are saved as base64, so a run with many screenshots makes large files.
-- Saved States have a format version. `store.load` raises `ValueError` for a State saved in another format. There is
-  no converter.
+- Saved States have a format version, now 5. `store.load` reads formats 4 and 5, and raises `ValueError` for a State
+  saved in an older or newer one. There is no converter: a format 4 State loads as it is, with no subagents, and is
+  saved on as format 5.
 
 ## List and delete
 
@@ -80,6 +81,15 @@ for saved in store.list():  # a StateInfo for each, most recently updated first
 
 store.delete("review-pr-42")
 ```
+
+The [subagents](subagents.md) of a run are saved as States of their own, so `list()` shows them too. Their
+`parent_id` is the id of the State that started them, and `None` for the States you started yourself:
+
+```python
+runs = [saved for saved in store.list() if saved.parent_id is None]
+```
+
+`store.delete(id)` deletes only that State, not its subagents. Find them by `parent_id` in `store.list()`.
 
 ## Write your own store
 

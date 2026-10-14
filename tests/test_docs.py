@@ -150,7 +150,7 @@ def test_readme_state(models, monkeypatch, tmp_path, capsys):
 
 def test_readme_code_matches_docs_src():
     readme = (ROOT / "README.md").read_text()
-    for name in ["quickstart", "no_api_key", "coding_agent", "readme_state"]:
+    for name in ["quickstart", "no_api_key", "coding_agent", "readme_state", "subagent"]:
         assert (DOCS_SRC / f"{name}.py").read_text().strip() in readme, name
 
 
@@ -801,6 +801,150 @@ def test_own_store_refuses_a_second_create(models):
         store.write("demo", [], store.records["demo"].info, create=True)
     with pytest.raises(LookupError):
         store.write("other", [], store.records["demo"].info)
+
+
+# ---------------------------------------------------------------- subagents
+
+
+ASK_RESEARCHER = "Read pyproject.toml and list the supported Python versions"
+
+
+def researcher_and_lead(runs: int) -> tuple[FakeModel, FakeModel]:
+    """The FakeModels of the researcher and the lead in docs_src/subagent.py, for `runs` runs of the lead."""
+    researcher = FakeModel([tool_call("read_file", path="pyproject.toml"), "Python 3.11 and later"] * runs)
+    lead = FakeModel([tool_call("researcher", prompt=ASK_RESEARCHER), "It supports Python 3.11 and later"] * runs)
+    return researcher, lead
+
+
+def test_subagent(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("pyproject.toml").write_text('requires-python = ">=3.11"\n')
+    researcher, lead = researcher_and_lead(2)
+    models.extend([researcher, lead])
+    ns = run("subagent")
+    out = capsys.readouterr().out
+    assert "researcher started" in out and "researcher done: stopped by waiting_for_user" in out
+    assert out.splitlines()[-1] == "It supports Python 3.11 and later"
+    assert 'requires-python = ">=3.11"' in last_request_text(researcher)
+    assert [t.name for t in lead.requests[0].tools] == ["researcher"]
+    assert [m.text for m in researcher.requests[0].messages] == [ASK_RESEARCHER]  # the prompt alone
+
+    state = user("Which Python versions does this project support?")
+    ns["lead"].run(state)
+    (result,) = [e for e in state.history if e.kind == "tool_result"]
+    child = state.child(result.child_ids[0])
+    assert State(history=state.history).snapshot() == state.snapshot()
+    assert State(history=child.history).snapshot() == child.snapshot()
+
+
+def test_subagent_reporter_shows_the_tree(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("pyproject.toml").write_text('requires-python = ">=3.11"\n')
+    researcher, lead = researcher_and_lead(2)
+    models.extend([researcher, lead, lead])  # the lead of subagent.py, then the lead with the TreeReporter
+    run("subagent", "subagent_reporter")
+    lines = capsys.readouterr().out.splitlines()[-4:]
+    assert lines == [
+        f"researcher({{'prompt': {ASK_RESEARCHER!r}}})",
+        "  read_file({'path': 'pyproject.toml'})",
+        "  done: stopped by waiting_for_user",
+        "done: stopped by waiting_for_user",
+    ]
+
+
+def test_subagent_inspect(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("pyproject.toml").write_text('requires-python = ">=3.11"\n')
+    researcher, lead = researcher_and_lead(2)
+    models.extend([researcher, lead])
+    ns = run("subagent", "subagent_inspect")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == ["researcher done True stopped by waiting_for_user 2", "4"]
+    state = ns["state"]
+    assert State(history=state.history).snapshot() == state.snapshot()
+
+
+def test_subagent_store(models, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    Path("pyproject.toml").write_text('requires-python = ">=3.11"\n')
+    researcher, lead = researcher_and_lead(2)
+    models.extend([researcher, lead, lead])  # the lead of subagent.py, then the lead with the store
+    ns = run("subagent", "subagent_store")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == ["Python 3.11 and later", "['review-42']"]
+    store, state = ns["store"], ns["state"]
+    assert store.load("review-42").snapshot() == state.snapshot()
+    assert State(history=state.history).snapshot() == state.snapshot()
+    (result,) = [e for e in state.history if e.kind == "tool_result"]
+    (child_id,) = result.child_ids
+    infos = {info.id: info for info in store.list()}
+    assert set(infos) == {"review-42", child_id} and infos[child_id].parent_id == "review-42"
+    child = store.load(child_id)  # a subagent alone is a normal State
+    assert child.parent_id == "review-42" and child.snapshot() == state.child(child_id).snapshot()
+
+
+def test_subagent_tool_reviews_the_files_at_the_same_time(models, monkeypatch, tmp_path, capsys):
+    import asyncio
+
+    monkeypatch.chdir(tmp_path)
+    Path("calc.py").write_text("def div(a, b):\n    return a / b\n")
+    Path("parse.py").write_text("def parse(s):\n    return int(s)\n")
+    reviewer = FakeModel(["Line 2: b may be zero", "Line 2: s may not be a number"] * 2)
+    call = tool_call("review_files", paths=["calc.py", "parse.py"], focus="error handling")
+    lead = FakeModel([call, "Both files lack error handling"] * 2)
+    models.extend([reviewer, lead])
+    ns = run("subagent_tool")  # runs main() once
+    assert capsys.readouterr().out.splitlines()[-1] == "Both files lack error handling"
+    prompts = "\n".join(str(r.messages[0].content) for r in reviewer.requests)
+    assert "def div(a, b)" in prompts and "def parse(s)" in prompts and "Focus on error handling." in prompts
+
+    state = user("Review calc.py and parse.py for error handling")
+    asyncio.run(ns["lead"].arun(state))
+    (result,) = [e for e in state.history if e.kind == "tool_result"]
+    assert result.outcome == "done" and len(result.child_ids) == 2
+    answers = {state.child(child_id).answer for child_id in result.child_ids}
+    assert answers == {"Line 2: b may be zero", "Line 2: s may not be a number"}
+    assert State(history=state.history).snapshot() == state.snapshot()
+
+
+def test_subagent_permissions(models, answers, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("old.txt").write_text("old")
+    editor = FakeModel([
+        tool_call("delete_file", path="old.txt"),
+        tool_call("write_file", path="new.txt", content="new"),
+        "Wrote new.txt. Deleting is not allowed",
+    ])
+    drafter = FakeModel([
+        tool_call("write_file", path="draft.txt", content="draft"),
+        tool_call("delete_file", path="draft.txt"),
+        "Drafted",
+    ])
+    lead = FakeModel([
+        tool_call("editor", prompt="Replace old.txt with new.txt"),
+        tool_call("drafter", prompt="Write draft.txt"),
+        "Done",
+    ])
+    models.extend([editor, drafter, lead])
+    answers.append("yes")  # only editor's write_file is asked about: the lead's DecideByHuman
+    ns = run("subagent_permissions")
+    state = user("Replace old.txt, then draft")
+    ns["lead"].run(state)
+    assert answers == []
+    assert Path("old.txt").exists() and Path("new.txt").read_text() == "new"
+    assert Path("draft.txt").read_text() == "draft"  # its own list allowed the write; the lead's deny kept the file
+    assert "Nothing is deleted in this run." in last_request_text(editor)
+    assert "Nothing is deleted in this run." in last_request_text(drafter)
+    edited = state.child([e for e in state.history if e.kind == "tool_result"][0].child_ids[0])
+    assert State(history=state.history).snapshot() == state.snapshot()
+    assert State(history=edited.history).snapshot() == edited.snapshot()
+    outcomes = [(e.call.name, e.outcome) for e in edited.history if e.kind == "tool_result"]
+    assert outcomes == [("delete_file", "denied"), ("write_file", "done")]
+
+
+def test_testing_subagent_example():
+    ns = run("test_subagent")
+    ns["test_the_lead_asks_the_researcher_and_uses_its_answer"]()
 
 
 # ---------------------------------------------------------------- the Learn pages

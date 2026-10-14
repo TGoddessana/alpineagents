@@ -23,6 +23,8 @@ Terms in the order you meet them.
 | Content block | A part of a message: text (`TextBlock`), an `Image`, a tool call (`ToolCall`) or a tool result. Not the same as a block |
 | Tool | Something the model can call. See [Tool calls](tools.md) |
 | Tool call | A request in the model's reply to run one tool with arguments |
+| Subagent | A run started inside a tool call of another run, with a State of its own. An Agent in `tools=` becomes one. See [Subagents](subagents.md) |
+| Parent | The State whose tool call started a subagent: `state.parent_id`. The subagent is its child: `state.child(child_id)` |
 | Pending call | A tool call that has no result yet. Listed in `state.pending_calls` |
 | Outcome | How a tool call ended, as `ToolResultEntry.outcome`: `done`, `error`, `input_error`, `aborted`, `interrupted`, `denied` or `cancelled` |
 | Error result | A tool result the model is told is a failure. The run continues. See [When a call goes wrong](tools.md#when-a-call-goes-wrong) |
