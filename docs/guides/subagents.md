@@ -31,12 +31,12 @@ Put an Agent in `tools=` next to the functions:
 ```text
 [turn 1] thinking
   tool researcher(prompt="Read pyproject.toml and list the supported Python versions")
-  researcher started
-  [researcher turn 1] thinking
-    tool read_file(path="pyproject.toml")
-    done 26B
-  [researcher turn 2] thinking
-  researcher done: stopped by waiting_for_user (2 turns)
+    researcher started
+    [researcher turn 1] thinking
+      tool read_file(path="pyproject.toml")
+      done 26B
+    [researcher turn 2] thinking
+    researcher done: stopped by waiting_for_user (2 turns)
   done 21B
 [turn 2] thinking
 It supports Python 3.11 and later.

@@ -3223,12 +3223,12 @@ def test_terminal_shows_a_sequential_subagent_run_under_its_call_line():
     assert out.getvalue() == (
         "[turn 1] thinking\n"
         '  tool researcher(prompt="Redis")\n'
-        "  researcher started\n"
-        "  [researcher turn 1] thinking\n"
-        '    tool web_search(query="Redis eviction")\n'
-        "    done 40B\n"
-        "  [researcher turn 2] thinking\n"
-        "  researcher done: stopped by waiting_for_user (2 turns)\n"
+        "    researcher started\n"
+        "    [researcher turn 1] thinking\n"
+        '      tool web_search(query="Redis eviction")\n'
+        "      done 40B\n"
+        "    [researcher turn 2] thinking\n"
+        "    researcher done: stopped by waiting_for_user (2 turns)\n"
         "  done 15B\n"
         "[turn 2] thinking\n"
         "All done\n"
@@ -3246,7 +3246,7 @@ def test_terminal_does_not_show_a_subagents_streamed_text():
     agent.run(user_state())
     shown = out.getvalue()
     assert "secret findings" not in shown and "Top answer" in shown
-    assert "  [researcher turn 1] thinking\n  researcher done:" in shown
+    assert "    [researcher turn 1] thinking\n    researcher done:" in shown
 
 
 def test_terminal_with_show_text_off_still_shows_subagent_structure_lines():
@@ -3256,7 +3256,7 @@ def test_terminal_with_show_text_off_still_shows_subagent_structure_lines():
     agent.run(user_state())
     shown = out.getvalue()
     assert "Top answer" not in shown and "secret findings" not in shown
-    assert "  researcher started\n  [researcher turn 1] thinking\n" in shown
+    assert "    researcher started\n    [researcher turn 1] thinking\n" in shown
 
 
 def test_terminal_shows_a_grandchild_one_level_deeper_with_its_own_name():
@@ -3267,14 +3267,22 @@ def test_terminal_shows_a_grandchild_one_level_deeper_with_its_own_name():
     parent = user_state()
     agent.run(parent)
     lines = out.getvalue().splitlines()
-    assert "  researcher started" in lines
-    assert '    tool inner(prompt="go")' in lines
-    assert "    inner started" in lines
-    assert "    [inner turn 1] thinking" in lines
-    assert lines.index("    inner started") < lines.index("    inner done: stopped by waiting_for_user (1 turn)")
-    assert lines.index("    inner done: stopped by waiting_for_user (1 turn)") < lines.index(
-        "  researcher done: stopped by waiting_for_user (2 turns)"
-    )
+    assert lines[:-1] == [
+        "[turn 1] thinking",
+        '  tool researcher(prompt="Look into Redis")',
+        "    researcher started",
+        "    [researcher turn 1] thinking",
+        '      tool inner(prompt="go")',
+        "        inner started",
+        "        [inner turn 1] thinking",
+        "        inner done: stopped by waiting_for_user (1 turn)",
+        "      done 4B",
+        "    [researcher turn 2] thinking",
+        "    researcher done: stopped by waiting_for_user (2 turns)",
+        "  done 10B",
+        "[turn 2] thinking",
+        "top answer",
+    ]
     assert lines[-1] == "done: stopped by waiting_for_user (2 turns)"
     assert_replays(parent)
 
@@ -3285,7 +3293,7 @@ def test_terminal_shows_a_subagent_failure_on_its_done_line():
     agent = terminal_agent([ask_researcher(), "recovered"], Terminal(output=out), tools=[helper])
     agent.run(user_state())
     lines = out.getvalue().splitlines()
-    assert "  researcher done: error RuntimeError: boom (0 turns)" in lines
+    assert "    researcher done: error RuntimeError: boom (0 turns)" in lines
 
 
 def test_terminal_shows_parallel_subagents_without_mixing_their_lines():
@@ -3303,14 +3311,14 @@ def test_terminal_shows_parallel_subagents_without_mixing_their_lines():
     parent = user_state()
     agent.run(parent)
     lines = out.getvalue().splitlines()
-    assert lines.count("  researcher started") == 2
-    assert lines.count("  [researcher turn 1] thinking") == 2
-    assert lines.count("    tool pause()") == 2
-    assert lines.count("  [researcher turn 2] thinking") == 2
-    assert lines.count("  researcher done: stopped by waiting_for_user (2 turns)") == 2
+    assert lines.count("    researcher started") == 2
+    assert lines.count("    [researcher turn 1] thinking") == 2
+    assert lines.count("      tool pause()") == 2
+    assert lines.count("    [researcher turn 2] thinking") == 2
+    assert lines.count("    researcher done: stopped by waiting_for_user (2 turns)") == 2
     # every line is a whole line with a known shape: nothing from one subagent got written in the middle of another
     assert all(line.startswith(("  ", "[turn", "All done", "done:")) for line in lines)
-    # the parent's lines stay at depth 0 and the subagents' at depth 1 or deeper
+    # the parent's lines stay at depth 0 and the subagents' lines sit under them, one level deeper
     assert sorted(line for line in lines if line.startswith("  tool researcher")) == [
         '  tool researcher(prompt="one")',
         '  tool researcher(prompt="two")',
@@ -3337,9 +3345,9 @@ def test_terminal_shows_a_nameless_subagent_started_by_a_tool():
     assert lines[:5] == [
         "[turn 1] thinking",
         "  tool delegate()",
-        "  started",
-        "  [turn 1] thinking",
-        "  done: stopped by waiting_for_user (1 turn)",
+        "    started",
+        "    [turn 1] thinking",
+        "    done: stopped by waiting_for_user (1 turn)",
     ]
 
 

@@ -45,7 +45,8 @@ All notable changes to alpineagents are listed here. The format follows
 - A run started inside a tool call now takes the `reporter`, `human` and `store` of the run above it when its Agent was
   not given one, and is checked by that run's permissions. Before, it was independent of the run around it.
 - A Reporter gets the events of a subagent with the subagent's State. The default `Terminal` shows them indented under
-  the call that started them, with the Agent's name, and without the subagent's streamed text.
+  the call that started them (one level deeper than its `tool` line), with the Agent's name, and without the subagent's
+  streamed text.
 - Stored format version 5. A State saved in format 4 loads as before, and is saved on as format 5.
 
 ### Removed
