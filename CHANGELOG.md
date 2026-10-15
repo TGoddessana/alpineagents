@@ -19,7 +19,9 @@ All notable changes to alpineagents are listed here. The format follows
 
   For another input shape, write a `@tool` that runs the Agent: the run inside it is a subagent too, with
   `asyncio.gather` as well. A thread you start yourself loses the link. The model gets the answer, with a note when
-  the subagent stopped at its limit or by a permission, or `(researcher failed: ...)` when it raised an exception.
+  the subagent stopped at its limit or by a permission, or `(researcher failed: ...)` when it raised an exception
+  after it started. Known limit: in a sync run, Ctrl+C stops the run above but not a subagent running in a worker thread, which goes on
+  until it ends and is recorded as a late result. Use `arun` to cancel subagents together with the run above.
   See [Use subagents](https://tgoddessana.github.io/alpineagents/guides/subagents/) and
   [Subagents](https://tgoddessana.github.io/alpineagents/concepts/subagents/).
 - **`state.parent_id` and `state.parent_call_id`**: the id of the State whose tool call started this one, and the
@@ -47,6 +49,10 @@ All notable changes to alpineagents are listed here. The format follows
 - A Reporter gets the events of a subagent with the subagent's State. The default `Terminal` shows them indented under
   the call that started them (one level deeper than its `tool` line), with the Agent's name, and without the subagent's
   streamed text.
+- A mistake found before an Agent in `tools=` starts (`NoHumanError` for a `DecideByHuman()` with nobody to ask,
+  `TypeError` for an async-only permission, store or human in a sync run) is raised and stops the run above, as the
+  exception of any tool does. It is no longer turned into `(researcher failed: ...)`. Only an exception after the
+  subagent started becomes that result.
 - Stored format version 5. A State saved in format 4 loads as before, and is saved on as format 5.
 
 ### Removed

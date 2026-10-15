@@ -53,10 +53,16 @@ the lead goes on:
 | Hands back an answer, or calls `finish(answer)` | The answer | `done` |
 | Reaches its loop's `limit` | The answer so far, and `(researcher stopped after 30 turns before finishing)` | `done` |
 | Is stopped by a permission that denied a call with `stop=True` | `(researcher was stopped by the user: reason)` | `done` |
-| Raises an exception | `(researcher failed: TimeoutError: took too long)` | `error` |
+| Raises an exception after it started | `(researcher failed: TimeoutError: took too long)` | `error` |
 
-Ctrl+C and task cancellation are not turned into a result: they stop the lead too. Code that must tell the cases apart
-reads the outcome of the call and the subagent's State ([below](#look-inside-after-the-run)).
+Ctrl+C and task cancellation are not turned into a result: they stop the lead too. So does a mistake found before the
+subagent starts, such as a `DecideByHuman()` with nobody to ask (`NoHumanError`) or an async-only permission in a sync
+run (`TypeError`): it is raised as the exception of any tool is, and the lead's run stops with it. Code that must tell
+the cases apart reads the outcome of the call and the subagent's State ([below](#look-inside-after-the-run)).
+
+Known limit: in a sync run, Ctrl+C stops the lead (its call ends `interrupted`), but a subagent running in a worker
+thread keeps going until it ends. Its result and usage are recorded once, as a late result of the call. Use `arun` to
+cancel the subagents together with the lead.
 
 ## Change what the model passes
 

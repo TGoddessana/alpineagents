@@ -2971,14 +2971,102 @@ def test_a_subagent_exception_without_a_message_still_names_its_type():
     assert results_of(parent)[0].content == "(researcher failed: KeyError)"
 
 
-def test_a_failure_before_the_subagent_starts_is_a_failed_result_too():
+def test_a_failure_before_the_subagent_starts_stops_the_parent_like_the_exception_of_any_tool():
     helper = researcher_of(["x"], permissions=[DecideByHuman()], human=None)
     parent = user_state()
     agent = agent_of([ask_researcher(), "outer"], tools=[helper])
-    assert agent.run(parent) == "outer"
+    with pytest.raises(NoHumanError) as info:
+        agent.run(parent)
+    assert any("exception raised in tool researcher(" in note for note in info.value.__notes__)
     (entry,) = results_of(parent)
-    assert entry.outcome is ToolOutcomeKind.ERROR and entry.content.startswith("(researcher failed: NoHumanError: ")
+    assert entry.outcome is ToolOutcomeKind.ABORTED and "failed" not in entry.content
     assert entry.child_ids == () and parent._children == {}
+    assert parent.stopped is None and not parent._running
+    assert agent.model.remaining == 1  # type: ignore[attr-defined]  # the parent did not go on to its next turn
+    assert_replays(parent)
+
+
+def test_the_pre_start_failure_of_a_subagent_is_the_exception_a_tool_that_runs_the_agent_would_raise():
+    helper = researcher_of(["x"], permissions=[DecideByHuman()], human=None)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return helper.run("Inner task")
+
+    with pytest.raises(NoHumanError) as from_tool:
+        agent_of([tool_call("delegate"), "outer"], tools=[delegate]).run(user_state())
+    with pytest.raises(NoHumanError) as from_agent:
+        agent_of([ask_researcher(), "outer"], tools=[helper]).run(user_state())
+    assert type(from_agent.value) is type(from_tool.value)
+    assert str(from_agent.value) == str(from_tool.value)
+    assert from_agent.value.__cause__ is None  # not wrapped in a ToolError
+
+
+async def test_an_async_run_stops_on_the_pre_start_failure_of_a_subagent_too():
+    helper = researcher_of(["x"], permissions=[DecideByHuman()], human=None)
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    parent = user_state()
+    with pytest.raises(NoHumanError):
+        await agent.arun(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ABORTED and entry.child_ids == ()
+    assert agent.model.remaining == 1  # type: ignore[attr-defined]
+    assert_replays(parent)
+
+
+async def test_a_sync_subagent_in_an_async_run_with_an_async_only_permission_stops_the_parent():
+    def sync_loop(agent: Agent, state: State):
+        agent.think(state)
+        return state.answer
+
+    helper = researcher_of(["x"], loop=sync_loop)  # a sync loop other than default_loop runs with run()
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[AsyncOnlyDeny(), AllowByDefault()])
+    parent = user_state()
+    with pytest.raises(TypeError, match="checks calls only asynchronously") as info:
+        await agent.arun(parent)
+    assert info.value.__cause__ is None
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ABORTED and entry.child_ids == ()
+    assert_replays(parent)
+
+
+async def test_a_sync_subagent_in_an_async_run_with_an_async_only_store_stops_the_parent():
+    def sync_loop(agent: Agent, state: State):
+        agent.think(state)
+        return state.answer
+
+    helper = researcher_of(["x"], loop=sync_loop)
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper], store=AsyncOnlyStore())
+    parent = user_state()
+    with pytest.raises(TypeError, match="only asynchronously"):
+        await agent.arun(parent)
+    (entry,) = results_of(parent)
+    assert entry.outcome is ToolOutcomeKind.ABORTED and entry.child_ids == ()
+
+
+def test_a_subagent_that_started_and_then_failed_is_still_a_failed_result_even_if_it_never_asked_anything():
+    # the same Agent as above, but the failure comes after the run started: the model is told, the parent goes on
+    helper = researcher_of([RuntimeError("late")], permissions=[AllowByDefault()], human=None)
+    parent, kid = run_with(helper)
+    (entry,) = results_of(parent)
+    assert entry.content == "(researcher failed: RuntimeError: late)" and entry.outcome is ToolOutcomeKind.ERROR
+    assert kid is not None and starts_of(kid)
+
+
+async def test_an_async_subagent_that_started_and_then_failed_is_a_failed_result_too():
+    class Broken(Reporter):
+        def on_run_start(self, state):
+            if state.parent_id is not None:
+                raise RuntimeError("reporter broke")
+
+    helper = researcher_of(["x"], reporter=Broken())
+    agent = agent_of([ask_researcher(), "outer"], tools=[helper])
+    parent = user_state()
+    assert await agent.arun(parent) == "outer"
+    (entry,) = results_of(parent)
+    assert entry.content == "(researcher failed: RuntimeError: reporter broke)"
+    assert entry.outcome is ToolOutcomeKind.ERROR and entry.child_ids != ()
 
 
 def test_a_tool_that_runs_the_agent_itself_gets_none_of_the_conversions():
