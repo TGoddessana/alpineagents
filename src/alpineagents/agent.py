@@ -14,6 +14,7 @@ import warnings
 from contextvars import ContextVar
 from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
 from concurrent.futures import Future
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from . import _structured, _tokens
@@ -25,7 +26,16 @@ from .human import check_returns as check_human_returns
 from .mcp_tools import MCP, MCPTool, MCPToolRef, check_tool_names, wait_sync
 from .mcp_tools import _Loop as _MCPLoop
 from .models.resolve import resolve_model
-from .permissions import Permission, _asks_only_async, _effective, _needs_agent_human, _only_async, _owned
+from .permissions import (
+    Permission,
+    _asks_only_async,
+    _denials,
+    _effective,
+    _guarded,
+    _needs_agent_human,
+    _only_async,
+    _owned,
+)
 from .reporter import Reporter
 from .state import State, _RunContext, _turns
 from .store import Store
@@ -324,7 +334,9 @@ class Agent:
                 cannot be widened, but the allow and decide permissions of the parent are not asked about the
                 subagent's calls (so the parent's "deny the rest" does not bind it). A permission asks the
                 ``human`` of the Agent that wrote it. Put limits that must always hold in ``DenyByName`` and the
-                like.
+                like: they also bind another Agent that runs tools or starts a run inside a subagent's run
+                (``other.use_tools(state)`` or ``other.run(...)`` in a custom loop), which is checked by the
+                ``DenyPermission`` of the runs above first, then by its own list.
             name: The Agent's name.
             description: What the Agent does.
 
@@ -896,7 +908,9 @@ class Agent:
 
         With ``permissions=``, every call is checked before any tool runs. A denied call does not run, and the
         model gets the reason as its error result. A denial with ``stop=True`` cancels the other calls of the
-        turn too, so no tool of the turn runs, and the loop stops before its next turn.
+        turn too, so no tool of the turn runs, and the loop stops before its next turn. Called on the State of a
+        subagent's run by an Agent that is not that run's own (a custom loop calling ``other.use_tools(state)``), the
+        call is checked by the ``DenyPermission`` of the runs above the subagent first, then by this Agent's list.
 
         Every call ends as one ``ToolResultEntry`` whose ``outcome`` says how: done, error, input_error, aborted,
         interrupted, denied or cancelled.
@@ -934,7 +948,8 @@ class Agent:
         self._save(state)
 
     async def ause_tools(self, state: State) -> None:
-        """The async version of ``use_tools``.
+        """The async version of ``use_tools``, with the same checks: inside a subagent's run, an Agent that is not
+        that run's own is checked by the ``DenyPermission`` of the runs above first.
 
         ``async def`` tools run as tasks on the running event loop, other tools on worker threads.
         Cancelling it follows the same rules as Ctrl+C.
@@ -1359,11 +1374,12 @@ class Agent:
         """What applies to a run this Agent is about to start. A run started inside a tool call is a subagent, and
         takes the parent run's reporter and human unless this Agent was given its own (``None`` counts as given), and
         its store unless it has one. Its permissions are the denials of the runs above plus its own list, or the
-        parent run's whole list when it has none. Any other run uses this Agent's own."""
+        parent run's whole list when it has none. Any other run uses this Agent's own settings, with the denials of
+        the runs above in front of its permissions when it starts inside a subagent's run (see ``_guarded_context``)."""
         scope = _CURRENT_CALL.get()
         parent = scope.context if scope is not None else None
         if parent is None:
-            return self._own_context()
+            return self._guarded_context()
         human = parent.human if self._human is DEFAULT else self.human
         return _RunContext(
             self,
@@ -1372,6 +1388,7 @@ class Agent:
             parent.store if self._store is None else self._store,
             human_inherited=self._human is DEFAULT,
             permissions=_effective(parent.permissions, self._permissions, human),
+            ancestor_denials=_denials(parent.permissions),
         )
 
     def _active_context(self, state: State) -> _RunContext | None:
@@ -1389,8 +1406,28 @@ class Agent:
     def _context_for(self, state: State) -> _RunContext:
         """What applies to ``state`` for this Agent: the context of the run it is running, so that ``think``,
         ``use_tools`` and the like in a custom loop see what ``run`` sees, and this Agent's own settings when it is
-        not that run's Agent (or no run is going on)."""
-        return self._active_context(state) or self._own_context()
+        not that run's Agent (or no run is going on).
+
+        Inside a subagent's run (or any code running in one) another Agent keeps its own reporter, human and store, but
+        its permissions come after the ``DenyPermission`` of the runs above that run: a call the run above denied is
+        denied however it is made. A run that is not a subagent has none above it, so another Agent there is checked
+        by its own list only."""
+        context = self._active_context(state)
+        if context is not None:
+            return context
+        return self._guarded_context()
+
+    def _guarded_context(self) -> _RunContext:
+        """This Agent's own settings for something that is not a subagent run of the tool call it is in (a run it
+        starts, or a State it checks calls of, in code that runs inside a subagent's run, like its custom loop). Only
+        its permissions change there: the ``DenyPermission`` of the runs above that run come before its own list, and
+        the nested run carries them on. Its own settings as they are when no run above has any."""
+        own = self._own_context()
+        enclosing = _RUN_CONTEXT.get()
+        if enclosing is None or not enclosing.ancestor_denials:
+            return own
+        permissions = _guarded(enclosing.ancestor_denials, self._permissions, own.human)
+        return replace(own, permissions=permissions, ancestor_denials=enclosing.ancestor_denials)
 
     def _reporter_for(self, state: State) -> Reporter | None:
         """The Reporter this Agent notifies about ``state`` (see ``_context_for``)."""

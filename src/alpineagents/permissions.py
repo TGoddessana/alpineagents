@@ -15,7 +15,9 @@ stops before its next turn. The runner (``_runner.run_calls``) applies the verdi
 ``permissions=`` applies to every tool call of the run, the calls inside its subagents included. The list asked about a
 subagent's call is the ``DenyPermission`` of every run above it (top run first), then the subagent's own list, or, when
 the subagent was given no ``permissions=``, the whole list of the run that started it (``_effective``). Each permission
-asks the ``human`` of the run that wrote it, wherever the call it checks was made (``_Owned``).
+asks the ``human`` of the run that wrote it, wherever the call it checks was made (``_Owned``). The same denials come
+first when a different Agent checks calls inside a subagent's run, by ``other.use_tools(state)`` or by a run it starts
+there: ``_guarded(ancestor denials, its own list)``.
 
 Layer: next to ``loop.py`` and ``blocks.py``. It never imports ``agent.py`` (the running Agent is ``state._agent``).
 """
@@ -536,8 +538,29 @@ def _effective(
     """
     if own is None:
         return parent
-    denials = tuple(o for o in parent or () if isinstance(o.permission, DenyPermission))
+    return _denials(parent) + (_owned(own, human) or ())
+
+
+def _denials(permissions: tuple[_Owned, ...] | None) -> tuple[_Owned, ...]:
+    """The ``DenyPermission`` of a run's list, in list order. For the list of a subagent's run that is the denials of
+    the runs above (top run first) and then its own."""
+    return tuple(o for o in permissions or () if isinstance(o.permission, DenyPermission))
+
+
+def _guarded(
+    denials: tuple[_Owned, ...], own: Iterable[Permission] | None, human: Human | None
+) -> tuple[_Owned, ...] | None:
+    """The list for an Agent that checks the calls of a State inside a subagent's run without being the Agent of that
+    run (a custom loop calling ``other.use_tools(state)``): the ``denials`` of the runs above first, then ``own``, the
+    Agent's own ``permissions=``. Without a list of its own the Agent has no checks of its own and the denials alone
+    decide: a call none of them denies is allowed. ``None`` (no checks at all) when there are no denials and no list."""
+    if own is None:
+        return (*denials, _Owned(_ALLOW_THE_REST, human)) if denials else None
     return denials + (_owned(own, human) or ())
+
+
+#: Allows what the denials in front of it did not deny (see ``_guarded``).
+_ALLOW_THE_REST = AllowByDefault()
 
 
 # ---------------------------------------------------------------- asking the list (used by _runner)
