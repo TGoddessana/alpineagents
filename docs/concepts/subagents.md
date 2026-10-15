@@ -135,13 +135,15 @@ nobody allows is refused. See [How permissions decide](../guides/permissions.md#
 - The checks before a run starts (`NoHumanError` for a `DecideByHuman()` with nobody to ask, async-only permissions in
   a sync run) cover the inherited list too.
 - A refusal is recorded in the subagent's history. `Denied(..., stop=True)` stops only the subagent.
-- **Another Agent cannot get around the denials above.** In a subagent's run (or in any code that runs inside one, such
-  as its custom loop), when a different Agent checks calls on the State with `other.use_tools(state)` or
-  `await other.ause_tools(state)`, or starts a run of its own there with `other.run(...)`, the `DenyPermission`s of the
-  runs above that run are asked first, from the top, and then the other Agent's own list. Its reporter, human and store
-  stay its own. Allow and decide permissions of the runs above are not asked about its calls, and an Agent with no
-  `permissions=` is stopped by the denials only. The same holds for a run that its tools start. In a run that is not a subagent nothing is above it, so another Agent there
-  is checked by its own list only.
+- **Another Agent cannot get around the denials above.** Inside a subagent's run, including its custom loop, a
+  different Agent can run tools on the State (`other.use_tools(state)`, `await other.ause_tools(state)`) or start a
+  run of its own (`other.run(...)`). Its calls are checked by the `DenyPermission`s of the runs above first, from the
+  top, and then by its own list. The same holds for a run that its tools start.
+  - Allow and decide permissions of the runs above are not asked about its calls. With no `permissions=`, it is
+    stopped by the denials above only.
+  - The subagent's own `DenyPermission`s do not bind it: a run's own list checks only that run's Agent.
+  - Its reporter, human and store stay its own.
+  - In a run that is not a subagent nothing is above it, so another Agent there is checked by its own list only.
 
 ## How a subagent ends
 
