@@ -104,8 +104,9 @@ format 4 (before subagents) lists with `parent_id=None`. The format version is 5
 
 - A Reporter has no new methods for subagents. It gets its usual events with the **subagent's State**, and tells them
   apart with `state.parent_id`. `on_run_start` and `on_run_end` come once for every run.
-- The default `Terminal` indents a subagent's lines under the call that started it, and starts them with the Agent's
-  name (`[researcher turn 1] thinking`, `researcher done: ...`). It does not show a subagent's streamed text.
+- The default `Terminal` indents a subagent's lines one level deeper than the call that started it, and starts them
+  with the Agent's name (`[researcher turn 1] thinking`, `researcher done: ...`). It does not show a subagent's
+  streamed text.
 - A question a subagent asks with `agent.ask_human` is recorded in the subagent's history, and goes to the person the
   subagent's `human` points to.
 - `agent.reporter`, `agent.human` and `agent.store` always show the Agent's own settings, not what it takes from the

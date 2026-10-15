@@ -26,16 +26,16 @@ done: stopped by waiting_for_user (2 turns)
 - The last line says why the run stopped and how many turns it took. When the Model has prices, it also shows the
   cost, for example `done: stopped by waiting_for_user (5 turns, ~$0.42)`.
 
-A [subagent](subagents.md)'s lines are indented under the tool call that started it, and start with its name. Its
-streamed text is not shown:
+A [subagent](subagents.md)'s lines are indented one level deeper than the tool call that started it, and start with
+its name. A subagent of a subagent goes one level deeper again. A subagent's streamed text is not shown:
 
 ```text
   tool researcher(prompt="How does Redis evict keys?")
-  researcher started
-  [researcher turn 1] thinking
-    tool web_search(query="Redis eviction")
-    done 4.0KB
-  researcher done: stopped by finish (2 turns)
+    researcher started
+    [researcher turn 1] thinking
+      tool web_search(query="Redis eviction")
+      done 4.0KB
+    researcher done: stopped by finish (2 turns)
   done 612B
 ```
 

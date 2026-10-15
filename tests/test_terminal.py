@@ -40,7 +40,7 @@ def test_think_start_shows_turn_and_indent():
     terminal = Terminal(output=out)
     terminal.on_think_start(StubState(turn=1))
     terminal.on_think_start(StubState(turn=2, depth=1))
-    assert out.getvalue() == "[turn 1] thinking\n  [turn 2] thinking\n"
+    assert out.getvalue() == "[turn 1] thinking\n    [turn 2] thinking\n"
 
 
 def test_subagent_lines_carry_the_agent_name_and_are_indented_by_depth():
@@ -52,10 +52,10 @@ def test_subagent_lines_carry_the_agent_name_and_are_indented_by_depth():
     terminal.on_tool_start(kid, tool_call("web_search", query="q"))
     terminal.on_run_end(kid, None)
     assert out.getvalue() == (
-        "  researcher started\n"
-        "  [researcher turn 2] thinking\n"
-        '    tool web_search(query="q")\n'
-        "  researcher done: stopped by finish (2 turns)\n"
+        "    researcher started\n"
+        "    [researcher turn 2] thinking\n"
+        '      tool web_search(query="q")\n'
+        "    researcher done: stopped by finish (2 turns)\n"
     )
 
 
@@ -66,7 +66,7 @@ def test_a_subagent_without_a_name_is_shown_without_one():
     terminal.on_run_start(kid)
     terminal.on_think_start(kid)
     terminal.on_run_end(kid, None)
-    assert out.getvalue() == "    started\n    [turn 1] thinking\n    done: (1 turn)\n"
+    assert out.getvalue() == "        started\n        [turn 1] thinking\n        done: (1 turn)\n"
 
 
 def test_the_top_level_run_is_not_labelled_even_if_its_agent_has_a_name():
@@ -217,11 +217,11 @@ def test_context_lines_wait_for_their_own_states_next_header():
     terminal.on_context_change(alpha, ContextChange("compact", 121_000, 18_000))
     terminal.on_think_start(beta)
     terminal.on_run_end(beta, None)
-    assert out.getvalue() == "  [beta turn 1] thinking\n  beta done: (1 turn)\n"
+    assert out.getvalue() == "    [beta turn 1] thinking\n    beta done: (1 turn)\n"
     alpha.turn = 3
     terminal.on_think_start(alpha)
     assert out.getvalue().endswith(
-        "  [alpha turn 3] thinking\n    alpha context compacted: 121k → 18k tokens (cache rebuilds)\n"
+        "    [alpha turn 3] thinking\n      alpha context compacted: 121k → 18k tokens (cache rebuilds)\n"
     )
 
 
@@ -234,7 +234,7 @@ def test_context_lines_not_shown_by_a_think_are_flushed_by_the_same_states_run_e
     terminal.on_run_end(parent, None)
     terminal.on_run_end(kid, None)
     assert out.getvalue() == (
-        "done: (1 turn)\n    alpha tool results cleared: 900 → 300 tokens\n  alpha done: (1 turn)\n"
+        "done: (1 turn)\n      alpha tool results cleared: 900 → 300 tokens\n    alpha done: (1 turn)\n"
     )
 
 
@@ -347,6 +347,35 @@ def test_ask_returns_parsed_value():
     state = StubState(turn=1)
     assert terminal.ask(state, "Run it?", returns=bool) is True
     assert prompts == ["Run it? (yes/no) "]
+
+
+def test_ask_in_a_subagent_is_indented_like_its_other_lines():
+    prompts = []
+
+    def fake_input(p):
+        prompts.append(p)
+        return "yes"
+
+    terminal = Terminal(output=io.StringIO(), input=fake_input)
+    assert terminal.ask(StubState(depth=2), "Run it?", returns=bool) is True
+    assert prompts == ["        Run it? (yes/no) "]
+
+
+def test_a_grandchilds_lines_are_one_level_deeper_than_its_parents_tool_line():
+    out = io.StringIO()
+    terminal = Terminal(output=out)
+    child = StubState(turn=1, depth=1, agent_name="mid")
+    grandchild = StubState(turn=1, depth=2, agent_name="leaf")
+    terminal.on_tool_start(child, tool_call("leaf", prompt="x"))
+    terminal.on_run_start(grandchild)
+    terminal.on_think_start(grandchild)
+    terminal.on_tool_start(grandchild, tool_call("read_file", path="a"))
+    assert out.getvalue() == (
+        '      tool leaf(prompt="x")\n'
+        "        leaf started\n"
+        "        [leaf turn 1] thinking\n"
+        '          tool read_file(path="a")\n'
+    )
 
 
 def test_ask_reasks_on_invalid_answer():

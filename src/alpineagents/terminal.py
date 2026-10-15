@@ -72,6 +72,13 @@ def _agent_prefix(state: State) -> str:
     return f"{name} " if name else ""
 
 
+def _indent(depth: int) -> str:
+    """The indent of the lines of a run at ``depth``: four spaces per generation of subagent. The tool lines of a run
+    are indented two more (see ``on_tool_start``), so a subagent's lines sit one level under the line of the call that
+    started it."""
+    return "    " * depth
+
+
 def _turns(n: int) -> str:
     """``1 turn``, ``2 turns``."""
     return f"{n} turn" if n == 1 else f"{n} turns"
@@ -83,9 +90,9 @@ class Terminal(Reporter, Human):
 
     Output from several threads never interleaves, and while a question is being written, other output waits.
 
-    A subagent's lines are indented one level deeper per generation and start with its Agent's name, so its run
-    shows up under the tool call that started it. Only the structure lines of a subagent are shown, not its
-    streamed text (``show_text`` is for the top-level run).
+    A subagent's lines are indented one level deeper per generation (below the ``tool`` line of the call that started
+    it) and start with its Agent's name, so its run shows up under that call. Only the structure lines of a
+    subagent are shown, not its streamed text (``show_text`` is for the top-level run).
 
     Example output::
 
@@ -96,12 +103,12 @@ class Terminal(Reporter, Human):
         [turn 2] thinking
           context compacted: 121k → 18k tokens (cache rebuilds)
           tool researcher(prompt="How does Redis evict keys?")
-          researcher started
-          [researcher turn 1] thinking
-            tool web_search(query="Redis eviction")
-            done 4.0KB
-          [researcher turn 2] thinking
-          researcher done: stopped by finish (2 turns, ~$0.01)
+            researcher started
+            [researcher turn 1] thinking
+              tool web_search(query="Redis eviction")
+              done 4.0KB
+            [researcher turn 2] thinking
+            researcher done: stopped by finish (2 turns, ~$0.01)
           done 612B
         [turn 3] thinking
         done: stopped by waiting_for_user (3 turns, ~$0.42, cache hit 84%)
@@ -148,7 +155,7 @@ class Terminal(Reporter, Human):
             out = self._out()
             if not self._at_line_start:
                 out.write("\n")
-            out.write("  " * state._depth + text + "\n")
+            out.write(_indent(state._depth) + text + "\n")
             out.flush()
             self._at_line_start = True
 
@@ -162,7 +169,7 @@ class Terminal(Reporter, Human):
             for depth, text in pending:
                 if not self._at_line_start:
                     out.write("\n")
-                out.write("  " * depth + text + "\n")
+                out.write(_indent(depth) + text + "\n")
                 self._at_line_start = True
             out.flush()
 
@@ -177,8 +184,8 @@ class Terminal(Reporter, Human):
         """Writes ``[turn N] thinking``, with the Agent's name in a subagent's header:
         ``[researcher turn N] thinking``."""
         # Right after the header, flushes the lines deferred by on_context_change (if any), so a compaction line
-        # shows up under the new turn header. The indent is "  " * state._depth (the runtime depth: 0 for the
-        # top-level run, one more for each generation of subagent).
+        # shows up under the new turn header. The indent is four spaces per state._depth (the runtime depth: 0 for
+        # the top-level run, one more for each generation of subagent).
         name = _subagent_name(state)
         head = f"{name} turn" if name else "turn"
         with self._output_lock:  # the header and its context lines stay together
@@ -191,7 +198,7 @@ class Terminal(Reporter, Human):
         # subagents may stream at once, and their lines would mix with the parent's structure lines.
         if not self.show_text or not chunk or state._depth > 0:
             return
-        indent = "  " * state._depth
+        indent = _indent(state._depth)
         with self._output_lock:
             out = self._out()
             parts = chunk.split("\n")
@@ -314,14 +321,14 @@ class Terminal(Reporter, Human):
         # question is abandoned without an answer (e.g. the tool was interrupted with Ctrl+C), the last line from
         # on_run_end does not get stuck waiting on the lock too.
         #
-        # - Ends the current line first if mid-line. The question is indented by "  " * state._depth.
+        # - Ends the current line first if mid-line. The question is indented like the rest of that run's lines (_indent).
         # - If no input was given (builtins.input is used), we write the question ourselves to this Terminal's
         #   output: builtins.input always writes its prompt to the real sys.stdout, so with a different output=
         #   stream the question and the re-ask message would end up in different places. When input= is given,
         #   that function decides how to show the prompt (it gets the full text with describe_choices(returns)
         #   appended), so we leave it alone.
         # - If parse_answer(answer, returns) raises ValueError, writes its message on one line and asks again.
-        indent = "  " * state._depth
+        indent = _indent(state._depth)
         choices = describe_choices(returns)
         shown = f"{prompt} ({choices}) " if choices else f"{prompt} "
         full_prompt = indent + shown
