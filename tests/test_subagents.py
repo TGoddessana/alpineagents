@@ -2677,6 +2677,337 @@ def test_another_agent_called_on_a_state_inside_a_run_checks_with_its_own_permis
     assert results_of(state)[0].outcome is ToolOutcomeKind.DENIED
 
 
+# Another Agent that checks calls inside a subagent's run (a custom loop calling ``other.think(state)`` and
+# ``other.use_tools(state)``) is checked by the DenyPermission of the runs above first, then by its own list. Its
+# reporter, human and store stay its own.
+
+
+def lending_loop(other: Agent, ause: bool = False):
+    """A custom loop for a subagent: ``other`` thinks and runs the tools on the subagent's State."""
+    if ause:
+
+        async def aborrowing(agent: Agent, state: State):
+            await other.athink(state)
+            await other.ause_tools(state)
+            return state.answer
+
+        return aborrowing
+
+    def borrowing(agent: Agent, state: State):
+        other.think(state)
+        other.use_tools(state)
+        return state.answer
+
+    return borrowing
+
+
+def lender(other: Agent, **settings) -> Agent:
+    """A subagent, as an Agent in ``tools=``, whose loop lets ``other`` run the tools."""
+    return researcher_of(["unused"], loop=lending_loop(other), **settings)
+
+
+@pytest.mark.parametrize("own", [[AllowByDefault()], None], ids=["own list", "no list"])
+@pytest.mark.parametrize("sub_permissions", [None, [AllowByDefault()]], ids=["sub inherits", "sub has a list"])
+def test_another_agent_in_a_subagent_run_cannot_make_a_call_the_run_above_denies(own, sub_permissions):
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=own, reporter=None)
+    top = agent_of(
+        [ask_researcher(), "outer"],
+        tools=[lender(other, permissions=sub_permissions)],
+        permissions=[NO_PEEKING, AllowByDefault()],
+    )
+    parent = user_state()
+    assert top.run(parent) == "outer"
+    kid = kid_of(parent)
+    (entry,) = results_of(kid)
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+    assert_replays(parent)
+    assert_replays(kid)
+
+
+def test_decided_by_names_the_ancestor_permission_when_another_agent_was_denied():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    report = Outcomes()
+    other = other.copy(reporter=report)
+    top = agent_of([ask_researcher(), "outer"], tools=[lender(other)], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    top.run(parent)
+    kid = kid_of(parent)
+    assert results_of(kid)[0].outcome is ToolOutcomeKind.DENIED
+    # other's reporter, not the run's, hears about the call it made
+    assert report.of(kid) == [("peek", ToolOutcomeKind.DENIED, repr(NO_PEEKING))]
+
+
+def test_another_agent_in_a_subagent_run_still_makes_the_calls_nobody_above_denies():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], reporter=None, human=None)
+    top = agent_of(
+        [ask_researcher(), "outer"], tools=[lender(other)], permissions=[DenyByName(["rm"]), AllowByDefault()]
+    )
+    parent = user_state()
+    top.run(parent)
+    (entry,) = results_of(kid_of(parent))
+    assert entry.outcome is ToolOutcomeKind.DONE and entry.content == "peeked"
+
+
+def test_another_agent_keeps_its_own_denials_and_its_own_missing_allow_in_a_subagent_run():
+    other = Agent(
+        model=FakeModel([tool_call("peek"), "from other"]),
+        tools=[peek],
+        permissions=[AllowByName(["nothing"])],  # no opinion on peek: denied, as its own list would at the top
+        reporter=None,
+        human=None,
+    )
+    top = agent_of(
+        [ask_researcher(), "outer"], tools=[lender(other)], permissions=[DenyByName(["rm"]), AllowByDefault()]
+    )
+    parent = user_state()
+    with pytest.warns(PermissionWarning):
+        top.run(parent)
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DENIED
+
+
+def test_the_decide_and_allow_permissions_of_the_run_above_are_not_asked_for_another_agents_calls():
+    human = FakeHuman([])
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], reporter=None, human=None)
+    top = Agent(
+        model=FakeModel([ask_researcher(), "outer"]),
+        tools=[lender(other)],
+        permissions=[DenyByName(["rm"]), AllowByName(["researcher"]), DecideByHuman()],
+        reporter=None,
+        human=human,
+    )
+    parent = user_state()
+    top.run(parent)
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+    assert human.questions == []
+
+
+def test_another_agent_in_a_grandchild_run_is_checked_by_the_denials_of_every_run_above():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    leaf = researcher_of(["unused"], name="leaf", description="The leaf", loop=lending_loop(other))
+    middle = researcher_of(
+        [tool_call("leaf", prompt="go"), "mid answer"],
+        tools=[leaf],
+        permissions=[DenyByName(["rm"]), AllowByDefault()],  # a list of its own: the top's denials still come first
+    )
+    top = agent_of([ask_researcher(), "outer"], tools=[middle], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    top.run(parent)
+    middle_state = kid_of(parent)
+    leaf_state = kid_of(middle_state)
+    (entry,) = results_of(leaf_state)
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+    assert_replays(leaf_state)
+
+
+def test_the_denials_of_a_middle_run_reach_another_agent_in_its_subagent():
+    no_rm = DenyByName(["peek"], reason="the middle run says no")
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    leaf = researcher_of(["unused"], name="leaf", description="The leaf", loop=lending_loop(other))
+    middle = researcher_of(
+        [tool_call("leaf", prompt="go"), "mid answer"], tools=[leaf], permissions=[no_rm, AllowByDefault()]
+    )
+    top = agent_of([ask_researcher(), "outer"], tools=[middle], permissions=[AllowByDefault()])
+    parent = user_state()
+    top.run(parent)
+    (entry,) = results_of(kid_of(kid_of(parent)))
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "the middle run says no"
+
+
+def test_a_run_started_by_the_tool_of_another_agent_in_a_subagent_run_is_checked_by_the_denials_above_too():
+    leaf = researcher_of([tool_call("peek"), "leaf answer"], name="leaf", description="The leaf", tools=[peek])
+    other = Agent(
+        model=FakeModel([tool_call("leaf", prompt="go"), "from other"]),
+        tools=[leaf],
+        permissions=[AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    top = agent_of([ask_researcher(), "outer"], tools=[lender(other)], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    top.run(parent)
+    middle_state = kid_of(parent)
+    leaf_state = kid_of(middle_state)
+    assert results_of(middle_state)[0].outcome is ToolOutcomeKind.DONE  # the call to leaf is not denied
+    (entry,) = results_of(leaf_state)
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+
+
+def test_another_agent_in_a_tool_started_run_is_checked_too():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    inner = Agent(model=FakeModel(["unused"]), loop=lending_loop(other), reporter=None, human=None)
+
+    @tool
+    def delegate() -> str:
+        """Ask the helper"""
+        return inner.run("Inner task")
+
+    top = agent_of([tool_call("delegate"), "outer"], tools=[delegate], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    top.run(parent)
+    (entry,) = results_of(kid_of(parent))
+    assert entry.outcome is ToolOutcomeKind.DENIED
+
+
+async def test_another_agent_in_an_async_subagent_run_cannot_make_a_call_the_run_above_denies():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    helper = researcher_of(["unused"], loop=lending_loop(other, ause=True))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    assert await top.arun(parent) == "outer"
+    kid = kid_of(parent)
+    (entry,) = results_of(kid)
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+    assert_replays(kid)
+
+
+async def test_an_async_only_ancestor_denial_is_asked_with_acheck_for_another_agent_in_a_subagent_run():
+    class AsyncNoPeek(DenyPermission):
+        async def acheck(self, state, call, tool):
+            return Denied("no peeking, asynchronously") if call.name == "peek" else None
+
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    helper = researcher_of(["unused"], loop=lending_loop(other, ause=True))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[AsyncNoPeek(), AllowByDefault()])
+    parent = user_state()
+    await top.arun(parent)
+    (entry,) = results_of(kid_of(parent))
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking, asynchronously"
+
+
+def running_loop(other: Agent, seen: list[State], arun: bool = False):
+    """A custom loop for a subagent that starts a run of ``other`` (``seen`` gets the State of that run)."""
+    if arun:
+
+        async def arunning(agent: Agent, state: State):
+            inner = user_state()
+            seen.append(inner)
+            await other.arun(inner)
+            return state.answer
+
+        return arunning
+
+    def running(agent: Agent, state: State):
+        inner = user_state()
+        seen.append(inner)
+        other.run(inner)
+        return state.answer
+
+    return running
+
+
+@pytest.mark.parametrize("own", [[AllowByDefault()], None], ids=["own list", "no list"])
+def test_a_run_another_agent_starts_in_a_subagent_run_cannot_make_a_call_the_run_above_denies(own):
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=own, reporter=None)
+    seen: list[State] = []
+    helper = researcher_of(["unused"], loop=running_loop(other, seen))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    assert top.run(parent) == "outer"
+    (entry,) = results_of(seen[0])
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+    assert_replays(seen[0])
+
+
+async def test_an_async_run_another_agent_starts_in_a_subagent_run_cannot_make_a_call_the_run_above_denies():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    seen: list[State] = []
+    helper = researcher_of(["unused"], loop=running_loop(other, seen, arun=True))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[NO_PEEKING, AllowByDefault()])
+    await top.arun(user_state())
+    (entry,) = results_of(seen[0])
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+    assert_replays(seen[0])
+
+
+def test_a_run_another_agent_starts_in_a_grandchild_run_is_checked_by_the_denials_of_every_run_above():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    seen: list[State] = []
+    leaf = researcher_of(["unused"], name="leaf", description="The leaf", loop=running_loop(other, seen))
+    middle = researcher_of([tool_call("leaf", prompt="go"), "mid answer"], tools=[leaf], permissions=[AllowByDefault()])
+    top = agent_of([ask_researcher(), "outer"], tools=[middle], permissions=[NO_PEEKING, AllowByDefault()])
+    top.run(user_state())
+    (entry,) = results_of(seen[0])
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+
+
+def test_the_run_another_agent_starts_in_a_subagent_run_carries_the_denials_to_what_runs_in_it():
+    # Inside that run a third Agent checks calls too (its custom loop): the denials are still in front.
+    third = Agent(model=FakeModel([tool_call("peek"), "from third"]), tools=[peek], permissions=[AllowByDefault()])
+    inner_states: list[State] = []
+
+    def lend(agent: Agent, state: State):
+        third.think(state)
+        third.use_tools(state)
+        inner_states.append(state)
+        return state.answer
+
+    other = Agent(model=FakeModel(["unused"]), loop=lend, tools=[peek], permissions=[AllowByDefault()], reporter=None)
+    seen: list[State] = []
+    helper = researcher_of(["unused"], loop=running_loop(other, seen))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[NO_PEEKING, AllowByDefault()])
+    top.run(user_state())
+    (entry,) = results_of(inner_states[0])
+    assert entry.outcome is ToolOutcomeKind.DENIED and entry.content == "no peeking"
+
+
+def test_a_run_another_agent_starts_in_a_subagent_run_keeps_its_own_settings_when_nothing_above_denies():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=None, reporter=None)
+    seen: list[State] = []
+    helper = researcher_of(["unused"], loop=running_loop(other, seen))
+    top = agent_of([ask_researcher(), "outer"], tools=[helper], permissions=[DenyByName(["rm"]), AllowByDefault()])
+    top.run(user_state())
+    (entry,) = results_of(seen[0])
+    assert entry.outcome is ToolOutcomeKind.DONE and entry.content == "peeked"
+
+
+def test_a_run_another_agent_starts_in_the_custom_loop_of_a_top_level_run_is_unchanged():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=None, reporter=None)
+    seen: list[State] = []
+    agent = Agent(
+        model=FakeModel(["x"]),
+        tools=[peek],
+        loop=running_loop(other, seen),
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    agent.run(user_state())
+    assert results_of(seen[0])[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_another_agent_at_the_top_level_still_checks_with_its_own_list_only():
+    # Nothing is above the run, so nothing is added: the denial of the run's own list does not reach another Agent.
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=None, reporter=None)
+    agent = Agent(
+        model=FakeModel(["x"]),
+        tools=[peek],
+        loop=lending_loop(other),
+        permissions=[NO_PEEKING, AllowByDefault()],
+        reporter=None,
+        human=None,
+    )
+    state = user_state()
+    agent.run(state)
+    assert results_of(state)[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_another_agent_in_a_subagent_run_with_no_checks_above_has_none_either():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], reporter=None, human=None)
+    top = agent_of([ask_researcher(), "outer"], tools=[lender(other)])  # no permissions anywhere
+    parent = user_state()
+    top.run(parent)
+    assert results_of(kid_of(parent))[0].outcome is ToolOutcomeKind.DONE
+
+
+def test_the_run_above_still_ends_normally_after_another_agent_was_denied_in_its_subagent():
+    other = Agent(model=FakeModel([tool_call("peek"), "from other"]), tools=[peek], permissions=[AllowByDefault()])
+    top = agent_of([ask_researcher(), "outer"], tools=[lender(other)], permissions=[NO_PEEKING, AllowByDefault()])
+    parent = user_state()
+    assert top.run(parent) == "outer"
+    assert results_of(parent)[0].outcome is ToolOutcomeKind.DONE
+    assert_replays(parent)
+
+
 def test_permissions_of_the_agent_still_show_its_own_list_only():
     helper = kid_agent(["inner"])
     agent = Agent(

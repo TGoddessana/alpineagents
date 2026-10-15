@@ -53,6 +53,10 @@ All notable changes to alpineagents are listed here. The format follows
   `TypeError` for an async-only permission, store or human in a sync run) is raised and stops the run above, as the
   exception of any tool does. It is no longer turned into `(researcher failed: ...)`. Only an exception after the
   subagent started becomes that result.
+- Inside a subagent's run, when another Agent runs tools on its State (`other.use_tools(state)` in a custom loop) or
+  starts a run there (`other.run(...)`), the `DenyPermission`s of the runs above are asked first, then the other
+  Agent's own list, so a call the run above denies cannot be made through another Agent. Outside a subagent's run
+  another Agent still uses its own list only.
 - Stored format version 5. A State saved in format 4 loads as before, and is saved on as format 5.
 
 ### Removed

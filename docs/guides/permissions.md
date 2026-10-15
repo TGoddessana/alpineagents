@@ -195,6 +195,9 @@ So:
   `human` about a call the editor makes. A `DecideByHuman()` in the subagent's own list asks the subagent's `human`,
   which is the lead's when the subagent has none of its own
   ([Subagents](../concepts/subagents.md#what-a-subagent-takes-from-the-run-above)).
+- **A `DenyPermission` above also binds other Agents that run tools inside a subagent.** If a subagent's custom loop
+  calls `other.use_tools(state)` or `other.run(...)`, the denials of the runs above the subagent are asked first, then
+  `other`'s own list. `other` cannot be used to get around them.
 - `outcome.decided_by` in the Reporter names the permission that decided, wherever it was written.
 - The checks before the run starts apply to the inherited list too: a `DecideByHuman()` with no person to ask, or an
   async-only permission under a sync `run`, raises before the first request.

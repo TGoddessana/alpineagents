@@ -543,6 +543,10 @@ class _RunContext:
     """The permissions asked about every tool call of the run, each with the Human of the Agent that wrote it. For a
     subagent: the ``DenyPermission`` of the runs above, then its own list, or the whole list of the run that started
     it when it has none (``permissions._effective``). ``None``: no checks."""
+    ancestor_denials: tuple[_Owned, ...] = ()
+    """The ``DenyPermission`` of the runs above this one (top run first): empty for a run that is not a subagent. Any
+    other Agent that checks calls inside this run (``other.use_tools(state)`` in a custom loop) is checked by these
+    before its own list."""
 
 
 @dataclass
