@@ -148,12 +148,17 @@ For an Agent in `tools=`, the result is `run`'s return value, converted as any t
 | Hands the turn back, or `state.finish(answer)`, or a custom loop returns | The answer | `done` |
 | Reaches its loop's `limit` | The answer, then a line `(researcher stopped after 30 turns before finishing)` | `done` |
 | A permission denies a call with `stop=True` | `(researcher was stopped by the user: reason)` | `done` |
-| An `Exception` leaves its run | `(researcher failed: TimeoutError: took too long)` | `error` |
+| An `Exception` leaves its run after it started | `(researcher failed: TimeoutError: took too long)` | `error` |
+| An `Exception` from the checks before the run starts | Nothing: it stops the parent's run | `aborted` |
 | `KeyboardInterrupt`, cancellation (`BaseException`) | `(interrupted by user)`, and the parent's run stops too | `interrupted` |
 
 - The permission stop is `done`, because the call did run: `denied` means a call that did not run.
 - The exception becomes an error result like a `ToolError`: the entry's `error` holds it and its `__cause__` the
   original exception, and the subagent's own history has the details.
+- The checks before the run starts (`NoHumanError` for a `DecideByHuman()` with nobody to ask, `TypeError` for an
+  async-only permission, store or human in a sync run, an invalid State) are a mistake in the setup, not something that
+  happened to the subagent. Their exception is not turned into a result: it propagates as the exception of any tool
+  does, and the parent's run stops with it. The subagent never started, so `child_ids` is `()`.
 - `state.finish(answer)` in the subagent ends only the subagent. The parent goes on.
 - To tell these apart in code, read the call's `outcome` and `state.child(child_id).stopped`, which is
   `StoppedByLimit`, `StoppedByPermission` and so on.
@@ -161,6 +166,13 @@ For an Agent in `tools=`, the result is `run`'s return value, converted as any t
 A `@tool` that runs an Agent itself gets none of these conversions. What it returns is converted as usual, and an
 exception follows the [rules of tools](tools.md#when-a-call-goes-wrong): a `ToolError` is an error result, anything
 else stops the run. The links, permissions, human, reporter and usage work the same.
+
+### Known limit: Ctrl+C in a sync run
+
+In a sync run, a subagent runs in a worker thread, and a thread cannot be stopped from outside. Ctrl+C stops the
+parent's run and its call ends `interrupted`, but a subagent that is still running keeps going until it ends. Its
+result and usage are then recorded once, as a `late` result of the call (see [Usage](#usage)). Use `arun`: cancelling
+the task of the parent cancels its subagents with it.
 
 ## Usage
 

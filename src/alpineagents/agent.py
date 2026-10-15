@@ -35,6 +35,7 @@ from .types import (
     Message,
     ModelEvent,
     Request,
+    RunStartEntry,
     StoppedByLimit,
     StoppedByPermission,
     TextBlock,
@@ -130,6 +131,14 @@ _SUBAGENT_PROMPT = (
 )
 
 
+def _started(child: State) -> bool:
+    """Whether the run of ``child`` got as far as starting. ``run``/``arun`` record a ``RunStartEntry`` in the State
+    when they start it, after the checks they make before that (no human for a ``DecideByHuman``, a permission or
+    store that only works asynchronously in a sync run, an invalid State): an exception without one is a mistake in
+    the setup that stopped the run before it began, not something that happened to the subagent."""
+    return any(isinstance(entry, RunStartEntry) for entry in child.history)
+
+
 class _AgentTool(Tool):
     """The tool an Agent in ``tools=`` becomes: the model calls it with a ``prompt``, and a new State that starts from
     that prompt alone is run by the Agent, as ``agent.run(prompt)`` would. A run started inside a tool call is a
@@ -141,11 +150,19 @@ class _AgentTool(Tool):
 
     - the loop stopped at its ``limit``: the value and ``(NAME stopped after N turns before finishing)``
     - a permission denied a call of the subagent with ``stop=True``: ``(NAME was stopped by the user: REASON)``
-    - an ``Exception`` left the run: ``(NAME failed: TYPE: MESSAGE)``, as a ``ToolError`` (outcome ``ERROR``) whose
-      ``__cause__`` is the exception, as ``@tool(exception_handler=...)`` makes one
+    - an ``Exception`` left the run after it started: ``(NAME failed: TYPE: MESSAGE)``, as a ``ToolError`` (outcome
+      ``ERROR``) whose ``__cause__`` is the exception, as ``@tool(exception_handler=...)`` makes one
+    - an exception from the checks ``run``/``arun`` make before the run starts (``NoHumanError`` for a
+      ``DecideByHuman`` with no human to ask, ``TypeError`` for a permission, store or human that only works
+      asynchronously in a sync run, ...) is not turned into a result: it is a mistake in the setup, so it propagates
+      like the exception of any tool and stops the run above
     - a ``BaseException`` (Ctrl+C, task cancellation) is not turned into a result: it stops the run above too
 
     A ``@tool`` that calls ``agent.run()`` itself gets none of these: its exceptions follow the rules of any tool.
+
+    Known limit: in a sync run, Ctrl+C stops the run above (the call ends ``INTERRUPTED``), but the subagent runs in a
+    worker thread that cannot be stopped, so it keeps going until it ends. Its result and usage are recorded once, as
+    a late result of the call. Use ``arun`` to cancel the subagents together with the run above.
     """
 
     def __init__(self, agent: Agent) -> None:
@@ -200,12 +217,16 @@ class _AgentTool(Tool):
         try:
             return self._result(child, self.agent.run(child))
         except Exception as error:
+            if not _started(child):
+                raise
             raise self._failed(error) from error
 
     async def _arun(self, child: State) -> Any:
         try:
             return self._result(child, await self.agent.arun(child))
         except Exception as error:
+            if not _started(child):
+                raise
             raise self._failed(error) from error
 
     def _failed(self, error: Exception) -> ToolError:
@@ -278,7 +299,11 @@ class Agent:
                 ``name`` and a ``description`` becomes a subagent: the model sees a tool of that name and
                 description that takes a ``prompt``, and calling it runs that Agent on the prompt alone. The
                 model gets the Agent's answer, with a note when it stopped at its limit or by a permission, or
-                ``(NAME failed: ...)`` when it raised an exception.
+                ``(NAME failed: ...)`` when it raised an exception after it started. A mistake found before the
+                subagent starts (``NoHumanError``, a ``TypeError`` for something async-only in a sync run) is
+                raised instead and stops the run. In a sync run, Ctrl+C stops the run but not a subagent that is
+                running in a worker thread: it goes on until it ends and its result is recorded as a late result.
+                Use ``arun`` to cancel subagents together with the run.
             skills: Not implemented yet. A non-empty value raises ``NotImplementedError``.
             loop: The loop ``run`` calls with ``(agent, state)``. Defaults to ``default_loop``.
             reporter: Receives progress notifications. Defaults to the shared ``Terminal``. ``None`` is silent. An
